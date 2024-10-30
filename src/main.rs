@@ -68,7 +68,16 @@ enum DhtMessageType {
     // return compact node info OR k closest good nodes in its own routing table
     FindNode,
     // q = "get_peers", id = source, info_hash = basically key id
+    // If queried node has the val, return in "values" list
+    // Else return "nodes" list with K nodes closest to infohash.
+    // "token" short binary string included in return value TODO: what is this for?
+    // format:
+    // arguments:  {"id" : "<querying nodes id>", "info_hash" : "<20-byte infohash of target torrent>"}
+    // response: {"id" : "<queried nodes id>", "token" :"<opaque write token>", "values" : ["<peer 1 info string>", "<peer 2 info string>"]}
+    // or: {"id" : "<queried nodes id>", "token" :"<opaque write token>", "nodes" : "<compact node info>"}
     GetPeers,
+    // q = "announce_peer", id = source, info_hash = key, port = udp port, token = received in response to previous get_peers query
+    // response: {"id" : "<queried nodes id>"}
     AnnouncePeer,
 }
 
