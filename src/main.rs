@@ -1,12 +1,19 @@
+use bendy::decoding::FromBencode;
+use bendy::encoding::{Error, ToBencode};
+use std::collections::HashMap;
+use std::env;
+use std::net::Ipv4Addr;
+use tokio::net::UdpSocket;
+
 const K: u32 = 8;
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 struct Node {
     id: u32,
-    // udp_port: u8,
-    // ip:
-    is_good: bool, // responded to our query or requested a query within past 15 min,
+    ip: Ipv4Addr,
+    port: u16,
+    // is_good: bool, // responded to our query or requested a query within past 15 min,
 }
 
 // infohash of torrent = key id
@@ -30,6 +37,12 @@ struct Node {
 //      -> find_nodes to closer and closer nodes until it cannot find closer
 //      -> routing table should be saved between invocations of the client software
 struct RoutingTable {}
+
+impl RoutingTable {
+    fn new() {}
+
+    fn upsert_node(node: &Node) {}
+}
 
 // KRPC - Bencoded dictionaries sent over UDP without retries
 // dictionary with 3 keys common in all msgs and additional keys if needed
@@ -81,12 +94,42 @@ enum DhtMessageType {
     AnnouncePeer,
 }
 
-impl RoutingTable {
-    fn new() {}
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = env::args().collect();
+    let port: u16 = match args[1].parse() {
+        Ok(port) => port,
+        Err(_) => {
+            eprintln!("Error: Invalid port number");
+            return;
+        }
+    };
 
-    fn upsert_node(node: &Node) {}
-}
+    let socket = UdpSocket::bind(format!("127.0.0.1:{port}")).await.unwrap();
 
-fn main() {
-    return;
+    loop {
+        let mut buf = [0; 2048];
+        let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
+
+        // TODO: tokio::spawn here
+        let mut bencode_dict = HashMap::<String, String>::from_bencode(&buf[..len]).unwrap();
+        println!("Received {:#?}", bencode_dict);
+
+        let command_type = bencode_dict.get("q").unwrap();
+
+        match command_type.as_str() {
+            "ping" => {
+                bencode_dict.insert("id".into(), "server".into());
+
+                socket
+                    .send_to(&bencode_dict.to_bencode().unwrap(), addr)
+                    .await
+                    .unwrap();
+            }
+            "find_node" => {}
+            "get_peers" => {}
+            "announce_peer" => {}
+            _ => {}
+        };
+    }
 }
