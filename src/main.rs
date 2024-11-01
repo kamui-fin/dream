@@ -1,8 +1,8 @@
-use bendy::decoding::FromBencode;
-use bendy::encoding::{Error, ToBencode};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
 const K: u32 = 8;
@@ -42,6 +42,31 @@ impl RoutingTable {
     fn new() {}
 
     fn upsert_node(node: &Node) {}
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct KrpcRequest {
+    t: String,
+    y: String,
+
+    q: String,
+    a: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct KrpcSuccessResponse {
+    t: String,
+    y: String,
+
+    r: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct KrpcErrorResponse {
+    t: String,
+    y: String,
+
+    e: (u8, String),
 }
 
 // KRPC - Bencoded dictionaries sent over UDP without retries
@@ -94,6 +119,56 @@ enum DhtMessageType {
     AnnouncePeer,
 }
 
+fn gen_trans_id() -> String {
+    let mut rng = rand::thread_rng();
+    let trans_id: u16 = rng.gen();
+    format!("{:02x}", trans_id)
+}
+
+async fn handle_krpc_call(socket: &UdpSocket, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+    let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
+    println!("Received {:#?} from {}", query, addr.to_string());
+
+    match query.q.as_str() {
+        "ping" => {
+            let mut return_values = HashMap::new();
+            return_values.insert("id".into(), "server".into());
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        "find_node" => {}
+        "get_peers" => {}
+        "announce_peer" => {}
+        _ => {}
+    };
+}
+
+async fn send_ping(socket: &UdpSocket, addr: &str) {
+    let mut arguments = HashMap::new();
+    arguments.insert("id".into(), "client".into());
+
+    let ping_query = KrpcRequest {
+        t: gen_trans_id(),
+        y: "q".into(),
+        q: "ping".into(),
+        a: arguments,
+    };
+    let ping_query = serde_bencode::to_bytes(&ping_query).unwrap();
+    socket.send_to(&ping_query, addr).await.unwrap();
+
+    let mut buf = [0; 2048];
+    let (amt, src) = socket.recv_from(&mut buf).await.unwrap();
+
+    let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
+    println!("Received {:#?} from {}", response, src);
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -105,31 +180,18 @@ async fn main() {
         }
     };
 
+    let is_testing: bool = args.len() >= 3 && args[2] == "-t";
+
     let socket = UdpSocket::bind(format!("127.0.0.1:{port}")).await.unwrap();
+    println!("Listening on port {port}...");
+
+    if is_testing {
+        send_ping(&socket, "127.0.0.1:8080").await;
+    }
 
     loop {
         let mut buf = [0; 2048];
         let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
-
-        // TODO: tokio::spawn here
-        let mut bencode_dict = HashMap::<String, String>::from_bencode(&buf[..len]).unwrap();
-        println!("Received {:#?}", bencode_dict);
-
-        let command_type = bencode_dict.get("q").unwrap();
-
-        match command_type.as_str() {
-            "ping" => {
-                bencode_dict.insert("id".into(), "server".into());
-
-                socket
-                    .send_to(&bencode_dict.to_bencode().unwrap(), addr)
-                    .await
-                    .unwrap();
-            }
-            "find_node" => {}
-            "get_peers" => {}
-            "announce_peer" => {}
-            _ => {}
-        };
+        handle_krpc_call(&socket, &buf, len, addr).await;
     }
 }
