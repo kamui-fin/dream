@@ -1,17 +1,27 @@
+use clap::Parser;
+
+use local_ip_address::local_ip;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::env;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
-const K: u32 = 8;
+// Number of bits for our IDs
+const NUM_BITS: u32 = 6;
+// Max number of entries in K-bucket
+const K: u32 = 4;
+// Max concurrent requests
+const M: u32 = 3;
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
+#[derive(Debug)]
 struct Node {
     id: u32,
-    ip: Ipv4Addr,
+    ip: IpAddr,
     port: u16,
     // is_good: bool, // responded to our query or requested a query within past 15 min,
 }
@@ -24,19 +34,20 @@ struct Node {
 // -> and nodes from old bucket and distributed among two new ones
 // for new table with 1 bucket, the full bucket is always split into two new buckets covering ranges 0..2^159 and 2^159..2^160
 // if any nodes are **known** to be bad, it gets replaced by new node
+//
 // if questionable nodes not seen in the last 15 min, least recently seen is pinged
 // -> until one fails to respond or all nodes are good
 // -> but if fails to respond, try once more before discarding node and replacing with new good node
+//
 // need a "last changed" property for each bucket to indicate freshness
 // -> when node is pinged and responds, when node is added to bucket, when node in a bucket is replaced with another node
 //    -> the bucket last changed property should b e refreshed
 //    -> by picking random id in the range of the bucket and run find_nodes
 //    -> nodes that are able to receive queries from other nodes dno't need to refresh buckets often
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
-//  when inserting first node, it should attempt to find the closest nodes in the dht to itself
-//      -> find_nodes to closer and closer nodes until it cannot find closer
-//      -> routing table should be saved between invocations of the client software
-struct RoutingTable {}
+struct RoutingTable {
+    // hashmap of linked lists
+}
 
 impl RoutingTable {
     fn new() {}
@@ -169,24 +180,53 @@ async fn send_ping(socket: &UdpSocket, addr: &str) {
     println!("Received {:#?} from {}", response, src);
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    port: u16,
+
+    #[arg(short = 't', long = "test")]
+    is_testing: bool,
+
+    #[arg(long)]
+    bootstrap: Option<String>,
+
+    #[arg(long)]
+    id: Option<u32>,
+}
+
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().collect();
-    let port: u16 = match args[1].parse() {
-        Ok(port) => port,
-        Err(_) => {
-            eprintln!("Error: Invalid port number");
-            return;
-        }
+    let args = Args::parse();
+    // assign random id for our node if not passed in
+    let id = args.id.unwrap_or_else(|| {
+        // wait could we just hash our IP???
+        let mut rng = rand::thread_rng();
+        rng.gen_range(0..64)
+    });
+    let ip = local_ip().unwrap();
+
+    let our_node = Node {
+        id,
+        ip,
+        port: args.port,
     };
 
-    let is_testing: bool = args.len() >= 3 && args[2] == "-t";
+    let socket = UdpSocket::bind(format!("127.0.0.1:{}", args.port))
+        .await
+        .unwrap();
+    println!("Started DHT node on {:#?}", our_node);
 
-    let socket = UdpSocket::bind(format!("127.0.0.1:{port}")).await.unwrap();
-    println!("Listening on port {port}...");
-
-    if is_testing {
+    if args.is_testing {
         send_ping(&socket, "127.0.0.1:8080").await;
+    }
+
+    if let Some(bootstrap) = args.bootstrap {
+        // 1. initialize k-bucket with another known node
+        // 2. run find_nodes on itself to fill k-bucket table
+        // 3. refresh k-buckets farther than bootstrap node with find_node on random key within range
+    } else {
     }
 
     loop {
