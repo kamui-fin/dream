@@ -1,20 +1,20 @@
 use clap::Parser;
-
 use local_ip_address::local_ip;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::collections::HashMap;
+use std::collections::LinkedList;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
 // Number of bits for our IDs
-const NUM_BITS: u32 = 6;
+const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
-const K: u32 = 4;
+const K: usize = 4;
 // Max concurrent requests
-const M: u32 = 3;
+const M: usize = 3;
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
@@ -24,6 +24,23 @@ struct Node {
     ip: IpAddr,
     port: u16,
     // is_good: bool, // responded to our query or requested a query within past 15 min,
+}
+
+impl Node {
+    fn get_compact_format(&self) -> String {
+        let mut compact_info = [0u8; 7];
+        compact_info[0] = self.id as u8;
+
+        if let IpAddr::V4(v4_addr) = self.ip {
+            let ip = v4_addr.to_bits().to_le_bytes();
+            compact_info[1..5].copy_from_slice(&ip);
+        }
+
+        let port = self.port.to_le_bytes();
+        compact_info[5..7].copy_from_slice(&port);
+
+        format!("{:?}", compact_info)
+    }
 }
 
 // infohash of torrent = key id
@@ -46,13 +63,103 @@ struct Node {
 //    -> nodes that are able to receive queries from other nodes dno't need to refresh buckets often
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
 struct RoutingTable {
-    // hashmap of linked lists
+    my_id: u32,
+    // array of linked lists with NUM_BITS elements
+    buckets: Vec<LinkedList<Node>>,
+}
+
+struct PeerStore {}
+
+impl PeerStore {
+    fn new() -> Self {
+        Self {
+            store: HashMap::new(),
+        }
+    }
 }
 
 impl RoutingTable {
-    fn new() {}
+    fn new(my_id: u32) -> Self {
+        Self {
+            my_id,
+            buckets: Vec::with_capacity(NUM_BITS),
+        }
+    }
 
-    fn upsert_node(node: &Node) {}
+    fn find_bucket_idx(&self, node_id: u32) -> u32 {
+        let xor_result = node_id ^ self.my_id;
+        return xor_result.leading_zeros() - ((32 - NUM_BITS) as u32);
+    }
+
+    fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
+        for node in self.buckets[bucket_idx].iter() {
+            if (node.id == node_id) {
+                return Some(node);
+            }
+        }
+
+        return None;
+    }
+
+    fn find_node(&self, node_id: u32, bucket_idx: usize) -> Option<usize> {
+        let mut index = 0;
+
+        for node in self.buckets[bucket_idx].iter() {
+            if node.id == node_id {
+                return Some(index + 1);
+            } else {
+                index = index + 1;
+            }
+        }
+
+        return None;
+    }
+
+    fn remove_node(&mut self, node_id: u32, bucket_idx: usize) {
+        let mut new_list: LinkedList<Node> = LinkedList::new();
+
+        while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
+            if ((curr_front).id != node_id) {
+                new_list.push_back(curr_front);
+                self.buckets[bucket_idx].pop_front();
+            }
+        }
+
+        self.buckets[bucket_idx] = new_list;
+    }
+
+    fn upsert_node(&mut self, node: Node) {
+        let bucket_idx = self.find_bucket_idx(node.id) as usize;
+        let already_exists = self.node_in_bucket(bucket_idx, node.id).is_none();
+        let is_full = self.buckets[bucket_idx].len() >= K as usize;
+
+        if (already_exists && !is_full) {
+            self.remove_node(node.id, bucket_idx);
+            self.buckets[bucket_idx].push_back(node);
+        } else if (already_exists) {
+            // ping front of list and go from there
+        } else {
+            self.buckets[bucket_idx].push_back(node);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+
+    #[test]
+    fn test_bucket_finder() {
+        let rt = RoutingTable::new(0);
+        assert_eq!(rt.find_bucket_idx(0b001101), 2);
+        assert_eq!(rt.find_bucket_idx(0b000001), 5);
+    }
+
+    #[test]
+    fn test_compact_addr() {
+        // TODO:
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -136,14 +243,21 @@ fn gen_trans_id() -> String {
     format!("{:02x}", trans_id)
 }
 
-async fn handle_krpc_call(socket: &UdpSocket, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+async fn handle_krpc_call(
+    routing_table: &mut RoutingTable,
+    peer_store: &mut HashMap<String, Vec<Node>>,
+    socket: &UdpSocket,
+    buf: &[u8; 2048],
+    len: usize,
+    addr: SocketAddr,
+) {
     let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
     println!("Received {:#?} from {}", query, addr.to_string());
 
     match query.q.as_str() {
         "ping" => {
             let mut return_values = HashMap::new();
-            return_values.insert("id".into(), "server".into());
+            return_values.insert("id".into(), routing_table.my_id.to_string());
 
             let response = KrpcSuccessResponse {
                 y: "r".into(),
@@ -153,8 +267,65 @@ async fn handle_krpc_call(socket: &UdpSocket, buf: &[u8; 2048], len: usize, addr
             let response = serde_bencode::to_bytes(&response).unwrap();
             socket.send_to(&response, addr).await.unwrap();
         }
-        "find_node" => {}
-        "get_peers" => {}
+        "find_node" => {
+            let mut k_closest_nodes = vec![];
+
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            let target_node_id = query.a.get("target").unwrap().parse().unwrap();
+
+            // 1. update source_id into routing table
+            routing_table.upsert_node(source_node);
+            // 2. find the initial k-bucket
+            let mut bucket_idx = routing_table.find_bucket_idx(target_node_id);
+            // 2.5. Check if the exact match is already there
+            if let Some(exact_node) =
+                routing_table.node_in_bucket(bucket_idx as usize, target_node_id)
+            {
+                // {"t":"aa", "y":"r", "r": {"id":"0123456789abcdefghij", "nodes": "def456..."}}
+                k_closest_nodes.push(exact_node.get_compact_format())
+            } else {
+                // 3. if not enough, move on to i + 1 bucket and wrap around if needed
+                let original_bucket = bucket_idx;
+                loop {
+                    // append new list of bucket+i
+                    for node in routing_table.buckets[bucket_idx as usize].iter() {
+                        k_closest_nodes.push(node.get_compact_format());
+                    }
+
+                    bucket_idx += 1;
+                    bucket_idx %= 160;
+
+                    if bucket_idx == original_bucket {
+                        break;
+                    }
+                }
+                // 4. collect the k elements and return
+                if k_closest_nodes.len() >= K {
+                    k_closest_nodes.truncate(K);
+                }
+            }
+
+            let compact_node_info = k_closest_nodes.concat();
+            let mut return_values = HashMap::new();
+            return_values.insert("id".into(), routing_table.my_id.to_string());
+            return_values.insert("nodes".into(), compact_node_info);
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        "get_peers" => {
+
+        }
         "announce_peer" => {}
         _ => {}
     };
@@ -218,6 +389,9 @@ async fn main() {
         .unwrap();
     println!("Started DHT node on {:#?}", our_node);
 
+    let mut routing_table = RoutingTable::new(id);
+    let mut peer_store: HashMap<String, Vec<Node>> = HashMap::new();
+
     if args.is_testing {
         send_ping(&socket, "127.0.0.1:8080").await;
     }
@@ -232,6 +406,14 @@ async fn main() {
     loop {
         let mut buf = [0; 2048];
         let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
-        handle_krpc_call(&socket, &buf, len, addr).await;
+        handle_krpc_call(
+            &mut routing_table,
+            &mut peer_store,
+            &socket,
+            &buf,
+            len,
+            addr,
+        )
+        .await;
     }
 }
