@@ -255,8 +255,8 @@ enum DhtMessageType {
 }
 
 async fn handle_krpc_call(
-    routing_table: &mut RoutingTable,
-    peer_store: &mut HashMap<String, Vec<Node>>,
+    routing_table: &Arc<Mutex<RoutingTable>>,
+    peer_store: &Arc<Mutex<HashMap<String, Vec<Node>>>>,
     socket: &UdpSocket,
     buf: &[u8; 2048],
     len: usize,
@@ -267,6 +267,7 @@ async fn handle_krpc_call(
 
     match query.q.as_str() {
         "ping" => {
+            let routing_table = routing_table.lock().unwrap();    
             let mut return_values = HashMap::new();
             return_values.insert("id".into(), routing_table.my_node.id.to_string());
 
@@ -285,9 +286,8 @@ async fn handle_krpc_call(
                 ip: addr.ip(),
                 port: addr.port(),
             };
-            routing_table.upsert_node(source_node);
+            routing_table.lock().unwrap().upsert_node(source_node);
             let target_node_id = query.a.get("target").unwrap().parse().unwrap();
-
             let k_closest_nodes = get_nodes(routing_table, target_node_id);
             let compact_node_info = k_closest_nodes
                 .iter()
@@ -296,7 +296,7 @@ async fn handle_krpc_call(
                 .concat();
 
             let mut return_values = HashMap::new();
-            return_values.insert("id".into(), routing_table.my_node.id.to_string());
+            return_values.insert("id".into(), routing_table.lock().unwrap().my_node.id.to_string());
             return_values.insert("nodes".into(), compact_node_info);
 
             let response = KrpcSuccessResponse {
@@ -314,14 +314,15 @@ async fn handle_krpc_call(
                 ip: addr.ip(),
                 port: addr.port(),
             };
-            routing_table.upsert_node(source_node);
+            routing_table.lock().unwrap().upsert_node(source_node);
 
             let info_hash = query.a.get("info_hash").unwrap();
-            let peers = peer_store.get(info_hash);
 
             let mut return_values = HashMap::new();
-            return_values.insert("id".into(), routing_table.my_node.id.to_string());
+            return_values.insert("id".into(), routing_table.lock().unwrap().my_node.id.to_string());
 
+            let peer_store_guard = peer_store.lock().unwrap();
+            let peers = peer_store_guard.get(info_hash);
             if let Some(peers) = peers {
                 // values
                 let values = peers
@@ -332,7 +333,7 @@ async fn handle_krpc_call(
                 return_values.insert("values".into(), values); // this won't work rn
             } else {
                 // nodes
-                let k_closest_nodes = get_nodes(routing_table, info_hash.parse().unwrap());
+                let k_closest_nodes = get_nodes(&routing_table, info_hash.parse().unwrap());
                 let compact_node_info = k_closest_nodes
                     .iter()
                     .map(|node| node.get_node_compact_format())
@@ -347,7 +348,7 @@ async fn handle_krpc_call(
             if let IpAddr::V4(v4addr) = addr.ip() {
                 hasher.update(v4addr.octets());
             }
-            hasher.update(*routing_table.secret.lock().unwrap());
+            hasher.update(*routing_table.lock().unwrap().secret.lock().unwrap());
             let token = format!("{:x}", hasher.finalize());
 
             return_values.insert("token".into(), token);
@@ -361,10 +362,8 @@ async fn handle_krpc_call(
             socket.send_to(&response, addr).await.unwrap();
         }
         "announce_peer" => {
-            let querying_ip = query.a.get("id").unwrap();
             let info_hash = query.a.get("info_hash").unwrap();
             let port = query.a.get("port").unwrap();
-            let is_implied = query.a.get("implied_port").unwrap();
             let token = query.a.get("token").unwrap();
 
             let source_id = query.a.get("id").unwrap().parse().unwrap();
@@ -373,13 +372,13 @@ async fn handle_krpc_call(
                 ip: addr.ip(),
                 port: addr.port(),
             };
-            routing_table.upsert_node(source_node);
+            routing_table.lock().unwrap().upsert_node(source_node.clone());
 
             let mut hasher = Sha1::new();
             if let IpAddr::V4(querying_ip) = addr.ip() {
                 hasher.update(querying_ip.octets());
             }
-            hasher.update(*routing_table.secret.lock().unwrap());
+            hasher.update(*routing_table.lock().unwrap().secret.lock().unwrap());
 
             let target_token = format!("{:x}", hasher.finalize());
 
@@ -387,8 +386,10 @@ async fn handle_krpc_call(
                 // send failure message
             }
 
+            peer_store.lock().unwrap().entry(info_hash.clone()).or_insert_with(Vec::<Node>::new).push(source_node);
+            
             let mut return_values: HashMap<String, String> = HashMap::new();
-            return_values.insert("id".to_string(), routing_table.my_node.ip.to_string());
+            return_values.insert("id".to_string(), routing_table.lock().unwrap().my_node.ip.to_string());
 
             let response = KrpcSuccessResponse {
                 y: "r".into(),
@@ -403,8 +404,8 @@ async fn handle_krpc_call(
     }
 }
 
-fn get_nodes(routing_table: &mut RoutingTable, target_node_id: u32) -> Vec<Node> {
-    let mut nodes = routing_table.get_all_nodes();
+fn get_nodes(routing_table: &Arc<Mutex<RoutingTable>>, target_node_id: u32) -> Vec<Node> {
+    let mut nodes = routing_table.lock().unwrap().get_all_nodes();
     nodes.sort_by_key(|node| node.id ^ target_node_id);
     nodes.truncate(K);
 
@@ -415,6 +416,24 @@ fn get_nodes(routing_table: &mut RoutingTable, target_node_id: u32) -> Vec<Node>
     }
 
     nodes
+}
+
+fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node>{
+    let mut nodes = Vec::new();
+
+    let bytes = serialized_nodes.unwrap().as_bytes();
+
+    for curr_chunk in bytes.chunks(7){
+        if curr_chunk.len() == 7 {
+            let id = curr_chunk[0];
+            let ip = Ipv4Addr::new(curr_chunk[1], curr_chunk[2], curr_chunk[3], curr_chunk[4]);
+            let port = u16::from_be_bytes([curr_chunk[5], curr_chunk[6]]);
+
+            nodes.push(Node {id: id.into(), port, ip: std::net::IpAddr::V4(ip)})
+        }
+    }
+
+    nodes    
 }
 
 async fn send_find_node(socket: &UdpSocket, target_node: &Node, my_id: u32) -> Vec<Node> {
@@ -443,9 +462,9 @@ async fn send_find_node(socket: &UdpSocket, target_node: &Node, my_id: u32) -> V
     let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
     println!("Received {:#?} from {}", response, src);
 
+
     let serialized_nodes = response.r.get("nodes");
     let k_closest_nodes = deserialize_compact_node(serialized_nodes);
-
     k_closest_nodes
 }
 
@@ -469,89 +488,103 @@ impl PartialOrd for NodeDistance {
 
 async fn recursive_find_nodes(
     target_node_id: u32,
-    routing_table: RoutingTable,
-    socket: &UdpSocket,
-) {
+    routing_table: &Arc<Mutex<RoutingTable>>,
+    socket: &Arc<UdpSocket>,
+) -> Vec<NodeDistance> {
     let mut set = JoinSet::new();
 
     let mut already_queried = HashSet::new();
 
     // pick α nodes from closest non-empty k-bucket, even if less than α entries
     let mut alpha_set = vec![];
-    let mut bucket_idx = routing_table.find_bucket_idx(target_node_id);
-    while routing_table.buckets[bucket_idx as usize].is_empty() {
-        bucket_idx = (bucket_idx + 1) % routing_table.buckets.len() as u32;
+    
+    let routing_table_clone = routing_table.lock().unwrap();
+    let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+    while routing_table_clone.buckets[bucket_idx as usize].is_empty() {
+        bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
     }
-    for node in routing_table.buckets[bucket_idx as usize].iter() {
+    for node in routing_table_clone.buckets[bucket_idx as usize].iter() {
         alpha_set.push(NodeDistance {
             node: node.clone(),
             dist: node.id ^ target_node_id,
         });
     }
+
+    let mut current_closest = alpha_set.clone();
+
     alpha_set.truncate(ALPHA);
 
-    let mut max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
-        Arc::new(Mutex::new(BinaryHeap::new()));
-    let mut within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    for distance_node in alpha_set {
+    let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
+        Arc::new(Mutex::new(BinaryHeap::new()));
+    let within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    for distance_node in alpha_set.iter().cloned() {
         within_heap.lock().unwrap().insert(distance_node.node.id);
         max_heap.lock().unwrap().push(distance_node);
     }
 
     loop {
         // send parallel find_node to all of em
-        for distance_node in alpha_set.iter() {
-            let within_heap_clone = Arc::clone(&within_heap);
+        for distance_node in alpha_set.iter().cloned() {
+            let within_heap = Arc::clone(&within_heap);
+            let routing_table = Arc::clone(&routing_table);
+            let max_heap = Arc::clone(&max_heap);
+            let socket = Arc::clone(&socket);
+            // updated k closest
+            already_queried.insert(distance_node.node.id);
             set.spawn(async move {
-                let k_closest_nodes =
-                    send_find_node(socket, &distance_node.node, routing_table.my_node.id).await;
+                let my_id = routing_table.lock().unwrap().my_node.id;
+                let k_closest_nodes = send_find_node(&socket, &distance_node.node, my_id).await;
                 for node in k_closest_nodes {
-                    if !within_heap_clone.lock().unwrap().contains(&node.id) {
-                        if max_heap.lock().unwrap().len() == K {
-                            max_heap.lock().unwrap().pop();
-                        }
+                    if !within_heap.lock().unwrap().contains(&node.id) {
                         max_heap.lock().unwrap().push(NodeDistance {
-                            node,
+                            node: node.clone(),
                             dist: node.id ^ target_node_id,
                         });
-                        within_heap_clone.lock().unwrap().insert(node.id);
+                        if max_heap.lock().unwrap().len() > K {
+                            max_heap.lock().unwrap().pop();
+                        }
+                        within_heap.lock().unwrap().insert(node.id);
                     }
                 }
             });
-            // updated k closest
-            already_queried.insert(distance_node.node.id);
         }
         // JOIN all these tasks
         while let Some(_) = set.join_next().await {}
 
         // resend the find_node to nodes it has learned about from previous RPCs
         // of the k nodes you have heard of closest to the target, it picks α that it has not yet queried and resends the FIND NODE RPC to them.
-        let current_closest = max_heap
+        let new_closest = max_heap
             .lock()
             .unwrap()
+            .clone()
             .into_sorted_vec()
             .iter()
             .filter(|n| !already_queried.contains(&n.node.id))
             .cloned()
             .collect::<Vec<NodeDistance>>();
 
+        // the lookup terminates when the initiator has queried and gotten responses from the k closest nodes it has seen.
+        if new_closest.is_empty() {
+            break;
+        }
+
+        current_closest = new_closest;
         alpha_set = (&current_closest[0..ALPHA]).to_vec();
 
         // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
 
-        // the lookup terminates when the initiator has queried and gotten responses from the k closest nodes it has seen.
-        if current_closest.is_empty() {
-            break;
-        }
     }
+
+    current_closest
 }
 
 // fyi: refresh periodically too besides only when joining
 // if no node lookup for bucket range has been done within 1hr
-async fn refresh_bucket(routing_table: RoutingTable, bucket_idx: usize) {
-    let node_id = routing_table.get_refresh_target(bucket_idx);
-    recursive_find_nodes(node_id).await;
+async fn refresh_bucket(routing_table: &Arc<Mutex<RoutingTable>>, bucket_idx: usize, socket: &Arc<UdpSocket>) {
+    let node_id = routing_table.lock().unwrap().get_refresh_target(bucket_idx);
+    recursive_find_nodes(node_id, routing_table, socket).await;
 }
 
 async fn send_ping(socket: &UdpSocket, addr: &str) {
@@ -613,13 +646,15 @@ async fn main() {
     let socket = UdpSocket::bind(format!("127.0.0.1:{}", args.udp_port))
         .await
         .unwrap();
+    let socket = Arc::new(socket);
 
     let our_node = Node {
         id,
         ip,
         port: args.udp_port,
     };
-    let mut routing_table = RoutingTable::new(our_node.clone(), Arc::clone(&secret));
+    let routing_table= Arc::new(Mutex::new(RoutingTable::new(our_node.clone(), Arc::clone(&secret))));
+
     println!("Started DHT node on {:#?}", our_node);
 
     // change secret every 10 min
@@ -632,7 +667,7 @@ async fn main() {
     });
 
     // underlying data store for peers
-    let mut peer_store: HashMap<String, Vec<Node>> = HashMap::new();
+    let peer_store: Arc<Mutex<HashMap<String, Vec<Node>>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // setup tcp server for external DHT interface (testing)
     if let Some(tcp_port) = args.tcp_port {
@@ -688,14 +723,14 @@ async fn main() {
                     ip: bootstrap_ip.parse().unwrap(),
                     port: bootstrap_port,
                 };
-                routing_table.upsert_node(bootstrap_node);
+                routing_table.lock().unwrap().upsert_node(bootstrap_node);
                 // 2. run find_nodes on itself to fill k-bucket table
-                let k_closest_nodes = recursive_find_nodes(our_node); // assuming sorted by distance
+                let k_closest_nodes = recursive_find_nodes(our_node.id, &routing_table, &socket).await; // assuming sorted by distance
 
                 // 3. refresh buckets past closest node bucket
-                let closest_idx = routing_table.find_bucket_idx(k_closest_nodes[0].id);
+                let closest_idx = routing_table.lock().unwrap().find_bucket_idx(k_closest_nodes[0].node.id);
                 for idx in (closest_idx + 1)..(NUM_BITS as u32) {
-                    refresh_bucket(routing_table, idx as usize);
+                    refresh_bucket(&routing_table, idx as usize, &socket).await;
                 }
             }
         }
@@ -706,8 +741,8 @@ async fn main() {
         let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
 
         handle_krpc_call(
-            &mut routing_table,
-            &mut peer_store,
+            &routing_table,
+            &peer_store,
             &socket,
             &buf,
             len,

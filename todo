@@ -1,19 +1,20 @@
 # Todo list for dht
 
-- recursive find_node - implement get and put based on this
-- if node w finds that node u which is closer to some of w's pairs, w replicates to u
-- re-publish k-v pairs every hour
-- handle bad + questionable nodes
-- track bucket freshness
-- make sure to only periodically refresh if behind NAT/firewall
-- ping front of list if already exists
-- errors
-- testing (internal tool)
-- refactor
-- logs/trace
+-   track bucket freshness
+-   make sure to only periodically refresh if behind NAT/firewall
+-   ping front of list if already exists
+-   re-publish k-v pairs every hour
+-   handle bad + questionable nodes
+-   if node w finds that node u which is closer to some of w's pairs, w replicates to u
+
+-   errors
+-   testing (internal tool)
+-   refactor
+-   logs/trace
 
 ---
 
 optimizations not needed rn:
-- bucket splitting starting w single bucket
-- cache along path
+
+-   bucket splitting starting w single bucket
+-   cache along path
