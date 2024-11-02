@@ -1,11 +1,12 @@
 # Todo list for dht
 
+-   ping front of list if already exists (aron)
+
 -   track bucket freshness
 -   make sure to only periodically refresh if behind NAT/firewall
--   ping front of list if already exists
+
 -   re-publish k-v pairs every hour
--   handle bad + questionable nodes
--   if node w finds that node u which is closer to some of w's pairs, w replicates to u
+-   handle bad + questionable nodes 
 
 -   errors
 -   testing (internal tool)
@@ -18,3 +19,4 @@ optimizations not needed rn:
 
 -   bucket splitting starting w single bucket
 -   cache along path
+-   if node w finds that node u which is closer to some of w's pairs, w replicates to u
