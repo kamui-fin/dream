@@ -5,7 +5,10 @@ use rand::Rng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::LinkedList;
 use std::net::Ipv4Addr;
 use std::net::{IpAddr, SocketAddr};
@@ -17,6 +20,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
+use tokio::task::JoinSet;
 use tokio::time::sleep;
 
 // Number of bits for our IDs
@@ -24,7 +28,7 @@ const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
 const K: usize = 4;
 // Max concurrent requests
-const M: usize = 3;
+const ALPHA: usize = 3;
 
 // utility functions
 fn gen_secret() -> [u8; 16] {
@@ -41,7 +45,7 @@ fn gen_trans_id() -> String {
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
-#[derive(Clone, Debug)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 struct Node {
     id: u32,
     ip: IpAddr,
@@ -112,6 +116,16 @@ impl RoutingTable {
             secret,
             buckets: Vec::with_capacity(NUM_BITS),
         }
+    }
+
+    fn get_all_nodes(&self) -> Vec<Node> {
+        let mut all_nodes = vec![];
+        for bucket in self.buckets.iter() {
+            for node in bucket.iter() {
+                all_nodes.push(node.clone());
+            }
+        }
+        all_nodes
     }
 
     fn find_bucket_idx(&self, node_id: u32) -> u32 {
@@ -274,7 +288,12 @@ async fn handle_krpc_call(
             routing_table.upsert_node(source_node);
             let target_node_id = query.a.get("target").unwrap().parse().unwrap();
 
-            let compact_node_info = get_nodes(routing_table, target_node_id);
+            let k_closest_nodes = get_nodes(routing_table, target_node_id);
+            let compact_node_info = k_closest_nodes
+                .iter()
+                .map(|node| node.get_node_compact_format())
+                .collect::<Vec<String>>()
+                .concat();
 
             let mut return_values = HashMap::new();
             return_values.insert("id".into(), routing_table.my_node.id.to_string());
@@ -313,7 +332,12 @@ async fn handle_krpc_call(
                 return_values.insert("values".into(), values); // this won't work rn
             } else {
                 // nodes
-                let compact_node_info = get_nodes(routing_table, info_hash.parse().unwrap());
+                let k_closest_nodes = get_nodes(routing_table, info_hash.parse().unwrap());
+                let compact_node_info = k_closest_nodes
+                    .iter()
+                    .map(|node| node.get_node_compact_format())
+                    .collect::<Vec<String>>()
+                    .concat();
                 return_values.insert("nodes".into(), compact_node_info);
             }
 
@@ -379,36 +403,68 @@ async fn handle_krpc_call(
     }
 }
 
-fn get_nodes(routing_table: &mut RoutingTable, target_node_id: u32) -> String {
-    let mut k_closest_nodes = vec![];
-    // 1. find the initial k-bucket
-    let mut bucket_idx = routing_table.find_bucket_idx(target_node_id);
-    // 2. Check if the exact match is already there
-    if let Some(exact_node) = routing_table.node_in_bucket(bucket_idx as usize, target_node_id) {
-        k_closest_nodes.push(exact_node.get_node_compact_format())
-    } else {
-        // 3. if not enough, move on to i + 1 bucket and wrap around if needed
-        let original_bucket = bucket_idx;
-        loop {
-            // append new list of bucket+i
-            for node in routing_table.buckets[bucket_idx as usize].iter() {
-                k_closest_nodes.push(node.get_node_compact_format());
-            }
+fn get_nodes(routing_table: &mut RoutingTable, target_node_id: u32) -> Vec<Node> {
+    let mut nodes = routing_table.get_all_nodes();
+    nodes.sort_by_key(|node| node.id ^ target_node_id);
+    nodes.truncate(K);
 
-            bucket_idx += 1;
-            bucket_idx %= 160;
-
-            if bucket_idx == original_bucket {
-                break;
-            }
-        }
-        // 4. collect the k elements and return
-        if k_closest_nodes.len() >= K {
-            k_closest_nodes.truncate(K);
+    if let Some(first_match) = nodes.get(0) {
+        if first_match.id == target_node_id {
+            return vec![first_match.clone()];
         }
     }
 
-    k_closest_nodes.concat()
+    nodes
+}
+
+async fn send_find_node(socket: &UdpSocket, target_node: &Node, my_id: u32) -> Vec<Node> {
+    let mut arguments = HashMap::new();
+    arguments.insert("id".into(), my_id.to_string());
+    arguments.insert("target".into(), target_node.id.to_string());
+
+    let find_node_query = KrpcRequest {
+        t: gen_trans_id(),
+        y: "q".into(),
+        q: "find_node".into(),
+        a: arguments,
+    };
+    let find_node_query = serde_bencode::to_bytes(&find_node_query).unwrap();
+    socket
+        .send_to(
+            &find_node_query,
+            format!("{}:{}", target_node.ip, target_node.port),
+        )
+        .await
+        .unwrap();
+
+    let mut buf = [0; 2048];
+    let (amt, src) = socket.recv_from(&mut buf).await.unwrap();
+
+    let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
+    println!("Received {:#?} from {}", response, src);
+
+    let serialized_nodes = response.r.get("nodes");
+    let k_closest_nodes = deserialize_compact_node(serialized_nodes);
+
+    k_closest_nodes
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct NodeDistance {
+    node: Node,
+    dist: u32,
+}
+
+impl Ord for NodeDistance {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.dist.cmp(&other.dist)
+    }
+}
+
+impl PartialOrd for NodeDistance {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 async fn recursive_find_nodes(
@@ -416,6 +472,79 @@ async fn recursive_find_nodes(
     routing_table: RoutingTable,
     socket: &UdpSocket,
 ) {
+    let mut set = JoinSet::new();
+
+    let mut already_queried = HashSet::new();
+
+    // pick α nodes from closest non-empty k-bucket, even if less than α entries
+    let mut alpha_set = vec![];
+    let mut bucket_idx = routing_table.find_bucket_idx(target_node_id);
+    while routing_table.buckets[bucket_idx as usize].is_empty() {
+        bucket_idx = (bucket_idx + 1) % routing_table.buckets.len() as u32;
+    }
+    for node in routing_table.buckets[bucket_idx as usize].iter() {
+        alpha_set.push(NodeDistance {
+            node: node.clone(),
+            dist: node.id ^ target_node_id,
+        });
+    }
+    alpha_set.truncate(ALPHA);
+
+    let mut max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
+        Arc::new(Mutex::new(BinaryHeap::new()));
+    let mut within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+
+    for distance_node in alpha_set {
+        within_heap.lock().unwrap().insert(distance_node.node.id);
+        max_heap.lock().unwrap().push(distance_node);
+    }
+
+    loop {
+        // send parallel find_node to all of em
+        for distance_node in alpha_set.iter() {
+            let within_heap_clone = Arc::clone(&within_heap);
+            set.spawn(async move {
+                let k_closest_nodes =
+                    send_find_node(socket, &distance_node.node, routing_table.my_node.id).await;
+                for node in k_closest_nodes {
+                    if !within_heap_clone.lock().unwrap().contains(&node.id) {
+                        if max_heap.lock().unwrap().len() == K {
+                            max_heap.lock().unwrap().pop();
+                        }
+                        max_heap.lock().unwrap().push(NodeDistance {
+                            node,
+                            dist: node.id ^ target_node_id,
+                        });
+                        within_heap_clone.lock().unwrap().insert(node.id);
+                    }
+                }
+            });
+            // updated k closest
+            already_queried.insert(distance_node.node.id);
+        }
+        // JOIN all these tasks
+        while let Some(_) = set.join_next().await {}
+
+        // resend the find_node to nodes it has learned about from previous RPCs
+        // of the k nodes you have heard of closest to the target, it picks α that it has not yet queried and resends the FIND NODE RPC to them.
+        let current_closest = max_heap
+            .lock()
+            .unwrap()
+            .into_sorted_vec()
+            .iter()
+            .filter(|n| !already_queried.contains(&n.node.id))
+            .cloned()
+            .collect::<Vec<NodeDistance>>();
+
+        alpha_set = (&current_closest[0..ALPHA]).to_vec();
+
+        // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
+
+        // the lookup terminates when the initiator has queried and gotten responses from the k closest nodes it has seen.
+        if current_closest.is_empty() {
+            break;
+        }
+    }
 }
 
 // fyi: refresh periodically too besides only when joining
