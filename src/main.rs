@@ -5,11 +5,10 @@ use rand::Rng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::LinkedList;
-use std::env;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,9 +26,22 @@ const K: usize = 4;
 // Max concurrent requests
 const M: usize = 3;
 
+// utility functions
+fn gen_secret() -> [u8; 16] {
+    let mut secret = [0u8; 16];
+    OsRng.fill_bytes(&mut secret);
+    secret
+}
+
+fn gen_trans_id() -> String {
+    let mut rng = rand::thread_rng();
+    let trans_id: u16 = rng.gen();
+    format!("{:02x}", trans_id)
+}
+
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Node {
     id: u32,
     ip: IpAddr,
@@ -68,14 +80,7 @@ impl Node {
     }
 }
 
-fn gen_secret() -> [u8; 16] {
-    let mut secret = [0u8; 16];
-    OsRng.fill_bytes(&mut secret);
-    secret
-}
-
 // infohash of torrent = key id
-
 // starts off with one bucket with ID space range 0 - 2^160
 // when bucket full of known good nodes, no more nodes may be added unless our own ID falls within the range of the bucket
 // -> in that case, bucket is replaced by 2 new buckets each with half the range of the old bucket
@@ -111,38 +116,20 @@ impl RoutingTable {
 
     fn find_bucket_idx(&self, node_id: u32) -> u32 {
         let xor_result = node_id ^ self.my_node.id;
-        return xor_result.leading_zeros() - ((32 - NUM_BITS) as u32);
+        xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)
     }
 
     fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
-        for node in self.buckets[bucket_idx].iter() {
-            if (node.id == node_id) {
-                return Some(node);
-            }
-        }
-
-        return None;
-    }
-
-    fn find_node(&self, node_id: u32, bucket_idx: usize) -> Option<usize> {
-        let mut index = 0;
-
-        for node in self.buckets[bucket_idx].iter() {
-            if node.id == node_id {
-                return Some(index + 1);
-            } else {
-                index = index + 1;
-            }
-        }
-
-        return None;
+        self.buckets[bucket_idx]
+            .iter()
+            .find(|&node| (node.id == node_id))
     }
 
     fn remove_node(&mut self, node_id: u32, bucket_idx: usize) {
         let mut new_list: LinkedList<Node> = LinkedList::new();
 
         while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
-            if ((curr_front).id != node_id) {
+            if (curr_front).id != node_id {
                 new_list.push_back(curr_front);
                 self.buckets[bucket_idx].pop_front();
             }
@@ -154,42 +141,27 @@ impl RoutingTable {
     fn upsert_node(&mut self, node: Node) {
         let bucket_idx = self.find_bucket_idx(node.id) as usize;
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_none();
-        let is_full = self.buckets[bucket_idx].len() >= K as usize;
+        let is_full = self.buckets[bucket_idx].len() >= K;
 
-        if (already_exists && !is_full) {
+        if already_exists && !is_full {
             self.remove_node(node.id, bucket_idx);
             self.buckets[bucket_idx].push_back(node);
-        } else if (already_exists) {
+        } else if already_exists {
             // ping front of list and go from there
+            // if ping
         } else {
             self.buckets[bucket_idx].push_back(node);
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    // Note this useful idiom: importing names from outer (for mod tests) scope.
-    use super::*;
+    fn get_refresh_target(&self, bucket_idx: usize) -> u32 {
+        let start = 2u32.pow((NUM_BITS - bucket_idx - 1) as u32);
+        let end = 2u32.pow((NUM_BITS - bucket_idx) as u32);
 
-    #[test]
-    fn test_bucket_finder() {
-        let secret = Arc::new(Mutex::new([0; 16]));
-        let rt = RoutingTable::new(
-            Node {
-                id: 0,
-                ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
-                port: 0,
-            },
-            secret,
-        );
-        assert_eq!(rt.find_bucket_idx(0b001101), 2);
-        assert_eq!(rt.find_bucket_idx(0b000001), 5);
-    }
+        let mut rng = rand::thread_rng();
+        let node_id = rng.gen_range(start..end);
 
-    #[test]
-    fn test_compact_addr() {
-        // TODO:
+        node_id
     }
 }
 
@@ -268,12 +240,6 @@ enum DhtMessageType {
     AnnouncePeer,
 }
 
-fn gen_trans_id() -> String {
-    let mut rng = rand::thread_rng();
-    let trans_id: u16 = rng.gen();
-    format!("{:02x}", trans_id)
-}
-
 async fn handle_krpc_call(
     routing_table: &mut RoutingTable,
     peer_store: &mut HashMap<String, Vec<Node>>,
@@ -283,7 +249,7 @@ async fn handle_krpc_call(
     addr: SocketAddr,
 ) {
     let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
-    println!("Received {:#?} from {}", query, addr.to_string());
+    println!("Received {:#?} from {}", query, addr);
 
     match query.q.as_str() {
         "ping" => {
@@ -305,9 +271,10 @@ async fn handle_krpc_call(
                 ip: addr.ip(),
                 port: addr.port(),
             };
+            routing_table.upsert_node(source_node);
             let target_node_id = query.a.get("target").unwrap().parse().unwrap();
 
-            let compact_node_info = get_nodes(routing_table, source_node, target_node_id);
+            let compact_node_info = get_nodes(routing_table, target_node_id);
 
             let mut return_values = HashMap::new();
             return_values.insert("id".into(), routing_table.my_node.id.to_string());
@@ -322,6 +289,14 @@ async fn handle_krpc_call(
             socket.send_to(&response, addr).await.unwrap();
         }
         "get_peers" => {
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            routing_table.upsert_node(source_node);
+
             let info_hash = query.a.get("info_hash").unwrap();
             let peers = peer_store.get(info_hash);
 
@@ -338,14 +313,7 @@ async fn handle_krpc_call(
                 return_values.insert("values".into(), values); // this won't work rn
             } else {
                 // nodes
-                let source_id = query.a.get("id").unwrap().parse().unwrap();
-                let source_node = Node {
-                    id: source_id,
-                    ip: addr.ip(),
-                    port: addr.port(),
-                };
-                let compact_node_info =
-                    get_nodes(routing_table, source_node, info_hash.parse().unwrap());
+                let compact_node_info = get_nodes(routing_table, info_hash.parse().unwrap());
                 return_values.insert("nodes".into(), compact_node_info);
             }
 
@@ -375,6 +343,14 @@ async fn handle_krpc_call(
             let is_implied = query.a.get("implied_port").unwrap();
             let token = query.a.get("token").unwrap();
 
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            routing_table.upsert_node(source_node);
+
             let mut hasher = Sha1::new();
             if let IpAddr::V4(querying_ip) = addr.ip() {
                 hasher.update(querying_ip.octets());
@@ -383,7 +359,7 @@ async fn handle_krpc_call(
 
             let target_token = format!("{:x}", hasher.finalize());
 
-            if (token.to_string() != target_token) {
+            if *token != target_token {
                 // send failure message
             }
 
@@ -403,15 +379,12 @@ async fn handle_krpc_call(
     }
 }
 
-fn get_nodes(routing_table: &mut RoutingTable, source_node: Node, target_node_id: u32) -> String {
+fn get_nodes(routing_table: &mut RoutingTable, target_node_id: u32) -> String {
     let mut k_closest_nodes = vec![];
-    // 1. update source_id into routing table
-    routing_table.upsert_node(source_node);
-    // 2. find the initial k-bucket
+    // 1. find the initial k-bucket
     let mut bucket_idx = routing_table.find_bucket_idx(target_node_id);
-    // 2.5. Check if the exact match is already there
+    // 2. Check if the exact match is already there
     if let Some(exact_node) = routing_table.node_in_bucket(bucket_idx as usize, target_node_id) {
-        // {"t":"aa", "y":"r", "r": {"id":"0123456789abcdefghij", "nodes": "def456..."}}
         k_closest_nodes.push(exact_node.get_node_compact_format())
     } else {
         // 3. if not enough, move on to i + 1 bucket and wrap around if needed
@@ -435,8 +408,21 @@ fn get_nodes(routing_table: &mut RoutingTable, source_node: Node, target_node_id
         }
     }
 
-    let compact_node_info = k_closest_nodes.concat();
-    compact_node_info
+    k_closest_nodes.concat()
+}
+
+async fn recursive_find_nodes(
+    target_node_id: u32,
+    routing_table: RoutingTable,
+    socket: &UdpSocket,
+) {
+}
+
+// fyi: refresh periodically too besides only when joining
+// if no node lookup for bucket range has been done within 1hr
+async fn refresh_bucket(routing_table: RoutingTable, bucket_idx: usize) {
+    let node_id = routing_table.get_refresh_target(bucket_idx);
+    recursive_find_nodes(node_id).await;
 }
 
 async fn send_ping(socket: &UdpSocket, addr: &str) {
@@ -469,7 +455,13 @@ struct Args {
     tcp_port: Option<u16>,
 
     #[arg(long)]
-    bootstrap: Option<String>,
+    bootstrap_id: Option<u32>,
+
+    #[arg(long)]
+    bootstrap_ip: Option<String>,
+
+    #[arg(long)]
+    bootstrap_port: Option<u16>,
 
     #[arg(long)]
     id: Option<u32>,
@@ -486,22 +478,22 @@ async fn main() {
     });
     let ip = local_ip().unwrap();
 
+    let secret = Arc::new(Mutex::new(gen_secret()));
+    let secret_clone = Arc::clone(&secret);
+
+    let socket = UdpSocket::bind(format!("127.0.0.1:{}", args.udp_port))
+        .await
+        .unwrap();
+
     let our_node = Node {
         id,
         ip,
         port: args.udp_port,
     };
-
-    let secret = Arc::new(Mutex::new(gen_secret()));
-
-    let socket = UdpSocket::bind(format!("127.0.0.1:{}", args.udp_port))
-        .await
-        .unwrap();
+    let mut routing_table = RoutingTable::new(our_node.clone(), Arc::clone(&secret));
     println!("Started DHT node on {:#?}", our_node);
 
-    let mut routing_table = RoutingTable::new(our_node, Arc::clone(&secret));
-
-    let secret_clone = Arc::clone(&secret);
+    // change secret every 10 min
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(600)).await;
@@ -510,9 +502,10 @@ async fn main() {
         }
     });
 
+    // underlying data store for peers
     let mut peer_store: HashMap<String, Vec<Node>> = HashMap::new();
 
-    // setup tcp server for external DHT interface
+    // setup tcp server for external DHT interface (testing)
     if let Some(tcp_port) = args.tcp_port {
         tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{}", tcp_port))
@@ -520,8 +513,8 @@ async fn main() {
                 .unwrap();
 
             loop {
-                let (mut socket, addr) = listener.accept().await.unwrap();
-                let (reader, mut writer) = socket.split();
+                let (mut tcp_socket, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = tcp_socket.split();
                 let mut reader = BufReader::new(reader);
                 let mut buffer = String::new();
 
@@ -535,7 +528,9 @@ async fn main() {
                             match buffer.trim_end().split_once(" ") {
                                 Some(("GET", info_hash)) => {}
                                 Some(("PUT", key_value)) => {}
-                                Some(("PING", address)) => {}
+                                Some(("PING", address)) => {
+                                    // send_ping(&socket, address);
+                                }
                                 _ => {}
                             }
                             println!("Received: {}", buffer.trim_end());
@@ -554,16 +549,33 @@ async fn main() {
             }
         });
     }
-    if let Some(bootstrap) = args.bootstrap {
-        // 1. initialize k-bucket with another known node
-        // 2. run find_nodes on itself to fill k-bucket table
-        // 3. refresh k-buckets farther than bootstrap node with find_node on random key within range
-    } else {
+
+    if let Some(bootstrap_ip) = args.bootstrap_ip {
+        if let Some(bootstrap_port) = args.bootstrap_port {
+            if let Some(bootstrap_id) = args.bootstrap_id {
+                // 1. initialize k-bucket with another known node
+                let bootstrap_node = Node {
+                    id: bootstrap_id,
+                    ip: bootstrap_ip.parse().unwrap(),
+                    port: bootstrap_port,
+                };
+                routing_table.upsert_node(bootstrap_node);
+                // 2. run find_nodes on itself to fill k-bucket table
+                let k_closest_nodes = recursive_find_nodes(our_node); // assuming sorted by distance
+
+                // 3. refresh buckets past closest node bucket
+                let closest_idx = routing_table.find_bucket_idx(k_closest_nodes[0].id);
+                for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+                    refresh_bucket(routing_table, idx as usize);
+                }
+            }
+        }
     }
 
     loop {
         let mut buf = [0; 2048];
         let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
+
         handle_krpc_call(
             &mut routing_table,
             &mut peer_store,
@@ -573,5 +585,33 @@ async fn main() {
             addr,
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+
+    #[test]
+    fn test_bucket_finder() {
+        let secret = Arc::new(Mutex::new([0; 16]));
+        let rt = RoutingTable::new(
+            Node {
+                id: 0,
+                ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                port: 0,
+            },
+            secret,
+        );
+        assert_eq!(rt.find_bucket_idx(0b001101), 2);
+        assert_eq!(rt.find_bucket_idx(0b000001), 5);
+    }
+
+    #[test]
+    fn test_compact_addr() {
+        // TODO:
     }
 }
