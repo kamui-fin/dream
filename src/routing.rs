@@ -21,18 +21,11 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    fn new(node_id: u32) -> Self {
+    pub fn new(node_id: u32) -> Self {
         Self {
             node_id,
             buckets: Vec::with_capacity(NUM_BITS),
         }
-    }
-
-    // fyi: refresh periodically too besides only when joining
-    // if no node lookup for bucket range has been done within 1hr
-    async fn refresh_bucket(&mut self, bucket_idx: usize, socket: &Arc<UdpSocket>) {
-        let node_id = routing_table.lock().unwrap().get_refresh_target(bucket_idx);
-        recursive_find_nodes(node_id, routing_table, socket).await;
     }
 
     fn get_all_nodes(&self) -> Vec<Node> {

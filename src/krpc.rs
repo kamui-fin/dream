@@ -13,9 +13,14 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+
+use serde::{Deserialize, Serialize};
 use tokio::net::UdpSocket;
 
-enum KrpcError {
+use crate::{context::RuntimeContext, node::Node};
+
+pub enum KrpcError {
     // 201
     GenericError,
     // 202
@@ -28,7 +33,7 @@ enum KrpcError {
 
 // All queries have id key and value containing node id of querying node
 // Responses have same for responding node
-enum DhtMessageType {
+pub enum DhtMessageType {
     // q = "ping", id = 20 byte string source id
     // Query = {"t":"aa", "y":"q", "q":"ping", "a":{"id":"abcdefghij0123456789"}}
     // Response = {"t":"aa", "y":"r", "r": {"id":"mnopqrstuvwxyz123456"}}
@@ -51,7 +56,7 @@ enum DhtMessageType {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct KrpcRequest {
+pub struct KrpcRequest {
     t: String,
     y: String,
 
@@ -60,7 +65,7 @@ struct KrpcRequest {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct KrpcSuccessResponse {
+pub struct KrpcSuccessResponse {
     t: String,
     y: String,
 
@@ -68,7 +73,7 @@ struct KrpcSuccessResponse {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct KrpcErrorResponse {
+pub struct KrpcErrorResponse {
     t: String,
     y: String,
 
@@ -76,13 +81,13 @@ struct KrpcErrorResponse {
 }
 
 pub struct Krpc {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
 }
 
 impl Krpc {
-    async fn init() -> Self {
+    pub async fn init(context: RuntimeContext) -> Self {
         let socket = Arc::new(
-            UdpSocket::bind(format!("127.0.0.1:{}", args.udp_port))
+            UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
                 .await
                 .unwrap(),
         );
@@ -90,10 +95,10 @@ impl Krpc {
         Self { socket }
     }
 
-    async fn listen(&self) {
+    pub async fn listen(&self) {
         loop {
             let mut buf = [0; 2048];
-            let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
+            let (len, addr) = self.socket.recv_from(&mut buf).await.unwrap();
 
             handle_krpc_call(&routing_table, &peer_store, &self.socket, &buf, len, addr).await;
         }
@@ -127,7 +132,7 @@ async fn handle_krpc_call(buf: &[u8; 2048], len: usize, addr: SocketAddr) {
             };
             routing_table.lock().unwrap().upsert_node(source_node);
             let target_node_id = query.a.get("target").unwrap().parse().unwrap();
-            let k_closest_nodes = get_nodes(routing_table, target_node_id);
+            let k_closest_nodes = routing_table.get_nodes(target_node_id);
             let compact_node_info = k_closest_nodes
                 .iter()
                 .map(|node| node.get_node_compact_format())

@@ -1,3 +1,8 @@
+use std::{
+    cmp::Ordering,
+    net::{IpAddr, Ipv4Addr},
+};
+
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug)]
@@ -9,7 +14,11 @@ pub struct Node {
 }
 
 impl Node {
-    fn get_peer_compact_format(&self) -> String {
+    pub fn new(id: u32, ip: IpAddr, port: u16) -> Self {
+        Self { id, ip, port }
+    }
+
+    pub fn get_peer_compact_format(&self) -> String {
         let mut compact_info = [0u8; 6];
 
         if let IpAddr::V4(v4_addr) = self.ip {
@@ -23,7 +32,7 @@ impl Node {
         format!("{:?}", compact_info)
     }
 
-    fn get_node_compact_format(&self) -> String {
+    pub fn get_node_compact_format(&self) -> String {
         let mut compact_info = [0u8; 7];
         compact_info[0] = self.id as u8;
 
@@ -39,7 +48,7 @@ impl Node {
     }
 }
 
-fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
+pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
     let mut nodes = Vec::new();
 
     let bytes = serialized_nodes.unwrap().as_bytes();

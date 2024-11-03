@@ -1,3 +1,9 @@
+use std::{net::Ipv4Addr, str::FromStr};
+
+use clap::{command, Parser};
+
+use crate::node::Node;
+
 // Number of bits for our IDs
 pub const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
@@ -9,29 +15,37 @@ pub const ALPHA: usize = 3;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {
+pub struct Args {
     #[arg(long)]
-    id: Option<u32>,
+    pub id: Option<u32>,
 
     #[arg(short, long)]
-    udp_port: u16,
+    pub udp_port: u16,
 
     #[arg(short, long)]
-    tcp_port: Option<u16>,
+    pub tcp_port: Option<u16>,
 
     #[arg(long)]
-    bootstrap_id: Option<u32>,
+    pub bootstrap_id: Option<u32>,
 
     #[arg(long)]
-    bootstrap_ip: Option<String>,
+    pub bootstrap_ip: Option<String>,
 
     #[arg(long)]
-    bootstrap_port: Option<u16>,
+    pub bootstrap_port: Option<u16>,
 }
 
 impl Args {
     fn get_bootstrap(&self) -> Option<Node> {
-        let (id, ip, port) = (self.bootstrap_id?, self.bootstrap_ip?, self.bootstrap_port?);
-        Node::new(id, ip, port)
+        let (id, ip, port) = (
+            self.bootstrap_id?,
+            self.bootstrap_ip.clone()?,
+            self.bootstrap_port?,
+        );
+        Some(Node::new(
+            id,
+            std::net::IpAddr::V4(Ipv4Addr::from_str(&ip).unwrap()),
+            port,
+        ))
     }
 }

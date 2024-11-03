@@ -1,28 +1,36 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use local_ip_address::local_ip;
+use rand::Rng;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::TcpListener,
+    time::sleep,
 };
 
+use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
+
 /// Stores and maintains important runtime objects for the DHT
-struct RuntimeContext {
-    routing_table: Arc<Mutex<RoutingTable>>,
-    peer_store: Arc<Mutex<HashMap<String, Vec<Node>>>>,
-    node: Node,
-    secret: Arc<Mutex<[u8; 16]>>,
+pub struct RuntimeContext {
+    pub routing_table: Arc<Mutex<RoutingTable>>,
+    pub peer_store: Arc<Mutex<HashMap<String, Vec<Node>>>>,
+    pub node: Node,
+    pub secret: Arc<Mutex<[u8; 16]>>,
 }
 
 impl RuntimeContext {
-    fn init(args: Args) -> Self {
-        let routing_table = Arc::new(Mutex::new(RoutingTable::new()));
+    pub fn init(args: Args) -> Self {
+        let node_id = args.id.unwrap_or_else(|| {
+            let mut rng = rand::thread_rng();
+            rng.gen_range(0..64)
+        });
+        let routing_table = Arc::new(Mutex::new(RoutingTable::new(node_id)));
         let peer_store = Arc::new(Mutex::new(HashMap::<String, Vec<Node>>::new()));
-        let node = Node::new(
-            local_ip().unwrap(),
-            args.port,
-            args.id.unwrap_or_else(|| {
-                let mut rng = rand::thread_rng();
-                rng.gen_range(0..64)
-            }),
-        );
+        let node = Node::new(node_id, local_ip().unwrap(), args.udp_port);
         let secret = Arc::new(Mutex::new(gen_secret()));
 
         Self {
@@ -38,7 +46,7 @@ impl RuntimeContext {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(600)).await;
-                let mut sec = secret_clone.lock().unwrap();
+                let mut sec = self.secret.lock().unwrap();
                 *sec = gen_secret();
             }
         });
