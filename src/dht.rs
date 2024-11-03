@@ -1,3 +1,50 @@
+// Number of bits for our IDs
+const NUM_BITS: usize = 6;
+// Max number of entries in K-bucket
+const K: usize = 4;
+// Max concurrent requests
+const ALPHA: usize = 3;
+
+async fn join_dht_network(context: RuntimeContext, bootstrap_node: Option<Node>) {
+    if bootstrap_node.is_none() {
+        return;
+    }
+    // 1. initialize k-bucket with another known node
+    routing_table.lock().unwrap().upsert_node(bootstrap_node);
+
+    // 2. run find_nodes on itself to fill k-bucket table
+    let k_closest_nodes = recursive_find_nodes(our_node.id, &routing_table, &socket).await; // assuming sorted by distance
+
+    // 3. refresh buckets past closest node bucket
+    let closest_idx = routing_table
+        .lock()
+        .unwrap()
+        .find_bucket_idx(k_closest_nodes[0].node.id);
+    for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+        refresh_bucket(&routing_table, idx as usize, &socket).await;
+    }
+}
+
+async fn send_ping(socket: &UdpSocket, addr: &str) {
+    let mut arguments = HashMap::new();
+    arguments.insert("id".into(), "client".into());
+
+    let ping_query = KrpcRequest {
+        t: gen_trans_id(),
+        y: "q".into(),
+        q: "ping".into(),
+        a: arguments,
+    };
+    let ping_query = serde_bencode::to_bytes(&ping_query).unwrap();
+    socket.send_to(&ping_query, addr).await.unwrap();
+
+    let mut buf = [0; 2048];
+    let (amt, src) = socket.recv_from(&mut buf).await.unwrap();
+
+    let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
+    println!("Received {:#?} from {}", response, src);
+}
+
 async fn recursive_find_nodes(
     target_node_id: u32,
     routing_table: &Arc<Mutex<RoutingTable>>,

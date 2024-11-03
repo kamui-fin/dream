@@ -1,9 +1,7 @@
-// infohash of torrent = key id
-// starts off with one bucket with ID space range 0 - 2^160
-// when bucket full of known good nodes, no more nodes may be added unless our own ID falls within the range of the bucket
-// -> in that case, bucket is replaced by 2 new buckets each with half the range of the old bucket
-// -> and nodes from old bucket and distributed among two new ones
-// for new table with 1 bucket, the full bucket is always split into two new buckets covering ranges 0..2^159 and 2^159..2^160
+use std::collections::LinkedList;
+
+use crate::{config::NUM_BITS, node::Node};
+
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
 // if questionable nodes not seen in the last 15 min, least recently seen is pinged
@@ -16,20 +14,25 @@
 //    -> by picking random id in the range of the bucket and run find_nodes
 //    -> nodes that are able to receive queries from other nodes dno't need to refresh buckets often
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
-struct RoutingTable {
-    my_node: Node,
-    secret: Arc<Mutex<[u8; 16]>>,
+pub struct RoutingTable {
+    node_id: u32,
     // array of linked lists with NUM_BITS elements
     buckets: Vec<LinkedList<Node>>,
 }
 
 impl RoutingTable {
-    fn new(my_node: Node, secret: Arc<Mutex<[u8; 16]>>) -> Self {
+    fn new(node_id: u32) -> Self {
         Self {
-            my_node,
-            secret,
+            node_id,
             buckets: Vec::with_capacity(NUM_BITS),
         }
+    }
+
+    // fyi: refresh periodically too besides only when joining
+    // if no node lookup for bucket range has been done within 1hr
+    async fn refresh_bucket(&mut self, bucket_idx: usize, socket: &Arc<UdpSocket>) {
+        let node_id = routing_table.lock().unwrap().get_refresh_target(bucket_idx);
+        recursive_find_nodes(node_id, routing_table, socket).await;
     }
 
     fn get_all_nodes(&self) -> Vec<Node> {
@@ -43,7 +46,7 @@ impl RoutingTable {
     }
 
     fn find_bucket_idx(&self, node_id: u32) -> u32 {
-        let xor_result = node_id ^ self.my_node.id;
+        let xor_result = node_id ^ self.node_id;
         xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)
     }
 
@@ -89,5 +92,31 @@ impl RoutingTable {
         let mut rng = rand::thread_rng();
 
         rng.gen_range(start..end)
+    }
+
+    fn get_nodes(&self, target_node_id: u32) -> Vec<Node> {
+        let mut nodes = self.lock().unwrap().get_all_nodes();
+        nodes.sort_by_key(|node| node.id ^ target_node_id);
+        nodes.truncate(K);
+
+        if let Some(first_match) = nodes.first() {
+            if first_match.id == target_node_id {
+                return vec![first_match.clone()];
+            }
+        }
+
+        nodes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bucket_finder() {
+        let rt = RoutingTable::new(0);
+        assert_eq!(rt.find_bucket_idx(0b001101), 2);
+        assert_eq!(rt.find_bucket_idx(0b000001), 5);
     }
 }

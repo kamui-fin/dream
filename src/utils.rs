@@ -1,3 +1,5 @@
+use rand::{rngs::OsRng, Rng, RngCore};
+
 fn gen_secret() -> [u8; 16] {
     let mut secret = [0u8; 16];
     OsRng.fill_bytes(&mut secret);

@@ -13,6 +13,8 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
+use tokio::net::UdpSocket;
+
 enum KrpcError {
     // 201
     GenericError,
@@ -71,4 +73,189 @@ struct KrpcErrorResponse {
     y: String,
 
     e: (u8, String),
+}
+
+pub struct Krpc {
+    socket: UdpSocket,
+}
+
+impl Krpc {
+    async fn init() -> Self {
+        let socket = Arc::new(
+            UdpSocket::bind(format!("127.0.0.1:{}", args.udp_port))
+                .await
+                .unwrap(),
+        );
+
+        Self { socket }
+    }
+
+    async fn listen(&self) {
+        loop {
+            let mut buf = [0; 2048];
+            let (len, addr) = socket.recv_from(&mut buf).await.unwrap();
+
+            handle_krpc_call(&routing_table, &peer_store, &self.socket, &buf, len, addr).await;
+        }
+    }
+}
+
+// REFACTOR!!!
+async fn handle_krpc_call(buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+    let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
+
+    match query.q.as_str() {
+        "ping" => {
+            let routing_table = routing_table.lock().unwrap();
+            let mut return_values = HashMap::new();
+            return_values.insert("id".into(), routing_table.my_node.id.to_string());
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        "find_node" => {
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            routing_table.lock().unwrap().upsert_node(source_node);
+            let target_node_id = query.a.get("target").unwrap().parse().unwrap();
+            let k_closest_nodes = get_nodes(routing_table, target_node_id);
+            let compact_node_info = k_closest_nodes
+                .iter()
+                .map(|node| node.get_node_compact_format())
+                .collect::<Vec<String>>()
+                .concat();
+
+            let mut return_values = HashMap::new();
+            return_values.insert(
+                "id".into(),
+                routing_table.lock().unwrap().my_node.id.to_string(),
+            );
+            return_values.insert("nodes".into(), compact_node_info);
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        "get_peers" => {
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            routing_table.lock().unwrap().upsert_node(source_node);
+
+            let info_hash = query.a.get("info_hash").unwrap();
+
+            let mut return_values = HashMap::new();
+            return_values.insert(
+                "id".into(),
+                routing_table.lock().unwrap().my_node.id.to_string(),
+            );
+
+            let peer_store_guard = peer_store.lock().unwrap();
+            let peers = peer_store_guard.get(info_hash);
+            if let Some(peers) = peers {
+                // values
+                let values = peers
+                    .iter()
+                    .map(|peer| peer.get_peer_compact_format())
+                    .collect::<Vec<String>>()
+                    .concat();
+                return_values.insert("values".into(), values); // this won't work rn
+            } else {
+                // nodes
+                let k_closest_nodes = get_nodes(routing_table, info_hash.parse().unwrap());
+                let compact_node_info = k_closest_nodes
+                    .iter()
+                    .map(|node| node.get_node_compact_format())
+                    .collect::<Vec<String>>()
+                    .concat();
+                return_values.insert("nodes".into(), compact_node_info);
+            }
+
+            // generate token
+            // hash ip + secret
+            let mut hasher = Sha1::new();
+            if let IpAddr::V4(v4addr) = addr.ip() {
+                hasher.update(v4addr.octets());
+            }
+            hasher.update(*routing_table.lock().unwrap().secret.lock().unwrap());
+            let token = format!("{:x}", hasher.finalize());
+
+            return_values.insert("token".into(), token);
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        "announce_peer" => {
+            let info_hash = query.a.get("info_hash").unwrap();
+            let port = query.a.get("port").unwrap();
+            let token = query.a.get("token").unwrap();
+
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
+            };
+            routing_table
+                .lock()
+                .unwrap()
+                .upsert_node(source_node.clone());
+
+            let mut hasher = Sha1::new();
+            if let IpAddr::V4(querying_ip) = addr.ip() {
+                hasher.update(querying_ip.octets());
+            }
+            hasher.update(*routing_table.lock().unwrap().secret.lock().unwrap());
+
+            let target_token = format!("{:x}", hasher.finalize());
+
+            if *token != target_token {
+                // send failure message
+            }
+
+            peer_store
+                .lock()
+                .unwrap()
+                .entry(info_hash.clone())
+                .or_default()
+                .push(source_node);
+
+            let mut return_values: HashMap<String, String> = HashMap::new();
+            return_values.insert(
+                "id".to_string(),
+                routing_table.lock().unwrap().my_node.ip.to_string(),
+            );
+
+            let response = KrpcSuccessResponse {
+                y: "r".into(),
+                t: query.t,
+                r: return_values,
+            };
+
+            let response = serde_bencode::to_bytes(&response).unwrap();
+            socket.send_to(&response, addr).await.unwrap();
+        }
+        _ => {}
+    }
 }

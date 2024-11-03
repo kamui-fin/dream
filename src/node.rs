@@ -1,7 +1,7 @@
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug)]
-struct Node {
+pub struct Node {
     id: u32,
     ip: IpAddr,
     port: u16,
@@ -62,7 +62,7 @@ fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-struct NodeDistance {
+pub struct NodeDistance {
     node: Node,
     dist: u32,
 }
