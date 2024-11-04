@@ -7,9 +7,9 @@ use std::{
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Node {
-    id: u32,
-    ip: IpAddr,
-    port: u16,
+    pub id: u32,
+    pub ip: IpAddr,
+    pub port: u16,
     // is_good: bool, // responded to our query or requested a query within past 15 min,
 }
 
@@ -48,32 +48,10 @@ impl Node {
     }
 }
 
-pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
-    let mut nodes = Vec::new();
-
-    let bytes = serialized_nodes.unwrap().as_bytes();
-
-    for curr_chunk in bytes.chunks(7) {
-        if curr_chunk.len() == 7 {
-            let id = curr_chunk[0];
-            let ip = Ipv4Addr::new(curr_chunk[1], curr_chunk[2], curr_chunk[3], curr_chunk[4]);
-            let port = u16::from_be_bytes([curr_chunk[5], curr_chunk[6]]);
-
-            nodes.push(Node {
-                id: id.into(),
-                port,
-                ip: std::net::IpAddr::V4(ip),
-            })
-        }
-    }
-
-    nodes
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub struct NodeDistance {
-    node: Node,
-    dist: u32,
+    pub node: Node,
+    pub dist: u32,
 }
 
 impl Ord for NodeDistance {

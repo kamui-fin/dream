@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use config::Args;
 use context::RuntimeContext;
@@ -15,12 +17,12 @@ mod utils;
 async fn main() {
     let args = Args::parse();
 
-    let context = RuntimeContext::init(args);
-    let krpc = Krpc::init(context).await;
+    let context = Arc::new(RuntimeContext::init(&args));
+    let krpc = Arc::new(Krpc::init(context.clone()).await);
 
     // 1. enter with a bootstrap contact or init new network
-    dht::join_dht_network(args.get_bootstrap());
+    dht::join_dht_network(&context, args.get_bootstrap(), &krpc).await;
 
     // 2. start dht server
-    krpc.listen();
+    krpc.listen().await;
 }

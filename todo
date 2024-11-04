@@ -1,14 +1,11 @@
 # Todo list for dht
 
 -   ping front of list if already exists (aron)
+-   track bucket freshness + periodically refresh if behind NAT/firewall ()
+-   re-publish k-v pairs every hour (abhay)
+-   handle bad + questionable nodes (abhay)
+-   errors (aron)
 
--   track bucket freshness
--   make sure to only periodically refresh if behind NAT/firewall
-
--   re-publish k-v pairs every hour
--   handle bad + questionable nodes 
-
--   errors
 -   testing (internal tool)
 -   refactor
 -   logs/trace

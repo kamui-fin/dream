@@ -1,6 +1,8 @@
 use std::collections::LinkedList;
 
-use crate::{config::NUM_BITS, node::Node};
+use rand::Rng;
+
+use crate::{config::{K, NUM_BITS}, node::Node};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -17,7 +19,7 @@ use crate::{config::NUM_BITS, node::Node};
 pub struct RoutingTable {
     node_id: u32,
     // array of linked lists with NUM_BITS elements
-    buckets: Vec<LinkedList<Node>>,
+    pub buckets: Vec<LinkedList<Node>>,
 }
 
 impl RoutingTable {
@@ -28,7 +30,7 @@ impl RoutingTable {
         }
     }
 
-    fn get_all_nodes(&self) -> Vec<Node> {
+    pub fn get_all_nodes(&self) -> Vec<Node> {
         let mut all_nodes = vec![];
         for bucket in self.buckets.iter() {
             for node in bucket.iter() {
@@ -38,18 +40,18 @@ impl RoutingTable {
         all_nodes
     }
 
-    fn find_bucket_idx(&self, node_id: u32) -> u32 {
+    pub fn find_bucket_idx(&self, node_id: u32) -> u32 {
         let xor_result = node_id ^ self.node_id;
         xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)
     }
 
-    fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
+    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
         self.buckets[bucket_idx]
             .iter()
             .find(|&node| (node.id == node_id))
     }
 
-    fn remove_node(&mut self, node_id: u32, bucket_idx: usize) {
+    pub fn remove_node(&mut self, node_id: u32, bucket_idx: usize) {
         let mut new_list: LinkedList<Node> = LinkedList::new();
 
         while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
@@ -62,7 +64,7 @@ impl RoutingTable {
         self.buckets[bucket_idx] = new_list;
     }
 
-    fn upsert_node(&mut self, node: Node) {
+    pub fn upsert_node(&mut self, node: Node) {
         let bucket_idx = self.find_bucket_idx(node.id) as usize;
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_none();
         let is_full = self.buckets[bucket_idx].len() >= K;
@@ -70,15 +72,16 @@ impl RoutingTable {
         if already_exists && !is_full {
             self.remove_node(node.id, bucket_idx);
             self.buckets[bucket_idx].push_back(node);
-        } else if already_exists {
+        } else if !already_exists && is_full {
             // ping front of list and go from there
             // if ping
+            
         } else {
             self.buckets[bucket_idx].push_back(node);
         }
     }
 
-    fn get_refresh_target(&self, bucket_idx: usize) -> u32 {
+    pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {
         let start = 2u32.pow((NUM_BITS - bucket_idx - 1) as u32);
         let end = 2u32.pow((NUM_BITS - bucket_idx) as u32);
 
@@ -87,8 +90,8 @@ impl RoutingTable {
         rng.gen_range(start..end)
     }
 
-    fn get_nodes(&self, target_node_id: u32) -> Vec<Node> {
-        let mut nodes = self.lock().unwrap().get_all_nodes();
+    pub fn get_nodes(&self, target_node_id: u32) -> Vec<Node> {
+        let mut nodes = self.get_all_nodes();
         nodes.sort_by_key(|node| node.id ^ target_node_id);
         nodes.truncate(K);
 

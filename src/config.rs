@@ -36,7 +36,7 @@ pub struct Args {
 }
 
 impl Args {
-    fn get_bootstrap(&self) -> Option<Node> {
+    pub fn get_bootstrap(&self) -> Option<Node> {
         let (id, ip, port) = (
             self.bootstrap_id?,
             self.bootstrap_ip.clone()?,

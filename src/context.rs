@@ -7,8 +7,6 @@ use std::{
 use local_ip_address::local_ip;
 use rand::Rng;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    net::TcpListener,
     time::sleep,
 };
 
@@ -23,7 +21,7 @@ pub struct RuntimeContext {
 }
 
 impl RuntimeContext {
-    pub fn init(args: Args) -> Self {
+    pub fn init(args: &Args) -> Self {
         let node_id = args.id.unwrap_or_else(|| {
             let mut rng = rand::thread_rng();
             rng.gen_range(0..64)
@@ -42,11 +40,12 @@ impl RuntimeContext {
     }
 
     fn token_regeneration(&self) {
+        let secret_clone = self.secret.clone();
         // change secret every 10 min
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(600)).await;
-                let mut sec = self.secret.lock().unwrap();
+                let mut sec = secret_clone.lock().unwrap();
                 *sec = gen_secret();
             }
         });
