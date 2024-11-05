@@ -13,11 +13,8 @@ mod node;
 mod routing;
 mod utils;
 
-#[tokio::main]
-async fn main() {
-    let args = Args::parse();
-
-    let context = Arc::new(RuntimeContext::init(&args));
+async fn start_dht(args: &Args) {
+    let context = Arc::new(RuntimeContext::init(args));
     let krpc = Arc::new(Krpc::init(context.clone()).await);
 
     // 1. enter with a bootstrap contact or init new network
@@ -25,4 +22,11 @@ async fn main() {
 
     // 2. start dht server
     krpc.listen().await;
+}
+
+#[tokio::main]
+async fn main() {
+    let args = Args::parse();
+
+    start_dht(&args).await;
 }

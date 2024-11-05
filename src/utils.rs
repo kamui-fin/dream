@@ -1,6 +1,6 @@
-use rand::{rngs::OsRng, Rng, RngCore};
-use std::net::Ipv4Addr;
 use crate::node::Node;
+use rand::{rngs::OsRng, Rng, RngCore};
+use std::net::{IpAddr, Ipv4Addr};
 // use hex;
 
 pub fn gen_secret() -> [u8; 16] {
@@ -35,4 +35,21 @@ pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> 
     }
 
     nodes
+}
+
+pub fn deserialize_compact_peers(serialized_peers: Option<&String>) -> Vec<(IpAddr, u16)> {
+    let mut peers = Vec::new();
+
+    let bytes = hex::decode(hex::encode(serialized_peers.unwrap())).unwrap();
+
+    for curr_chunk in bytes.chunks(6) {
+        if curr_chunk.len() == 7 {
+            let ip = Ipv4Addr::new(curr_chunk[0], curr_chunk[1], curr_chunk[2], curr_chunk[3]);
+            let port = u16::from_be_bytes([curr_chunk[4], curr_chunk[5]]);
+
+            peers.push((std::net::IpAddr::V4(ip), port))
+        }
+    }
+
+    peers
 }

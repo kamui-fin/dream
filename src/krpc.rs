@@ -13,12 +13,17 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
-use std::{collections::HashMap, net::{IpAddr, SocketAddr}, sync::Arc};
-use sha1::Digest;
 use serde::{Deserialize, Serialize};
+use sha1::Digest;
 use sha1::Sha1;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tokio::net::UdpSocket;
 
+use crate::utils::deserialize_compact_peers;
 use crate::{
     context::RuntimeContext, node::Node, utils::deserialize_compact_node, utils::gen_trans_id,
 };
@@ -74,6 +79,12 @@ impl KrpcSuccessResponse {
     }
 }
 
+pub struct GetPeersResponse {
+    pub token: u32,
+    pub peers: Option<Vec<(IpAddr, u16)>>,
+    pub nodes: Option<Vec<Node>>,
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct KrpcErrorResponse {
     t: String,
@@ -122,26 +133,65 @@ impl Krpc {
     }
 
     pub async fn send_ping(&self, addr: &str) -> KrpcSuccessResponse {
-        let mut arguments = HashMap::new();
-        arguments.insert("id".into(), "client".into());
+        let arguments = HashMap::from([("id".to_string(), self.node_id.to_string())]);
         let request = KrpcRequest::new("ping", arguments);
         let response = self.send_request(request, addr).await;
         response
     }
 
-    pub async fn send_find_node(&self, target_node: &Node) -> Vec<Node> {
-        let mut arguments = HashMap::new();
-        arguments.insert("id".into(), self.node_id.to_string());
-        arguments.insert("target".into(), target_node.id.to_string());
-
-        let request = KrpcRequest::new("ping", arguments);
-        let addr = format!("{}:{}", target_node.ip, target_node.port);
+    pub async fn send_find_node(&self, dest: Node, target_node_id: u32) -> Vec<Node> {
+        let arguments = HashMap::from([
+            ("id".to_string(), self.node_id.to_string()),
+            ("target".into(), target_node_id.to_string()),
+        ]);
+        let request = KrpcRequest::new("find_node", arguments);
+        let addr = format!("{}:{}", dest.ip, dest.port);
 
         let response: KrpcSuccessResponse = self.send_request(request, &addr).await;
-        println!("Received {:#?} from {}", response, addr);
-
         let serialized_nodes = response.r.get("nodes");
         deserialize_compact_node(serialized_nodes)
+    }
+
+    pub async fn send_get_peers(&self, dest: Node, info_hash: String) -> GetPeersResponse {
+        let arguments = HashMap::from([
+            ("id".to_string(), self.node_id.to_string()),
+            ("info_hash".into(), info_hash),
+        ]);
+        let request = KrpcRequest::new("announce_peer", arguments);
+        let addr = format!("{}:{}", dest.ip, dest.port);
+        let response = self.send_request(request, &addr).await;
+
+        let token = response.r.get("token").unwrap().parse().unwrap();
+        if response.r.contains_key("nodes") {
+            let nodes = response.r.get("nodes"); // not deserialized
+            let nodes = Some(deserialize_compact_node(nodes));
+            GetPeersResponse {
+                token,
+                nodes,
+                peers: None,
+            }
+        } else {
+            let peers = response.r.get("values"); // not deserialized
+            let peers = Some(deserialize_compact_peers(peers));
+            GetPeersResponse {
+                token,
+                peers,
+                nodes: None,
+            }
+        }
+    }
+
+    pub async fn send_announce_peer(&self, dest: Node, info_hash: String) -> KrpcSuccessResponse {
+        let get_peers = self.send_get_peers(dest.clone(), info_hash.clone()).await;
+
+        let arguments = HashMap::from([
+            ("id".to_string(), self.node_id.to_string()),
+            ("info_hash".into(), info_hash),
+            ("token".into(), get_peers.token.to_string()),
+        ]);
+        let request = KrpcRequest::new("announce_peer", arguments);
+        let addr = format!("{}:{}", dest.ip, dest.port);
+        self.send_request(request, &addr).await
     }
 
     pub async fn listen(self: Arc<Self>) {
@@ -149,7 +199,7 @@ impl Krpc {
             let mut buf = [0; 2048];
             let (len, addr) = self.socket.recv_from(&mut buf).await.unwrap();
 
-            let krpc_clone = Arc::clone(&self); 
+            let krpc_clone = Arc::clone(&self);
             tokio::spawn(async move {
                 krpc_clone.handle_krpc_call(&buf, len, addr).await;
             });
@@ -167,15 +217,19 @@ impl Krpc {
         };
 
         // Update the routing table's status of the source node
-        let needs_evicting = self.context.routing_table.lock().unwrap().upsert_node(source_node.clone());
-        
+        let needs_evicting = self
+            .context
+            .routing_table
+            .lock()
+            .unwrap()
+            .upsert_node(source_node.clone());
 
         let return_values = match query.q.as_str() {
             "ping" => self.handle_ping().await,
             "find_node" => self.handle_find_node(&query).await,
             "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
             "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,
-            _ => HashMap::new()
+            _ => HashMap::new(),
         };
 
         let response = KrpcSuccessResponse::from_request(&query, return_values);
@@ -188,16 +242,28 @@ impl Krpc {
 
     pub async fn handle_find_node(&self, query: &KrpcRequest) -> HashMap<String, String> {
         let target_node_id = query.a.get("target").unwrap().parse().unwrap();
-        let k_closest_nodes = self.context.routing_table.lock().unwrap().get_nodes(target_node_id);
+        let k_closest_nodes = self
+            .context
+            .routing_table
+            .lock()
+            .unwrap()
+            .get_nodes(target_node_id);
         let compact_node_info = k_closest_nodes
             .iter()
             .map(|node| node.get_node_compact_format())
             .collect::<Vec<String>>()
             .concat();
-        HashMap::from([("id".to_string(), self.node_id.to_string()), ("nodes".to_string(), compact_node_info)])
+        HashMap::from([
+            ("id".to_string(), self.node_id.to_string()),
+            ("nodes".to_string(), compact_node_info),
+        ])
     }
 
-    async fn handle_get_peers(&self, query: &KrpcRequest, source_node: Node) -> HashMap<String, String> {
+    async fn handle_get_peers(
+        &self,
+        query: &KrpcRequest,
+        source_node: Node,
+    ) -> HashMap<String, String> {
         let info_hash = query.a.get("info_hash").unwrap();
 
         let mut return_values = HashMap::from([("id".into(), self.node_id.to_string())]);
@@ -212,7 +278,12 @@ impl Krpc {
                 .concat();
             return_values.insert("values".into(), values); // this won't work rn
         } else {
-            let k_closest_nodes = self.context.routing_table.lock().unwrap().get_nodes(info_hash.parse().unwrap());
+            let k_closest_nodes = self
+                .context
+                .routing_table
+                .lock()
+                .unwrap()
+                .get_nodes(info_hash.parse().unwrap());
             let compact_node_info = k_closest_nodes
                 .iter()
                 .map(|node| node.get_node_compact_format())
@@ -233,7 +304,11 @@ impl Krpc {
         return_values
     }
 
-    async fn handle_announce_peer(&self, query: &KrpcRequest, source_node: Node) -> HashMap<String, String> {
+    async fn handle_announce_peer(
+        &self,
+        query: &KrpcRequest,
+        source_node: Node,
+    ) -> HashMap<String, String> {
         let info_hash = query.a.get("info_hash").unwrap();
         let token = query.a.get("token").unwrap();
 
@@ -249,7 +324,8 @@ impl Krpc {
             // send failure message
         }
 
-        self.context.peer_store
+        self.context
+            .peer_store
             .lock()
             .unwrap()
             .entry(info_hash.clone())
