@@ -6,9 +6,7 @@ use std::{
 
 use local_ip_address::local_ip;
 use rand::Rng;
-use tokio::{
-    time::sleep,
-};
+use tokio::time::sleep;
 
 use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
@@ -18,6 +16,7 @@ pub struct RuntimeContext {
     pub peer_store: Arc<Mutex<HashMap<String, Vec<Node>>>>,
     pub node: Node,
     pub secret: Arc<Mutex<[u8; 16]>>,
+    pub announce_log: Arc<Vec<String>>,
 }
 
 impl RuntimeContext {
@@ -36,21 +35,9 @@ impl RuntimeContext {
             peer_store,
             node,
             secret,
+            announce_log: Arc::new(vec![]),
         }
     }
-
-    fn token_regeneration(&self) {
-        let secret_clone = self.secret.clone();
-        // change secret every 10 min
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(600)).await;
-                let mut sec = secret_clone.lock().unwrap();
-                *sec = gen_secret();
-            }
-        });
-    }
-    // fn
 }
 
 /// Interfacing with the DHT from an external client

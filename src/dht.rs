@@ -2,17 +2,60 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     net::IpAddr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use crate::{
-    config::{ALPHA, K, NUM_BITS},
+    config::{Args, ALPHA, K, NUM_BITS},
     context::RuntimeContext,
     krpc::Krpc,
     node::{Node, NodeDistance},
+    utils::gen_secret,
 };
-use tokio::{net::UdpSocket, task::JoinSet};
+use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
+
+pub async fn start_dht(args: &Args) {
+    let context = Arc::new(RuntimeContext::init(args));
+    let krpc = Arc::new(Krpc::init(context.clone()).await);
+
+    // 1. enter with a bootstrap contact or init new network
+    join_dht_network(&context, args.get_bootstrap(), &krpc).await;
+
+    // 2. start maintenance tasks
+    periodic_republish(context.clone(), krpc.clone());
+    periodic_token_regeneration(&context);
+
+    // 3. start dht server
+    krpc.listen().await;
+}
+
+fn periodic_republish(context: Arc<RuntimeContext>, krpc: Arc<Krpc>) {
+    let log_clone = context.announce_log.clone();
+    // republish k-v pairs every 1 hr
+    tokio::spawn(async move {
+        let krpc = krpc.clone();
+        loop {
+            sleep(Duration::from_secs(60 * 60)).await;
+            for info_hash in log_clone.iter() {
+                send_announce_peer(info_hash.clone(), &context, &krpc).await;
+            }
+        }
+    });
+}
+
+fn periodic_token_regeneration(context: &Arc<RuntimeContext>) {
+    let secret_clone = context.secret.clone();
+    // change secret every 10 min
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(600)).await;
+            let mut sec = secret_clone.lock().unwrap();
+            *sec = gen_secret();
+        }
+    });
+}
 
 pub async fn join_dht_network(
     context: &RuntimeContext,
