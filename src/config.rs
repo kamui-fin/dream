@@ -13,7 +13,7 @@ pub const ALPHA: usize = 3;
 
 // TOML config loading and clap CLI arg parse
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     #[arg(long)]
@@ -21,9 +21,6 @@ pub struct Args {
 
     #[arg(short, long)]
     pub udp_port: u16,
-
-    #[arg(short, long)]
-    pub tcp_port: Option<u16>,
 
     #[arg(long)]
     pub bootstrap_id: Option<u32>,

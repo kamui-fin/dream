@@ -111,7 +111,8 @@ pub struct Kademlia {
 }
 
 impl Kademlia {
-    pub async fn init(context: Arc<RuntimeContext>) -> Self {
+    pub async fn init(args: &Args) -> Self {
+        let context = Arc::new(RuntimeContext::init(args));
         let socket = Arc::new(
             UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
                 .await
@@ -124,6 +125,18 @@ impl Kademlia {
             node_id,
             context,
         }
+    }
+
+    pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
+        // 1. enter with a bootstrap contact or init new network
+        self.clone().join_dht_network(bootstrap_node).await;
+
+        // 2. start maintenance tasks
+        self.clone().republish_peer_task();
+        self.context.clone().regen_token_task();
+
+        // 3. start dht server
+        self.listen().await;
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -446,6 +459,10 @@ impl Kademlia {
     }
 
     pub async fn listen(self: Arc<Self>) {
+        info!(
+            "Starting Kademlia node {} and listening on {}:{}",
+            self.node_id, self.context.node.ip, self.context.node.port
+        );
         loop {
             let mut buf = [0; 2048];
             let (len, addr) = self.socket.recv_from(&mut buf).await.unwrap();
