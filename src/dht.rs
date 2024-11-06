@@ -82,7 +82,7 @@ pub async fn join_dht_network(
         .unwrap()
         .find_bucket_idx(k_closest_nodes[0].node.id);
 
-    for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+    for idx in (closest_idx + 1)..(NUM_BITS as usize) {
         refresh_bucket(idx as usize, context, &krpc).await;
     }
 }
@@ -116,7 +116,7 @@ fn select_initial_nodes(target_node_id: u32, context: &RuntimeContext) -> Vec<No
     let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
 
     while routing_table_clone.buckets[bucket_idx as usize].is_empty() {
-        bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
+        bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as usize;
     }
 
     for node in routing_table_clone.buckets[bucket_idx as usize].iter() {

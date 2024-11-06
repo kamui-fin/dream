@@ -16,12 +16,16 @@
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
+use std::clone;
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
 use tokio::net::UdpSocket;
+use tokio::time::{timeout, Duration};
+use anyhow::Result;
+use anyhow::anyhow;
 
 use crate::utils::deserialize_compact_peers;
 use crate::{
@@ -115,15 +119,21 @@ impl Krpc {
         }
     }
 
-    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> KrpcSuccessResponse {
+    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> Result<KrpcSuccessResponse> {
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
 
         let mut buf = [0; 2048];
-        let (amt, _) = self.socket.recv_from(&mut buf).await.unwrap();
-        let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
-
-        response
+        match timeout(Duration::from_secs(3), self.socket.recv_from(&mut buf)).await {
+            Ok(result) => {
+                let (amt, _) = result?;
+                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt])?;
+                Ok(response)
+            }
+            Err(_elapsed) => {
+                Err(anyhow!("Timeout waiting for response"))
+            }
+        }
     }
 
     pub async fn send_response(&self, response: KrpcSuccessResponse, source_node: Node) {
@@ -132,7 +142,7 @@ impl Krpc {
         self.socket.send_to(&response, addr).await.unwrap();
     }
 
-    pub async fn send_ping(&self, addr: &str) -> KrpcSuccessResponse {
+    pub async fn send_ping(&self, addr: &str) -> Result<KrpcSuccessResponse> {
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_string())]);
         let request = KrpcRequest::new("ping", arguments);
         let response = self.send_request(request, addr).await;
@@ -147,7 +157,7 @@ impl Krpc {
         let request = KrpcRequest::new("find_node", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
 
-        let response: KrpcSuccessResponse = self.send_request(request, &addr).await;
+        let response: KrpcSuccessResponse = self.send_request(request, &addr).await.unwrap();
         let serialized_nodes = response.r.get("nodes");
         deserialize_compact_node(serialized_nodes)
     }
@@ -159,7 +169,7 @@ impl Krpc {
         ]);
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        let response = self.send_request(request, &addr).await;
+        let response = self.send_request(request, &addr).await.unwrap();
 
         let token = response.r.get("token").unwrap().parse().unwrap();
         if response.r.contains_key("nodes") {
@@ -191,7 +201,7 @@ impl Krpc {
         ]);
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        self.send_request(request, &addr).await
+        self.send_request(request, &addr).await.unwrap()
     }
 
     pub async fn listen(self: Arc<Self>) {
@@ -217,12 +227,29 @@ impl Krpc {
         };
 
         // Update the routing table's status of the source node
-        let needs_evicting = self
+        let check_for_eviction = self
             .context
             .routing_table
             .lock()
             .unwrap()
             .upsert_node(source_node.clone());
+        if check_for_eviction {
+            let routing_table = self.context.routing_table.lock().unwrap();
+            let mut bucket = routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+            let oldest_node = bucket.front().unwrap().clone();
+
+            let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
+            let mut response = self.send_ping(&addr).await;
+            if !response.is_ok() {
+                response = self.send_ping(&addr).await;
+            }
+
+            // Evict the oldest node if we don't get a response after two tries and insert the new node
+            if !response.is_ok() || response.unwrap().r["id"] != source_id.to_string() {
+                bucket.pop_front();
+                bucket.push_back(source_node.clone());
+            }
+        }
 
         let return_values = match query.q.as_str() {
             "ping" => self.handle_ping().await,
