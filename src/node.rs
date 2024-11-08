@@ -29,7 +29,7 @@ impl Node {
         let port = self.port.to_le_bytes();
         compact_info[4..6].copy_from_slice(&port);
 
-        format!("{:?}", compact_info)
+        hex::encode(&compact_info)
     }
 
     pub fn get_node_compact_format(&self) -> String {
@@ -37,18 +37,18 @@ impl Node {
         compact_info[0] = self.id as u8;
 
         if let IpAddr::V4(v4_addr) = self.ip {
-            let ip = v4_addr.to_bits().to_le_bytes();
+            let ip = v4_addr.octets();
             compact_info[1..5].copy_from_slice(&ip);
         }
 
-        let port = self.port.to_le_bytes();
+        let port = self.port.to_be_bytes();
         compact_info[5..7].copy_from_slice(&port);
 
-        format!("{:?}", compact_info)
+        hex::encode(&compact_info)
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct NodeDistance {
     pub node: Node,
     pub dist: u32,

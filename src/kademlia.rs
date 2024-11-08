@@ -143,18 +143,27 @@ impl Kademlia {
         if bootstrap_node.is_none() {
             return;
         }
+        let bootstrap_node = bootstrap_node.unwrap();
+        info!(
+            "Joining network through bootstrap id = {}",
+            bootstrap_node.id
+        );
         // 1. initialize k-bucket with another known node
         self.context
             .routing_table
             .lock()
             .unwrap()
-            .upsert_node(bootstrap_node.unwrap());
+            .upsert_node(bootstrap_node);
 
         let self_clone = self.clone();
 
         // 2. run find_nodes on itself to fill k-bucket table
         let my_id = self_clone.context.node.id;
         let k_closest_nodes = self_clone.recursive_find_nodes(my_id).await; // assuming sorted by distance
+        info!(
+            "Populating routing table with k closest nodes = {:#?}",
+            k_closest_nodes
+        );
 
         // 3. refresh buckets past closest node bucket
         let closest_idx = self
@@ -251,7 +260,7 @@ impl Kademlia {
     fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
         let mut alpha_set = vec![];
         let routing_table_clone = self.context.routing_table.lock().unwrap();
-        let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+        let mut bucket_idx = std::cmp::min(routing_table_clone.find_bucket_idx(target_node_id), 5);
 
         while routing_table_clone.buckets[bucket_idx as usize].is_empty() {
             bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
@@ -296,9 +305,12 @@ impl Kademlia {
         let mut alpha_set = self.select_initial_nodes(target_node_id);
         alpha_set.truncate(ALPHA);
 
+        info!("Alpha set: {:#?}", alpha_set);
+
         let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
             Arc::new(Mutex::new(BinaryHeap::new()));
         let within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+        
 
         for distance_node in alpha_set.iter().cloned() {
             within_heap.lock().unwrap().insert(distance_node.node.id);
@@ -315,9 +327,11 @@ impl Kademlia {
                 already_queried.insert(distance_node.node.id);
 
                 set.spawn(async move {
+                    info!("Getting K closest from neighbor ({:#?})", distance_node);
                     let k_closest_nodes = kademlia
                         .send_find_node(distance_node.node.clone(), target_node_id)
                         .await;
+                    info!("{:#?}", k_closest_nodes);
                     kademlia.update_closest_nodes(
                         &max_heap,
                         &within_heap,
@@ -341,11 +355,13 @@ impl Kademlia {
                 .cloned()
                 .collect::<Vec<NodeDistance>>();
 
+            info!("New closest: {:#?}", new_closest);
+
             if new_closest.is_empty() {
                 break;
             }
 
-            alpha_set = new_closest[0..ALPHA].to_vec();
+            alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
         }
 
         let max_heap = max_heap.lock().unwrap();
@@ -434,6 +450,7 @@ impl Kademlia {
     // fyi: refresh periodically too besides only when joining
     // if no node lookup for bucket range has been done within 1hr
     pub async fn refresh_bucket(self: Arc<Self>, bucket_idx: usize) {
+        info!("Refreshing bucket #{bucket_idx}");
         let node_id = self
             .context
             .routing_table
@@ -510,12 +527,14 @@ impl Kademlia {
 
     pub async fn handle_find_node(&self, query: &KrpcRequest) -> HashMap<String, String> {
         let target_node_id = query.a.get("target").unwrap().parse().unwrap();
+        info!("Received find_nodes RPC for target {target_node_id}");
         let k_closest_nodes = self
             .context
             .routing_table
             .lock()
             .unwrap()
             .get_nodes(target_node_id);
+        info!("{:#?}", k_closest_nodes);
         let compact_node_info = k_closest_nodes
             .iter()
             .map(|node| node.get_node_compact_format())

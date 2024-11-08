@@ -19,7 +19,7 @@ mod utils;
 async fn main() {
     pretty_env_logger::init();
 
-    // let args = Args::parse();
-
-    start_n_nodes(3).await;
+    let args = Args::parse();
+    // start_n_nodes(3).await;
+    start_dht(&args).await;
 }
