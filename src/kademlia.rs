@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
+use tokio::task::JoinHandle;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     collections::{BinaryHeap, HashSet},
@@ -108,6 +109,7 @@ pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     pub context: Arc<RuntimeContext>,
     node_id: u32,
+    pub timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>>,
 }
 
 impl Kademlia {
@@ -119,11 +121,29 @@ impl Kademlia {
         );
         let node_id = context.node.id;
 
+        let timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>> = Arc::new(Mutex::new(HashMap::new()));
+
         Self {
             socket,
             node_id,
             context,
+            timers
         }
+    }
+
+    pub fn reset_timer(self: Arc<Self>, bucket_idx: usize){
+
+        let self_clone = self.clone();
+        
+        let mut binding = self_clone.timers.lock().unwrap();
+        let mut current_timer = &binding.get(&bucket_idx).unwrap();
+
+        current_timer.abort();
+
+        binding.insert(bucket_idx, tokio::spawn(async move {
+            sleep(Duration::from_secs(15 * 60)).await;
+            self.refresh_bucket(bucket_idx);
+        }));
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -179,6 +199,8 @@ impl Kademlia {
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_string())]);
         let request = KrpcRequest::new("ping", arguments);
         let response = self.send_request(request, addr).await;
+
+        
         response
     }
 
