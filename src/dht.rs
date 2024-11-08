@@ -1,35 +1,25 @@
-use std::{
-    collections::{BinaryHeap, HashMap, HashSet},
-    net::IpAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::Arc;
 
-use crate::{
-    config::{Args, ALPHA, K, NUM_BITS},
-    context::RuntimeContext,
-    krpc::Krpc,
-    node::{Node, NodeDistance},
-    utils::gen_secret,
-};
-use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
-
-type Peer = (IpAddr, u16);
+use crate::{config::Args, context::RuntimeContext, kademlia::Kademlia};
 
 pub async fn start_dht(args: &Args) {
     let context = Arc::new(RuntimeContext::init(args));
-    let krpc = Arc::new(Krpc::init(context.clone()).await);
+    let kademlia = Arc::new(Kademlia::init(context.clone()).await);
 
     // 1. enter with a bootstrap contact or init new network
-    join_dht_network(&context, args.get_bootstrap(), &krpc).await;
+    kademlia
+        .clone()
+        .join_dht_network(args.get_bootstrap())
+        .await;
 
     // 2. start maintenance tasks
-    periodic_republish(context.clone(), krpc.clone());
-    periodic_token_regeneration(&context);
+    kademlia.clone().republish_peer_task();
+    context.regen_token_task();
 
     // 3. start dht server
-    krpc.listen().await;
+    kademlia.listen().await;
 }
+<<<<<<< HEAD
 
 fn periodic_republish(context: Arc<RuntimeContext>, krpc: Arc<Krpc>) {
     let log_clone = context.announce_log.clone();
@@ -285,3 +275,5 @@ pub async fn recursive_get_peers(
     vec![]
 }
 
+=======
+>>>>>>> main

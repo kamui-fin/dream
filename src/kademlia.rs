@@ -16,21 +16,35 @@
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
+<<<<<<< HEAD:src/krpc.rs
 use std::clone;
+=======
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+>>>>>>> main:src/kademlia.rs
 use std::{
-    collections::HashMap,
-    net::{IpAddr, SocketAddr},
-    sync::Arc,
+    collections::{BinaryHeap, HashSet},
+    net::IpAddr,
+    sync::Mutex,
+    time::Duration,
 };
+<<<<<<< HEAD:src/krpc.rs
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Duration};
 use anyhow::Result;
 use anyhow::anyhow;
+=======
+>>>>>>> main:src/kademlia.rs
 
 use crate::utils::deserialize_compact_peers;
 use crate::{
-    context::RuntimeContext, node::Node, utils::deserialize_compact_node, utils::gen_trans_id,
+    config::{Args, ALPHA, K, NUM_BITS},
+    node::{Node, NodeDistance},
+    utils::gen_secret,
 };
+use crate::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
+use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
+
+type Peer = (IpAddr, u16);
 
 pub enum KrpcError {
     // 201
@@ -83,10 +97,14 @@ impl KrpcSuccessResponse {
     }
 }
 
+enum NodeOrPeer {
+    Peers(Vec<Peer>),
+    Nodes(Vec<Node>),
+}
+
 pub struct GetPeersResponse {
     pub token: u32,
-    pub peers: Option<Vec<(IpAddr, u16)>>,
-    pub nodes: Option<Vec<Node>>,
+    pub value: NodeOrPeer,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -97,13 +115,13 @@ pub struct KrpcErrorResponse {
     e: (u8, String),
 }
 
-pub struct Krpc {
+pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     pub context: Arc<RuntimeContext>,
     node_id: u32,
 }
 
-impl Krpc {
+impl Kademlia {
     pub async fn init(context: Arc<RuntimeContext>) -> Self {
         let socket = Arc::new(
             UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
@@ -119,7 +137,43 @@ impl Krpc {
         }
     }
 
+<<<<<<< HEAD:src/krpc.rs
     pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> Result<KrpcSuccessResponse> {
+=======
+    pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
+        if bootstrap_node.is_none() {
+            return;
+        }
+        // 1. initialize k-bucket with another known node
+        self.context
+            .routing_table
+            .lock()
+            .unwrap()
+            .upsert_node(bootstrap_node.unwrap());
+
+        let self_clone = self.clone();
+
+        // 2. run find_nodes on itself to fill k-bucket table
+        let my_id = self_clone.context.node.id;
+        let k_closest_nodes = self_clone.recursive_find_nodes(my_id).await; // assuming sorted by distance
+
+        // 3. refresh buckets past closest node bucket
+        let closest_idx = self
+            .clone()
+            .context
+            .routing_table
+            .lock()
+            .unwrap()
+            .find_bucket_idx(k_closest_nodes[0].node.id);
+
+        for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+            let self_clone = self.clone();
+            self_clone.refresh_bucket(idx as usize).await;
+        }
+    }
+
+    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> KrpcSuccessResponse {
+>>>>>>> main:src/kademlia.rs
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
 
@@ -174,19 +228,17 @@ impl Krpc {
         let token = response.r.get("token").unwrap().parse().unwrap();
         if response.r.contains_key("nodes") {
             let nodes = response.r.get("nodes"); // not deserialized
-            let nodes = Some(deserialize_compact_node(nodes));
+            let nodes = deserialize_compact_node(nodes);
             GetPeersResponse {
                 token,
-                nodes,
-                peers: None,
+                value: NodeOrPeer::Nodes(nodes),
             }
         } else {
             let peers = response.r.get("values"); // not deserialized
-            let peers = Some(deserialize_compact_peers(peers));
+            let peers = deserialize_compact_peers(peers);
             GetPeersResponse {
                 token,
-                peers,
-                nodes: None,
+                value: NodeOrPeer::Peers(peers),
             }
         }
     }
@@ -202,6 +254,216 @@ impl Krpc {
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
         self.send_request(request, &addr).await.unwrap()
+    }
+
+    fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
+        let mut alpha_set = vec![];
+        let routing_table_clone = self.context.routing_table.lock().unwrap();
+        let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+
+        while routing_table_clone.buckets[bucket_idx as usize].is_empty() {
+            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
+        }
+
+        for node in routing_table_clone.buckets[bucket_idx as usize].iter() {
+            alpha_set.push(NodeDistance {
+                node: node.clone(),
+                dist: node.id ^ target_node_id,
+            });
+        }
+
+        alpha_set
+    }
+
+    fn update_closest_nodes(
+        &self,
+        max_heap: &Arc<Mutex<BinaryHeap<NodeDistance>>>,
+        within_heap: &Arc<Mutex<HashSet<u32>>>,
+        new_nodes: Vec<Node>,
+        target_node_id: u32,
+    ) {
+        for node in new_nodes {
+            if !within_heap.lock().unwrap().contains(&node.id) {
+                max_heap.lock().unwrap().push(NodeDistance {
+                    node: node.clone(),
+                    dist: node.id ^ target_node_id,
+                });
+                if max_heap.lock().unwrap().len() > K {
+                    max_heap.lock().unwrap().pop();
+                }
+                within_heap.lock().unwrap().insert(node.id);
+            }
+        }
+    }
+
+    pub async fn recursive_find_nodes(self: Arc<Self>, target_node_id: u32) -> Vec<NodeDistance> {
+        let mut set = JoinSet::new();
+        let mut already_queried = HashSet::new();
+
+        // Select initial nodes
+        let mut alpha_set = self.select_initial_nodes(target_node_id);
+        alpha_set.truncate(ALPHA);
+
+        let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
+            Arc::new(Mutex::new(BinaryHeap::new()));
+        let within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        for distance_node in alpha_set.iter().cloned() {
+            within_heap.lock().unwrap().insert(distance_node.node.id);
+            max_heap.lock().unwrap().push(distance_node);
+        }
+
+        loop {
+            // Send parallel FIND_NODE requests
+            for distance_node in alpha_set.iter().cloned() {
+                let within_heap = Arc::clone(&within_heap);
+                let max_heap = Arc::clone(&max_heap);
+                let kademlia = self.clone();
+
+                already_queried.insert(distance_node.node.id);
+
+                set.spawn(async move {
+                    let k_closest_nodes = kademlia
+                        .send_find_node(distance_node.node.clone(), target_node_id)
+                        .await;
+                    kademlia.update_closest_nodes(
+                        &max_heap,
+                        &within_heap,
+                        k_closest_nodes,
+                        target_node_id,
+                    );
+                });
+            }
+
+            // Join all tasks
+            while set.join_next().await.is_some() {}
+
+            // Resend to new unqueried nodes
+            let new_closest = max_heap
+                .lock()
+                .unwrap()
+                .clone()
+                .into_sorted_vec()
+                .iter()
+                .filter(|n| !already_queried.contains(&n.node.id))
+                .cloned()
+                .collect::<Vec<NodeDistance>>();
+
+            if new_closest.is_empty() {
+                break;
+            }
+
+            alpha_set = new_closest[0..ALPHA].to_vec();
+        }
+
+        let max_heap = max_heap.lock().unwrap();
+        max_heap.clone().into_sorted_vec()
+    }
+
+    // duplication from find_node, but subtle and important differences
+    // rather duplicate than make one function do many different things
+    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: u32) -> Vec<(IpAddr, u16)> {
+        // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
+        let mut set = JoinSet::new();
+        let mut already_queried = HashSet::new();
+        // pick α nodes from closest non-empty k-bucket, even if less than α entries
+        let mut alpha_set = self.select_initial_nodes(info_hash);
+        alpha_set.truncate(ALPHA);
+
+        let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
+            Arc::new(Mutex::new(BinaryHeap::new()));
+        let within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
+
+        for distance_node in alpha_set.iter().cloned() {
+            within_heap.lock().unwrap().insert(distance_node.node.id);
+            max_heap.lock().unwrap().push(distance_node);
+        }
+
+        loop {
+            // send parallel find_node to all of em
+            for distance_node in alpha_set.iter().cloned() {
+                let within_heap = Arc::clone(&within_heap);
+                let max_heap = Arc::clone(&max_heap);
+                let kademlia = self.clone();
+                // updated k closest
+                already_queried.insert(distance_node.node.id);
+                set.spawn(async move {
+                    let get_peers_res = kademlia
+                        .send_get_peers(distance_node.node.clone(), info_hash.to_string())
+                        .await;
+                    match get_peers_res.value {
+                        NodeOrPeer::Peers(peers) => {
+                            return Some(peers);
+                        }
+                        NodeOrPeer::Nodes(k_closest_nodes) => {
+                            kademlia.update_closest_nodes(
+                                &max_heap,
+                                &within_heap,
+                                k_closest_nodes,
+                                info_hash,
+                            );
+                            None
+                        }
+                    }
+                });
+            }
+            // JOIN all these tasks
+            while let Some(result) = set.join_next().await {
+                if let Ok(result) = result {
+                    if let Some(peers) = result {
+                        return peers;
+                    }
+                }
+            }
+
+            // resend the find_node to nodes it has learned about from previous RPCs
+            // of the k nodes you have heard of closest to the target, it picks α that it has not yet queried and resends the FIND NODE RPC to them.
+            let new_closest = max_heap
+                .lock()
+                .unwrap()
+                .clone()
+                .into_sorted_vec()
+                .iter()
+                .filter(|n| !already_queried.contains(&n.node.id))
+                .cloned()
+                .collect::<Vec<NodeDistance>>();
+
+            // the lookup terminates when the initiator has queried and gotten responses from the k closest nodes it has seen.
+            if new_closest.is_empty() {
+                break;
+            }
+
+            alpha_set = new_closest[0..ALPHA].to_vec();
+        }
+
+        vec![]
+    }
+
+    // fyi: refresh periodically too besides only when joining
+    // if no node lookup for bucket range has been done within 1hr
+    pub async fn refresh_bucket(self: Arc<Self>, bucket_idx: usize) {
+        let node_id = self
+            .context
+            .routing_table
+            .lock()
+            .unwrap()
+            .get_refresh_target(bucket_idx);
+        self.recursive_find_nodes(node_id).await;
+    }
+
+    pub async fn announce_peer(self: Arc<Self>, info_hash: String) {
+        let closest_nodes = self
+            .clone()
+            .recursive_find_nodes(info_hash.parse().unwrap())
+            .await;
+        for node_dist in closest_nodes {
+            let node = node_dist.node.clone();
+            let info_hash = info_hash.clone();
+            let kademlia = self.clone();
+            tokio::spawn(async move {
+                kademlia.send_announce_peer(node, info_hash).await;
+            });
+        }
     }
 
     pub async fn listen(self: Arc<Self>) {
@@ -303,7 +565,7 @@ impl Krpc {
                 .map(|peer| peer.get_peer_compact_format())
                 .collect::<Vec<String>>()
                 .concat();
-            return_values.insert("values".into(), values); // this won't work rn
+            return_values.insert("values".into(), values);
         } else {
             let k_closest_nodes = self
                 .context
@@ -360,5 +622,19 @@ impl Krpc {
             .push(source_node);
 
         HashMap::from([("id".into(), self.node_id.to_string())])
+    }
+
+    pub fn republish_peer_task(self: Arc<Self>) {
+        let log_clone = self.context.announce_log.clone();
+        // republish k-v pairs every 1 hr
+        tokio::spawn(async move {
+            let kademlia = self.clone();
+            loop {
+                sleep(Duration::from_secs(60 * 60)).await;
+                for info_hash in log_clone.iter() {
+                    kademlia.clone().announce_peer(info_hash.clone()).await;
+                }
+            }
+        });
     }
 }

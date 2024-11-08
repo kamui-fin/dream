@@ -5,7 +5,7 @@ use config::Args;
 mod config;
 mod context;
 mod dht;
-mod krpc;
+mod kademlia;
 mod node;
 mod routing;
 mod utils;

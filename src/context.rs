@@ -38,6 +38,18 @@ impl RuntimeContext {
             announce_log: Arc::new(vec![]),
         }
     }
+
+    pub fn regen_token_task(self: Arc<Self>) {
+        let secret_clone = self.secret.clone();
+        // change secret every 10 min
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(600)).await;
+                let mut sec = secret_clone.lock().unwrap();
+                *sec = gen_secret();
+            }
+        });
+    }
 }
 
 /// Interfacing with the DHT from an external client
