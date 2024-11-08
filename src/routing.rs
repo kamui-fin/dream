@@ -2,7 +2,10 @@ use std::collections::LinkedList;
 
 use rand::Rng;
 
-use crate::{config::{K, NUM_BITS}, node::Node};
+use crate::{
+    config::{K, NUM_BITS},
+    node::Node,
+};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -26,7 +29,7 @@ impl RoutingTable {
     pub fn new(node_id: u32) -> Self {
         Self {
             node_id,
-            buckets: Vec::with_capacity(NUM_BITS),
+            buckets: vec![LinkedList::new(); NUM_BITS],
         }
     }
 
@@ -66,15 +69,16 @@ impl RoutingTable {
 
     pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id) as usize;
-        let already_exists = self.node_in_bucket(bucket_idx, node.id).is_none();
+        let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
         let is_full = self.buckets[bucket_idx].len() >= K;
+        info!("Adding node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
 
         if already_exists && !is_full {
             self.remove_node(node.id, bucket_idx);
             self.buckets[bucket_idx].push_back(node);
         } else if !already_exists && is_full {
             // ping front of list and go from there
-            return true;
+            // if ping
         } else {
             self.buckets[bucket_idx].push_back(node);
         }

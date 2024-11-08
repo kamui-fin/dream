@@ -12,4 +12,7 @@ tokio = { version = "1.41.0", features = ["full"] }
 local-ip-address = "0.6.3"
 clap = { version = "4.5.20", features = ["derive"] }
 hex = "0.4.3"
-anyhow = "1.0.92"
+futures = "0.3.31"
+log = "0.4"
+pretty_env_logger = "0.4"
+serde_json = "1.0"

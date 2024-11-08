@@ -16,24 +16,14 @@
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
-<<<<<<< HEAD:src/krpc.rs
-use std::clone;
-=======
+use tokio::time::timeout;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
->>>>>>> main:src/kademlia.rs
 use std::{
     collections::{BinaryHeap, HashSet},
     net::IpAddr,
     sync::Mutex,
     time::Duration,
 };
-<<<<<<< HEAD:src/krpc.rs
-use tokio::net::UdpSocket;
-use tokio::time::{timeout, Duration};
-use anyhow::Result;
-use anyhow::anyhow;
-=======
->>>>>>> main:src/kademlia.rs
 
 use crate::utils::deserialize_compact_peers;
 use crate::{
@@ -42,6 +32,7 @@ use crate::{
     utils::gen_secret,
 };
 use crate::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
+use tokio::time::Timeout;
 use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
@@ -122,7 +113,8 @@ pub struct Kademlia {
 }
 
 impl Kademlia {
-    pub async fn init(context: Arc<RuntimeContext>) -> Self {
+    pub async fn init(args: &Args) -> Self {
+        let context = Arc::new(RuntimeContext::init(args));
         let socket = Arc::new(
             UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
                 .await
@@ -137,25 +129,43 @@ impl Kademlia {
         }
     }
 
-<<<<<<< HEAD:src/krpc.rs
-    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> Result<KrpcSuccessResponse> {
-=======
+    pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
+        // 1. enter with a bootstrap contact or init new network
+        self.clone().join_dht_network(bootstrap_node).await;
+
+        // 2. start maintenance tasks
+        self.clone().republish_peer_task();
+        self.context.clone().regen_token_task();
+
+        // 3. start dht server
+        self.listen().await;
+    }
+
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
         if bootstrap_node.is_none() {
             return;
         }
+        let bootstrap_node = bootstrap_node.unwrap();
+        info!(
+            "Joining network through bootstrap id = {}",
+            bootstrap_node.id
+        );
         // 1. initialize k-bucket with another known node
         self.context
             .routing_table
             .lock()
             .unwrap()
-            .upsert_node(bootstrap_node.unwrap());
+            .upsert_node(bootstrap_node);
 
         let self_clone = self.clone();
 
         // 2. run find_nodes on itself to fill k-bucket table
         let my_id = self_clone.context.node.id;
         let k_closest_nodes = self_clone.recursive_find_nodes(my_id).await; // assuming sorted by distance
+        info!(
+            "Populating routing table with k closest nodes = {:#?}",
+            k_closest_nodes
+        );
 
         // 3. refresh buckets past closest node bucket
         let closest_idx = self
@@ -166,27 +176,28 @@ impl Kademlia {
             .unwrap()
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+        for idx in (closest_idx + 1)..(NUM_BITS as usize) {
             let self_clone = self.clone();
             self_clone.refresh_bucket(idx as usize).await;
         }
     }
 
-    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> KrpcSuccessResponse {
->>>>>>> main:src/kademlia.rs
+    pub async fn send_request(
+        &self,
+        query: KrpcRequest,
+        addr: &str,
+    ) -> Option<KrpcSuccessResponse> {
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
 
         let mut buf = [0; 2048];
         match timeout(Duration::from_secs(3), self.socket.recv_from(&mut buf)).await {
             Ok(result) => {
-                let (amt, _) = result?;
-                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt])?;
-                Ok(response)
+                let (amt, _) = result.unwrap();
+                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
+                Some(response)
             }
-            Err(_elapsed) => {
-                Err(anyhow!("Timeout waiting for response"))
-            }
+            Err(_elapsed) => None,
         }
     }
 
@@ -196,7 +207,7 @@ impl Kademlia {
         self.socket.send_to(&response, addr).await.unwrap();
     }
 
-    pub async fn send_ping(&self, addr: &str) -> Result<KrpcSuccessResponse> {
+    pub async fn send_ping(&self, addr: &str) -> Option<KrpcSuccessResponse> {
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_string())]);
         let request = KrpcRequest::new("ping", arguments);
         let response = self.send_request(request, addr).await;
@@ -259,10 +270,10 @@ impl Kademlia {
     fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
         let mut alpha_set = vec![];
         let routing_table_clone = self.context.routing_table.lock().unwrap();
-        let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+        let mut bucket_idx = std::cmp::min(routing_table_clone.find_bucket_idx(target_node_id), 5);
 
         while routing_table_clone.buckets[bucket_idx as usize].is_empty() {
-            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
+            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as usize;
         }
 
         for node in routing_table_clone.buckets[bucket_idx as usize].iter() {
@@ -304,6 +315,8 @@ impl Kademlia {
         let mut alpha_set = self.select_initial_nodes(target_node_id);
         alpha_set.truncate(ALPHA);
 
+        info!("Alpha set: {:#?}", alpha_set);
+
         let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
             Arc::new(Mutex::new(BinaryHeap::new()));
         let within_heap: Arc<Mutex<HashSet<u32>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -323,9 +336,11 @@ impl Kademlia {
                 already_queried.insert(distance_node.node.id);
 
                 set.spawn(async move {
+                    info!("Getting K closest from neighbor ({:#?})", distance_node);
                     let k_closest_nodes = kademlia
                         .send_find_node(distance_node.node.clone(), target_node_id)
                         .await;
+                    info!("{:#?}", k_closest_nodes);
                     kademlia.update_closest_nodes(
                         &max_heap,
                         &within_heap,
@@ -349,11 +364,13 @@ impl Kademlia {
                 .cloned()
                 .collect::<Vec<NodeDistance>>();
 
+            info!("New closest: {:#?}", new_closest);
+
             if new_closest.is_empty() {
                 break;
             }
 
-            alpha_set = new_closest[0..ALPHA].to_vec();
+            alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
         }
 
         let max_heap = max_heap.lock().unwrap();
@@ -442,6 +459,7 @@ impl Kademlia {
     // fyi: refresh periodically too besides only when joining
     // if no node lookup for bucket range has been done within 1hr
     pub async fn refresh_bucket(self: Arc<Self>, bucket_idx: usize) {
+        info!("Refreshing bucket #{bucket_idx}");
         let node_id = self
             .context
             .routing_table
@@ -467,6 +485,10 @@ impl Kademlia {
     }
 
     pub async fn listen(self: Arc<Self>) {
+        info!(
+            "Starting Kademlia node {} and listening on {}:{}",
+            self.node_id, self.context.node.ip, self.context.node.port
+        );
         loop {
             let mut buf = [0; 2048];
             let (len, addr) = self.socket.recv_from(&mut buf).await.unwrap();
@@ -488,31 +510,44 @@ impl Kademlia {
             port: addr.port(),
         };
 
-        // Update the routing table's status of the source node
-        let check_for_eviction = self
-            .context
-            .routing_table
-            .lock()
-            .unwrap()
-            .upsert_node(source_node.clone());
+        // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
+        let check_for_eviction = {
+            let mut routing_table = self.context.routing_table.lock().unwrap();
+            routing_table.upsert_node(source_node.clone())
+        };
+        
+        // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
         if check_for_eviction {
-            let routing_table = self.context.routing_table.lock().unwrap();
-            let mut bucket = routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
-            let oldest_node = bucket.front().unwrap().clone();
+            let (bucket, oldest_node) = {
+                let routing_table = self.context.routing_table.lock().unwrap();
+                let _bucket = routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                (_bucket.clone(), _bucket.front().unwrap().clone())
+            };
 
             let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
             let mut response = self.send_ping(&addr).await;
-            if !response.is_ok() {
+            // Retry once
+            if response.is_none() {
                 response = self.send_ping(&addr).await;
             }
 
-            // Evict the oldest node if we don't get a response after two tries and insert the new node
-            if !response.is_ok() || response.unwrap().r["id"] != source_id.to_string() {
-                bucket.pop_front();
-                bucket.push_back(source_node.clone());
+            {
+                let mut routing_table = self.context.routing_table.lock().unwrap();
+                let bucket_idx = routing_table.find_bucket_idx(source_id);
+                
+                routing_table.buckets[bucket_idx].pop_front();
+                // If the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
+                if response.is_none() || response.unwrap().r["id"] != oldest_node.id.to_string() {
+                    routing_table.buckets[bucket_idx].push_back(source_node.clone());
+                }
+                // Otherwise, keep the oldest node and update its "freshness"
+                else {
+                    routing_table.buckets[bucket_idx].push_back(oldest_node);
+                }
             }
         }
 
+        // Step 3: Dispatch to respective handler functions
         let return_values = match query.q.as_str() {
             "ping" => self.handle_ping().await,
             "find_node" => self.handle_find_node(&query).await,
@@ -521,8 +556,9 @@ impl Kademlia {
             _ => HashMap::new(),
         };
 
+        // Step 4: Send the response back
         let response = KrpcSuccessResponse::from_request(&query, return_values);
-        self.send_response(response, source_node.clone()).await;
+        self.send_response(response, source_node).await;
     }
 
     async fn handle_ping(&self) -> HashMap<String, String> {
@@ -531,12 +567,14 @@ impl Kademlia {
 
     pub async fn handle_find_node(&self, query: &KrpcRequest) -> HashMap<String, String> {
         let target_node_id = query.a.get("target").unwrap().parse().unwrap();
+        info!("Received find_nodes RPC for target {target_node_id}");
         let k_closest_nodes = self
             .context
             .routing_table
             .lock()
             .unwrap()
             .get_nodes(target_node_id);
+        info!("{:#?}", k_closest_nodes);
         let compact_node_info = k_closest_nodes
             .iter()
             .map(|node| node.get_node_compact_format())

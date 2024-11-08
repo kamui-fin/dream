@@ -18,12 +18,13 @@ pub fn gen_trans_id() -> String {
 pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
     let mut nodes = Vec::new();
 
-    let bytes = hex::decode(hex::encode(serialized_nodes.unwrap())).unwrap();
+    let bytes = hex::decode(serialized_nodes.unwrap()).unwrap();
 
     for curr_chunk in bytes.chunks(7) {
         if curr_chunk.len() == 7 {
             let id = curr_chunk[0];
             let ip = Ipv4Addr::new(curr_chunk[1], curr_chunk[2], curr_chunk[3], curr_chunk[4]);
+            info!("Ip decoded to {:#?}", ip);
             let port = u16::from_be_bytes([curr_chunk[5], curr_chunk[6]]);
 
             nodes.push(Node {
