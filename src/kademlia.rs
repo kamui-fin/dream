@@ -24,6 +24,7 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
+use tokio::time::timeout;
 
 use crate::utils::deserialize_compact_peers;
 use crate::{
@@ -31,6 +32,7 @@ use crate::{
     node::{Node, NodeDistance},
 };
 use crate::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
+use tokio::time::Timeout;
 use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
@@ -174,24 +176,30 @@ impl Kademlia {
             .unwrap()
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+        for idx in (closest_idx + 1)..(NUM_BITS as usize) {
             let self_clone = self.clone();
             self_clone.refresh_bucket(idx as usize).await;
         }
     }
 
-    pub async fn send_request(&self, query: KrpcRequest, addr: &str) -> KrpcSuccessResponse {
-        info!("Begin request send to {addr} -> {:#?}", query);
+    pub async fn send_request(
+        &self,
+        query: KrpcRequest,
+        addr: &str,
+    ) -> Option<KrpcSuccessResponse> {
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
         info!("Successfully sent message");
 
         let mut buf = [0; 2048];
-        let (amt, _) = self.socket.recv_from(&mut buf).await.unwrap();
-        info!("[Client] Received {amt} bytes");
-        let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
-
-        response
+        match timeout(Duration::from_secs(3), self.socket.recv_from(&mut buf)).await {
+            Ok(result) => {
+                let (amt, _) = result.unwrap();
+                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
+                Some(response)
+            }
+            Err(_elapsed) => None,
+        }
     }
 
     pub async fn send_response(&self, response: KrpcSuccessResponse, source_node: Node) {
@@ -200,7 +208,7 @@ impl Kademlia {
         self.socket.send_to(&response, addr).await.unwrap();
     }
 
-    pub async fn send_ping(&self, addr: &str) -> KrpcSuccessResponse {
+    pub async fn send_ping(&self, addr: &str) -> Option<KrpcSuccessResponse> {
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_string())]);
         let request = KrpcRequest::new("ping", arguments);
 
@@ -215,7 +223,7 @@ impl Kademlia {
         let request = KrpcRequest::new("find_node", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
 
-        let response: KrpcSuccessResponse = self.send_request(request, &addr).await;
+        let response: KrpcSuccessResponse = self.send_request(request, &addr).await.unwrap();
         let serialized_nodes = response.r.get("nodes");
         deserialize_compact_node(serialized_nodes)
     }
@@ -227,7 +235,7 @@ impl Kademlia {
         ]);
         let request = KrpcRequest::new("get_peers", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        let response = self.send_request(request, &addr).await;
+        let response = self.send_request(request, &addr).await.unwrap();
 
         let token = response.r.get("token").unwrap().parse().unwrap();
         if response.r.contains_key("nodes") {
@@ -263,7 +271,7 @@ impl Kademlia {
         ]);
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        self.send_request(request, &addr).await
+        self.send_request(request, &addr).await.unwrap()
     }
 
     fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
@@ -275,7 +283,7 @@ impl Kademlia {
         while routing_table_clone.buckets[bucket_idx as usize].is_empty()
             && traversed_buckets != routing_table_clone.buckets.len()
         {
-            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
+            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as usize;
             traversed_buckets += 1;
         }
 
@@ -544,15 +552,45 @@ impl Kademlia {
             port: addr.port(),
         };
 
-        // Update the routing table's status of the source node
-        if source_node.id != self.node_id {
-            self.context
-                .routing_table
-                .lock()
-                .unwrap()
-                .upsert_node(source_node.clone());
+        // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
+        let check_for_eviction = {
+            let mut routing_table = self.context.routing_table.lock().unwrap();
+            routing_table.upsert_node(source_node.clone())
+        };
+
+        // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
+        if check_for_eviction {
+            let (bucket, oldest_node) = {
+                let routing_table = self.context.routing_table.lock().unwrap();
+                let _bucket =
+                    routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                (_bucket.clone(), _bucket.front().unwrap().clone())
+            };
+
+            let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
+            let mut response = self.send_ping(&addr).await;
+            // Retry once
+            if response.is_none() {
+                response = self.send_ping(&addr).await;
+            }
+
+            {
+                let mut routing_table = self.context.routing_table.lock().unwrap();
+                let bucket_idx = routing_table.find_bucket_idx(source_id);
+
+                routing_table.buckets[bucket_idx].pop_front();
+                // If the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
+                if response.is_none() || response.unwrap().r["id"] != oldest_node.id.to_string() {
+                    routing_table.buckets[bucket_idx].push_back(source_node.clone());
+                }
+                // Otherwise, keep the oldest node and update its "freshness"
+                else {
+                    routing_table.buckets[bucket_idx].push_back(oldest_node);
+                }
+            }
         }
 
+        // Step 3: Dispatch to respective handler functions
         let return_values = match query.q.as_str() {
             "ping" => self.handle_ping().await,
             "find_node" => self.handle_find_node(&query).await,
@@ -561,9 +599,9 @@ impl Kademlia {
             _ => HashMap::new(),
         };
 
+        // Step 4: Send the response back
         let response = KrpcSuccessResponse::from_request(&query, return_values);
-        info!("[Server] Sending back response {:#?}", response);
-        self.send_response(response, source_node.clone()).await;
+        self.send_response(response, source_node).await;
     }
 
     async fn handle_ping(&self) -> HashMap<String, String> {

@@ -45,9 +45,9 @@ impl RoutingTable {
         all_nodes
     }
 
-    pub fn find_bucket_idx(&self, node_id: u32) -> u32 {
+    pub fn find_bucket_idx(&self, node_id: u32) -> usize {
         let xor_result = node_id ^ self.node_id;
-        xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)
+        (xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)) as usize
     }
 
     pub fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
@@ -69,7 +69,7 @@ impl RoutingTable {
         self.buckets[bucket_idx] = new_list;
     }
 
-    pub fn upsert_node(&mut self, node: Node) {
+    pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id) as usize;
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
         let is_full = self.buckets[bucket_idx].len() >= K;
@@ -84,6 +84,8 @@ impl RoutingTable {
         } else {
             self.buckets[bucket_idx].push_back(node);
         }
+
+        false
     }
 
     pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {
