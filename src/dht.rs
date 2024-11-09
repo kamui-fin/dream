@@ -1,51 +1,77 @@
 use crate::{config::Args, kademlia::Kademlia};
-use futures::executor::block_on;
 use std::{str::FromStr, sync::Arc, thread};
+use tiny_http::{Request, Response, Server};
 use tokio::runtime::{Handle, Runtime};
-use tiny_http::{Server, Response, Request};
 
 pub async fn start_dht(args: &Args) {
     let kademlia = Arc::new(Kademlia::init(args).await);
+    let bootstrap = args.get_bootstrap();
 
-    kademlia.start_server(args.get_bootstrap());
+    let kademlia_clone = kademlia.clone();
+    thread::spawn(move || {
+        let server = Server::http(format!(
+            "0.0.0.0:{}",
+            1000 + kademlia_clone.context.node.port
+        ))
+        .unwrap();
+        let rt = Runtime::new().unwrap();
+        for request in server.incoming_requests() {
+            rt.block_on(handle_http_request(kademlia_clone.clone(), request));
+        }
+    });
 
-    let server = Server::http(format!("0.0.0.0:{}", 1000 + args.udp_port)).unwrap();
-    for request in server.incoming_requests() {
-        let url = request.url().to_string();
-        let method = request.method().as_str();
-        let kademlia_clone = kademlia.clone();
+    kademlia.start_server(bootstrap).await;
+}
 
-        match (method, url.as_str()) {
-            ("GET", "/ping") => {
-                request.respond(Response::from_string("pong")).unwrap();
-                let ip = url.trim_start_matches("/ping");
-                
+async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
+    let url = request.url().to_string();
+    let method = request.method().as_str();
+
+    match (method, url.as_str()) {
+        ("GET", _) if url.starts_with("/peers/") => {
+            let info_hash = url.trim_start_matches("/peers/");
+            let peers = kademlia
+                .recursive_get_peers(info_hash.parse().unwrap())
+                .await;
+            let peers = serde_json::to_string(&peers).unwrap();
+            request
+                .respond(Response::from_string(peers).with_header(
+                    tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
+                ))
+                .unwrap();
+        }
+        ("PUT", _) if url.starts_with("/announce/") => {
+            let info_hash = url.trim_start_matches("/announce/");
+            let handle = Handle::current();
+            handle.spawn(kademlia.announce_peer(info_hash.into()));
+            request
+                .respond(Response::from_string(
+                    "Announced as peer to requested torrent",
+                ))
+                .unwrap();
+        }
+        // todo(sai)
+        ("GET", _) if url.starts_with("/closest/") => {
+            let id_str = url.trim_start_matches("/closest/");
+            if let Ok(id) = id_str.parse::<u32>() {
+                request
+                    .respond(Response::from_string("Closest nodes"))
+                    .unwrap();
+            } else {
+                request
+                    .respond(Response::from_string("Invalid ID").with_status_code(400))
+                    .unwrap();
             }
-            ("GET", _) if url.starts_with("/get/") => {
-                let info_hash = url.trim_start_matches("/get/");
-                let peers = kademlia_clone.recursive_get_peers(info_hash.parse().unwrap()).await;
-                let peers = serde_json::to_string(&peers).unwrap();
-                request.respond(Response::from_string(peers).with_header(tiny_http::Header::from_str("Content-Type: application/json").unwrap())).unwrap();  // Replace with actual value
-            }
-            ("PUT", _) if url.starts_with("/put/") => {
-                let info_hash = url.trim_start_matches("/put/");
-                    request.respond(Response::from_string("Stored key-value")).unwrap();  // Replace with actual response
-                } else {
-                    request.respond(Response::from_string("Invalid PUT format").with_status_code(400)).unwrap();
-                }
-            }
-            ("GET", _) if url.starts_with("/closest/") => {
-                let id_str = url.trim_start_matches("/closest/");
-                if let Ok(id) = id_str.parse::<u32>() {
-                    
-                    request.respond(Response::from_string("Closest nodes")).unwrap();  // Replace with actual node data
-                } else {
-                    request.respond(Response::from_string("Invalid ID").with_status_code(400)).unwrap();
-                }
-            }
-            _ => {
-                request.respond(Response::from_string("404 Not Found").with_status_code(404)).unwrap();
-            }
+        }
+        // todo(sai)
+        ("GET", "/ping") => {
+            let ip = url.trim_start_matches("/ping");
+            request.respond(Response::from_string("pong")).unwrap();
+        }
+        _ => {
+            request
+                .respond(Response::from_string("404 Not Found").with_status_code(404))
+                .unwrap();
         }
     }
 }

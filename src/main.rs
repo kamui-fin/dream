@@ -5,7 +5,6 @@ extern crate log;
 use crate::dht::start_dht;
 use clap::Parser;
 use config::Args;
-use dht::start_n_nodes;
 
 mod config;
 mod context;

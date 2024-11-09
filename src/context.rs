@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    net::Ipv4Addr,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -9,7 +11,6 @@ use rand::Rng;
 use tokio::time::sleep;
 
 use serde_json::{json, Value};
-
 
 use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
@@ -30,7 +31,11 @@ impl RuntimeContext {
         });
         let routing_table = Arc::new(Mutex::new(RoutingTable::new(node_id)));
         let peer_store = Arc::new(Mutex::new(HashMap::<String, Vec<Node>>::new()));
-        let node = Node::new(node_id, local_ip().unwrap(), args.udp_port);
+        let node = Node::new(
+            node_id,
+            std::net::IpAddr::V4(Ipv4Addr::from_str("127.0.0.1").unwrap()),
+            args.udp_port,
+        );
         let secret = Arc::new(Mutex::new(gen_secret()));
 
         Self {

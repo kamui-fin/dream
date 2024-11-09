@@ -1,5 +1,5 @@
-use std::collections::LinkedList;
 use serde::Serialize;
+use std::collections::LinkedList;
 
 use rand::Rng;
 

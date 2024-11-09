@@ -1,9 +1,4 @@
-use std::{
-    cmp::Ordering,
-    net::{IpAddr, Ipv4Addr},
-};
-
-use serde::Serialize;
+use std::{cmp::Ordering, net::IpAddr};
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
@@ -31,7 +26,7 @@ impl Node {
         let port = self.port.to_le_bytes();
         compact_info[4..6].copy_from_slice(&port);
 
-        hex::encode(&compact_info)
+        hex::encode(compact_info)
     }
 
     pub fn get_node_compact_format(&self) -> String {
@@ -46,7 +41,7 @@ impl Node {
         let port = self.port.to_be_bytes();
         compact_info[5..7].copy_from_slice(&port);
 
-        hex::encode(&compact_info)
+        hex::encode(compact_info)
     }
 }
 
