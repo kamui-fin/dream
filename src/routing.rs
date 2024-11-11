@@ -1,5 +1,6 @@
 use std::{collections::LinkedList, time::Duration};
 use tokio::{time::Sleep, time::sleep};
+use serde::{Serialize};
 
 use rand::Rng;
 
@@ -17,7 +18,7 @@ use crate::{config::{K, NUM_BITS}, node::Node};
 //    -> by picking random id in the range of the bucket and run find_nodes
 //    -> nodes that are able to receive queries from other nodes dno't need to refresh buckets often
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
-
+#[derive(serde::Serialize, Clone)]
 pub struct RoutingTable {
     node_id: u32,
     // array of linked lists with NUM_BITS elements

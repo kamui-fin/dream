@@ -1,13 +1,15 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use local_ip_address::local_ip;
 use rand::Rng;
 use tokio::time::sleep;
 use tokio::task::JoinHandle;
+
+use serde_json::json;
 
 use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
@@ -49,6 +51,16 @@ impl RuntimeContext {
                 let mut sec = secret_clone.lock().unwrap();
                 *sec = gen_secret();
             }
+        });
+    }
+
+    pub fn dump_state(&self){
+
+        let current_state = json!({
+            "time": SystemTime::now(),
+            "node": serde_json::to_string(&self.node).unwrap(),
+            "peer_store": serde_json::to_string(&self.peer_store.lock().unwrap().clone()).unwrap(),
+            "routing_table": serde_json::to_string(&self.routing_table.lock().unwrap().clone()).unwrap(),
         });
     }
 }
