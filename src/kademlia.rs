@@ -14,9 +14,13 @@
 // errors - key e is a list, first element error code, second element string containing the error message
 
 use futures::future::join_all;
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     collections::{BinaryHeap, HashSet},
@@ -24,7 +28,9 @@ use std::{
     sync::Mutex,
     time::Duration,
 };
+use tokio::sync::oneshot;
 use tokio::time::timeout;
+use waitmap::WaitMap;
 
 use crate::utils::deserialize_compact_peers;
 use crate::{
@@ -37,6 +43,50 @@ use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
 
+struct TransactionFuture {
+    receiver: oneshot::Receiver<KrpcSuccessResponse>,
+}
+
+impl Future for TransactionFuture {
+    type Output = Option<KrpcSuccessResponse>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let receiver = unsafe { self.map_unchecked_mut(|s| &mut s.receiver) };
+        match receiver.poll(cx) {
+            Poll::Ready(Ok(value)) => Poll::Ready(Some(value)),
+            Poll::Ready(Err(_)) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+struct TransactionManager {
+    transactions: Arc<Mutex<HashMap<String, oneshot::Sender<KrpcSuccessResponse>>>>,
+}
+
+impl TransactionManager {
+    fn new() -> Self {
+        TransactionManager {
+            transactions: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn create_future(&self, tx_id: String) -> TransactionFuture {
+        let (tx, rx) = oneshot::channel();
+        self.transactions.lock().unwrap().insert(tx_id, tx);
+        TransactionFuture { receiver: rx }
+    }
+
+    fn resolve_transaction(&self, tx_id: String, value: KrpcSuccessResponse) {
+        if let Some(sender) = self.transactions.lock().unwrap().remove(&tx_id) {
+            let _ = sender.send(value); // Send the value to resolve the future
+        }
+    }
+}
+
 pub enum KrpcError {
     // 201
     GenericError,
@@ -46,6 +96,12 @@ pub enum KrpcError {
     ProtocolError,
     // 204
     MethodUnknown,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+pub struct KrpcMessage {
+    t: String,
+    y: String,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -94,7 +150,7 @@ enum NodeOrPeer {
 
 #[derive(Debug)]
 pub struct GetPeersResponse {
-    pub token: u32,
+    pub token: String,
     pub value: NodeOrPeer,
 }
 
@@ -108,6 +164,7 @@ pub struct KrpcErrorResponse {
 
 pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
+    manager: TransactionManager,
     pub context: Arc<RuntimeContext>,
     node_id: u32,
 }
@@ -124,6 +181,7 @@ impl Kademlia {
 
         Self {
             socket,
+            manager: TransactionManager::new(),
             node_id,
             context,
         }
@@ -187,22 +245,25 @@ impl Kademlia {
         query: KrpcRequest,
         addr: &str,
     ) -> Option<KrpcSuccessResponse> {
+        info!("[CLIENT] Sending query to {addr}: {:#?}", query);
+        let transaction_id = query.t;
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
-        info!("Successfully sent message");
+
+        let future = self.manager.create_future(transaction_id);
 
         let mut buf = [0; 2048];
-        match timeout(Duration::from_secs(3), self.socket.recv_from(&mut buf)).await {
-            Ok(result) => {
-                let (amt, _) = result.unwrap();
-                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..amt]).unwrap();
-                Some(response)
-            }
+        match timeout(Duration::from_secs(3), future).await {
+            Ok(result) => result,
             Err(_elapsed) => None,
         }
     }
 
     pub async fn send_response(&self, response: KrpcSuccessResponse, source_node: Node) {
+        info!(
+            "[SERVER] Sending response {:#?} to {:#?}",
+            response, source_node
+        );
         let addr = SocketAddr::new(source_node.ip, source_node.port);
         let response = serde_bencode::to_bytes(&response).unwrap();
         self.socket.send_to(&response, addr).await.unwrap();
@@ -237,7 +298,7 @@ impl Kademlia {
         let addr = format!("{}:{}", dest.ip, dest.port);
         let response = self.send_request(request, &addr).await.unwrap();
 
-        let token = response.r.get("token").unwrap().parse().unwrap();
+        let token = response.r.get("token").unwrap().clone();
         if response.r.contains_key("nodes") {
             let nodes = response.r.get("nodes"); // not deserialized
             let nodes = deserialize_compact_node(nodes);
@@ -267,7 +328,7 @@ impl Kademlia {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_string()),
             ("info_hash".into(), info_hash),
-            ("token".into(), get_peers.token.to_string()),
+            ("token".into(), get_peers.token),
         ]);
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
@@ -541,67 +602,78 @@ impl Kademlia {
     }
 
     async fn handle_krpc_call(&self, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
-        let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
-        info!("Received query from {:#?}", addr);
-        info!("{:#?}", query);
+        let query: KrpcMessage = serde_bencode::from_bytes(&buf[..len]).unwrap();
 
-        let source_id = query.a.get("id").unwrap().parse().unwrap();
-        let source_node = Node {
-            id: source_id,
-            ip: addr.ip(),
-            port: addr.port(),
-        };
+        if query.y == "r" {
+            // this is a response to an earlier request we made
+            // future is ready
+            let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
+            self.response_buffer.insert(query.t, response);
+        } else {
+            let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
 
-        // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
-        let check_for_eviction = {
-            let mut routing_table = self.context.routing_table.lock().unwrap();
-            routing_table.upsert_node(source_node.clone())
-        };
+            info!("Received query from {:#?}", addr);
+            info!("{:#?}", query);
 
-        // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
-        if check_for_eviction {
-            let (bucket, oldest_node) = {
-                let routing_table = self.context.routing_table.lock().unwrap();
-                let _bucket =
-                    routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
-                (_bucket.clone(), _bucket.front().unwrap().clone())
+            let source_id = query.a.get("id").unwrap().parse().unwrap();
+            let source_node = Node {
+                id: source_id,
+                ip: addr.ip(),
+                port: addr.port(),
             };
 
-            let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
-            let mut response = self.send_ping(&addr).await;
-            // Retry once
-            if response.is_none() {
-                response = self.send_ping(&addr).await;
-            }
-
-            {
+            // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
+            let check_for_eviction = {
                 let mut routing_table = self.context.routing_table.lock().unwrap();
-                let bucket_idx = routing_table.find_bucket_idx(source_id);
+                routing_table.upsert_node(source_node.clone())
+            };
 
-                routing_table.buckets[bucket_idx].pop_front();
-                // If the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
-                if response.is_none() || response.unwrap().r["id"] != oldest_node.id.to_string() {
-                    routing_table.buckets[bucket_idx].push_back(source_node.clone());
+            // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
+            if check_for_eviction {
+                let (bucket, oldest_node) = {
+                    let routing_table = self.context.routing_table.lock().unwrap();
+                    let _bucket =
+                        routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                    (_bucket.clone(), _bucket.front().unwrap().clone())
+                };
+
+                let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
+                let mut response = self.send_ping(&addr).await;
+                // Retry once
+                if response.is_none() {
+                    response = self.send_ping(&addr).await;
                 }
-                // Otherwise, keep the oldest node and update its "freshness"
-                else {
-                    routing_table.buckets[bucket_idx].push_back(oldest_node);
+
+                {
+                    let mut routing_table = self.context.routing_table.lock().unwrap();
+                    let bucket_idx = routing_table.find_bucket_idx(source_id);
+
+                    routing_table.buckets[bucket_idx].pop_front();
+                    // If the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
+                    if response.is_none() || response.unwrap().r["id"] != oldest_node.id.to_string()
+                    {
+                        routing_table.buckets[bucket_idx].push_back(source_node.clone());
+                    }
+                    // Otherwise, keep the oldest node and update its "freshness"
+                    else {
+                        routing_table.buckets[bucket_idx].push_back(oldest_node);
+                    }
                 }
             }
+
+            // Step 3: Dispatch to respective handler functions
+            let return_values = match query.q.as_str() {
+                "ping" => self.handle_ping().await,
+                "find_node" => self.handle_find_node(&query).await,
+                "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
+                "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,
+                _ => HashMap::new(),
+            };
+
+            // Step 4: Send the response back
+            let response = KrpcSuccessResponse::from_request(&query, return_values);
+            self.send_response(response, source_node).await;
         }
-
-        // Step 3: Dispatch to respective handler functions
-        let return_values = match query.q.as_str() {
-            "ping" => self.handle_ping().await,
-            "find_node" => self.handle_find_node(&query).await,
-            "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
-            "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,
-            _ => HashMap::new(),
-        };
-
-        // Step 4: Send the response back
-        let response = KrpcSuccessResponse::from_request(&query, return_values);
-        self.send_response(response, source_node).await;
     }
 
     async fn handle_ping(&self) -> HashMap<String, String> {
@@ -668,7 +740,7 @@ impl Kademlia {
             hasher.update(v4addr.octets());
         }
         hasher.update(*self.context.secret.lock().unwrap());
-        let token = format!("{:x}", hasher.finalize());
+        let token = hex::encode(hasher.finalize());
 
         return_values.insert("token".into(), token);
         return_values
@@ -688,7 +760,7 @@ impl Kademlia {
         }
         hasher.update(*self.context.secret.lock().unwrap());
 
-        let target_token = format!("{:x}", hasher.finalize());
+        let target_token = hex::encode(hasher.finalize());
 
         if *token != target_token {
             // send failure message
