@@ -50,12 +50,20 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
                 ))
                 .unwrap();
         }
-        // todo(sai)
-        ("GET", _) if url.starts_with("/closest/") => {
+        ("POST", _) if url.starts_with("/closest/") => {
             let id_str = url.trim_start_matches("/closest/");
             if let Ok(id) = id_str.parse::<u32>() {
+
+                let closest_nodes = kademlia
+                    .recursive_find_nodes(id)
+                    .await;
+
+                let closest_nodes = serde_json::to_string(&closest_nodes).unwrap();
+
                 request
-                    .respond(Response::from_string("Closest nodes"))
+                    .respond(Response::from_string(closest_nodes).with_header(
+                        tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
+                    ))
                     .unwrap();
             } else {
                 request
@@ -63,10 +71,14 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
                     .unwrap();
             }
         }
-        // todo(sai)
         ("GET", "/ping") => {
             let ip = url.trim_start_matches("/ping");
-            request.respond(Response::from_string("pong")).unwrap();
+
+            let ping_response = kademlia.handle_ping().await;
+            let ping_response = serde_json::to_string(&ping_response).unwrap();
+            request.respond(Response::from_string(ping_response).with_header(
+                tiny_http::Header::from_str("Content-Type: application/json").unwrap()
+            )).unwrap();
         }
         _ => {
             request

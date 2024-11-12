@@ -45,7 +45,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug, serde::Serialize)]
 pub struct NodeDistance {
     pub node: Node,
     pub dist: u32,
