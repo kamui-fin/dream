@@ -184,6 +184,7 @@ impl Kademlia {
             manager: TransactionManager::new(),
             node_id,
             context,
+
         }
     }
 
@@ -246,7 +247,7 @@ impl Kademlia {
         addr: &str,
     ) -> Option<KrpcSuccessResponse> {
         info!("[CLIENT] Sending query to {addr}: {:#?}", query);
-        let transaction_id = query.t;
+        let transaction_id = query.t.clone();
         let query = serde_bencode::to_bytes(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
 
@@ -608,7 +609,7 @@ impl Kademlia {
             // this is a response to an earlier request we made
             // future is ready
             let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
-            self.response_buffer.insert(query.t, response);
+            self.manager.resolve_transaction(query.t, response);
         } else {
             let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
 
@@ -676,7 +677,7 @@ impl Kademlia {
         }
     }
 
-    async fn handle_ping(&self) -> HashMap<String, String> {
+    pub async fn handle_ping(&self) -> HashMap<String, String> {
         HashMap::from([(String::from("id"), self.node_id.to_string())])
     }
 
