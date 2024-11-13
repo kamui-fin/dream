@@ -33,7 +33,7 @@ impl RuntimeContext {
         let peer_store = Arc::new(Mutex::new(HashMap::<String, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
-            std::net::IpAddr::V4(Ipv4Addr::from_str("127.0.0.1").unwrap()),
+            std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),
             args.udp_port,
         );
         let secret = Arc::new(Mutex::new(gen_secret()));

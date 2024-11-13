@@ -43,26 +43,6 @@ use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
 
-struct TransactionFuture {
-    receiver: oneshot::Receiver<KrpcSuccessResponse>,
-}
-
-impl Future for TransactionFuture {
-    type Output = Option<KrpcSuccessResponse>;
-
-    fn poll(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let receiver = unsafe { self.map_unchecked_mut(|s| &mut s.receiver) };
-        match receiver.poll(cx) {
-            Poll::Ready(Ok(value)) => Poll::Ready(Some(value)),
-            Poll::Ready(Err(_)) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
 struct TransactionManager {
     transactions: Arc<Mutex<HashMap<String, oneshot::Sender<KrpcSuccessResponse>>>>,
 }
@@ -74,13 +54,14 @@ impl TransactionManager {
         }
     }
 
-    fn create_future(&self, tx_id: String) -> TransactionFuture {
+    fn create_future(&self, tx_id: String) -> oneshot::Receiver<KrpcSuccessResponse> {
         let (tx, rx) = oneshot::channel();
         self.transactions.lock().unwrap().insert(tx_id, tx);
-        TransactionFuture { receiver: rx }
+        rx
     }
 
     fn resolve_transaction(&self, tx_id: String, value: KrpcSuccessResponse) {
+        println!("Resolving transaction {tx_id}");
         if let Some(sender) = self.transactions.lock().unwrap().remove(&tx_id) {
             let _ = sender.send(value); // Send the value to resolve the future
         }
@@ -189,15 +170,17 @@ impl Kademlia {
     }
 
     pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
-        // 1. enter with a bootstrap contact or init new network
+        // 1. start dht server
+        let self_clone = self.clone();
+        tokio::spawn(async move { self_clone.listen().await });
+
+        // 2. enter with a bootstrap contact or init new network
         self.clone().join_dht_network(bootstrap_node).await;
 
-        // 2. start maintenance tasks
+        // 3. start maintenance tasks
         self.clone().republish_peer_task();
         self.context.clone().regen_token_task();
 
-        // 3. start dht server
-        self.listen().await;
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -252,11 +235,12 @@ impl Kademlia {
         self.socket.send_to(&query, addr).await.unwrap();
 
         let future = self.manager.create_future(transaction_id);
-
-        let mut buf = [0; 2048];
         match timeout(Duration::from_secs(3), future).await {
-            Ok(result) => result,
-            Err(_elapsed) => None,
+            Ok(result) => result.ok(),
+            Err(_elapsed) => {
+                println!("{:#?}", _elapsed);
+                None
+            },
         }
     }
 
