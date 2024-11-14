@@ -19,11 +19,11 @@ impl Node {
         let mut compact_info = [0u8; 6];
 
         if let IpAddr::V4(v4_addr) = self.ip {
-            let ip = v4_addr.to_bits().to_le_bytes();
+            let ip = v4_addr.octets();
             compact_info[0..4].copy_from_slice(&ip);
         }
 
-        let port = self.port.to_le_bytes();
+        let port = self.port.to_be_bytes();
         compact_info[4..6].copy_from_slice(&port);
 
         hex::encode(compact_info)

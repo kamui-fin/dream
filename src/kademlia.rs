@@ -165,14 +165,13 @@ impl Kademlia {
             manager: TransactionManager::new(),
             node_id,
             context,
-
         }
     }
 
     pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
         // 1. start dht server
         let self_clone = self.clone();
-        tokio::spawn(async move { self_clone.listen().await });
+        let handle = tokio::spawn(async move { self_clone.listen().await });
 
         // 2. enter with a bootstrap contact or init new network
         self.clone().join_dht_network(bootstrap_node).await;
@@ -181,6 +180,7 @@ impl Kademlia {
         self.clone().republish_peer_task();
         self.context.clone().regen_token_task();
 
+        handle.await;
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -240,7 +240,7 @@ impl Kademlia {
             Err(_elapsed) => {
                 println!("{:#?}", _elapsed);
                 None
-            },
+            }
         }
     }
 
@@ -368,6 +368,7 @@ impl Kademlia {
         info!("Running recursive get_nodes({target_node_id})");
         let mut set = JoinSet::new();
         let mut already_queried = HashSet::new();
+        already_queried.insert(self.node_id); // avoid requesting to self
 
         // Select initial nodes
         let mut alpha_set = self.select_initial_nodes(target_node_id);
@@ -394,7 +395,7 @@ impl Kademlia {
                 already_queried.insert(distance_node.node.id);
 
                 set.spawn(async move {
-                    info!("Getting K closest from neighbor ({:#?})", distance_node);
+                    // info!("Getting K closest from neighbor ({:#?})", distance_node);
                     let k_closest_nodes = kademlia
                         .send_find_node(distance_node.node.clone(), target_node_id)
                         .await;
@@ -422,8 +423,6 @@ impl Kademlia {
                 .cloned()
                 .collect::<Vec<NodeDistance>>();
 
-            info!("New closest: {:#?}", new_closest);
-
             if new_closest.is_empty() {
                 break;
             }
@@ -432,7 +431,17 @@ impl Kademlia {
         }
 
         let max_heap = max_heap.lock().unwrap();
-        max_heap.clone().into_sorted_vec()
+        let result = max_heap
+            .clone()
+            .into_sorted_vec()
+            .iter()
+            .filter(|n| n.node.id != self.node_id)
+            .cloned()
+            .collect::<Vec<NodeDistance>>();
+
+        info!("[recursive_find_node] result: {:#?}", result);
+
+        result
     }
 
     // duplication from find_node, but subtle and important differences
@@ -441,6 +450,8 @@ impl Kademlia {
         // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
         let mut set = JoinSet::new();
         let mut already_queried = HashSet::new();
+        already_queried.insert(self.node_id); // avoid requesting to self
+
         // pick α nodes from closest non-empty k-bucket, even if less than α entries
         let mut alpha_set = self.select_initial_nodes(info_hash);
         alpha_set.truncate(ALPHA);
@@ -479,6 +490,7 @@ impl Kademlia {
                     let get_peers_res = kademlia
                         .send_get_peers(distance_node.node.clone(), info_hash.to_string())
                         .await;
+                    info!("[CLIENT] get_peers response: {:#?}", get_peers_res);
                     match get_peers_res.value {
                         NodeOrPeer::Peers(peers) => Some(peers),
                         NodeOrPeer::Nodes(k_closest_nodes) => {
@@ -497,6 +509,7 @@ impl Kademlia {
             while let Some(result) = set.join_next().await {
                 if let Ok(result) = result {
                     if let Some(peers) = result {
+                        info!("[recursive_get_peers] result: {:#?}", peers);
                         return peers;
                     }
                 }
@@ -748,9 +761,11 @@ impl Kademlia {
         let target_token = hex::encode(hasher.finalize());
 
         if *token != target_token {
+            error!("[AUTH] Token is not valid")
             // send failure message
         }
 
+        info!("Storing info hash in peer store");
         self.context
             .peer_store
             .lock()
@@ -758,6 +773,14 @@ impl Kademlia {
             .entry(info_hash.clone())
             .or_default()
             .push(source_node);
+        info!(
+            "[CONFIRM] {:#?}",
+            self.context
+                .peer_store
+                .lock()
+                .unwrap()
+                .get(info_hash.as_str())
+        );
 
         HashMap::from([("id".into(), self.node_id.to_string())])
     }
