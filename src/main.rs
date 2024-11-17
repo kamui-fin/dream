@@ -21,18 +21,18 @@ use std::str::FromStr;
 use std::time::Duration;
 use std::{fs::File, io::Read};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use url::{form_urlencoded, Url};
 use url_encoded_data::UrlEncodedData;
 
-const FRAGMENT: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'#')
-    .add(b'<')
-    .add(b'>')
-    .add(b'%');
+const PORT: u16 = 6881;
+
+fn slice_to_u32_msb(bytes: &[u8]) -> u32 {
+    // Ensure the slice has exactly 4 bytes
+    let array: [u8; 4] = bytes.try_into().unwrap();
+    u32::from_be_bytes(array)
+}
 
 #[derive(Deserialize, Debug)]
 struct Metafile {
@@ -276,14 +276,135 @@ async fn peer_handshake(peer: Peer, meta_file: Metafile, my_id: String) -> Resul
     if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
         Ok(stream)
     } else {
+        stream.shutdown().await?;
         error!("Handshake mismatch");
         Err(anyhow!("Handshake failed"))
     }
 }
 
-// TODO
-// 4. Leeching
-// 5. Seeding
+#[derive(Debug)]
+enum MessageType {
+    KeepAlive,
+    Choke,
+    UnChoke,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+    Port,
+}
+
+impl MessageType {
+    fn from_id(msg_id: Option<u8>) -> MessageType {
+        if let Some(msg_id) = msg_id {
+            match msg_id {
+                0 => Self::Choke,
+                1 => Self::UnChoke,
+                2 => Self::Interested,
+                3 => Self::NotInterested,
+                4 => Self::Have,
+                5 => Self::Bitfield,
+                6 => Self::Request,
+                7 => Self::Piece,
+                8 => Self::Cancel,
+                9 => Self::Port,
+                _ => Self::KeepAlive, // TODO
+            }
+        } else {
+            MessageType::KeepAlive
+        }
+    }
+
+    fn to_id(&self) -> u8 {
+        match self {
+            Self::Choke => 0,
+            Self::UnChoke => 1,
+            Self::Interested => 2,
+            Self::NotInterested => 3,
+            Self::Have => 4,
+            Self::Bitfield => 5,
+            Self::Request => 6,
+            Self::Piece => 7,
+            Self::Cancel => 8,
+            Self::Port => 9,
+            Self::KeepAlive => 10,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Message {
+    msg_type: MessageType,
+    payload: Vec<u8>,
+}
+
+impl Message {
+    fn parse(buf: &[u8]) -> Self {
+        let msg_length = slice_to_u32_msb(&buf[0..4]);
+        let msg_id = if msg_length == 0 { None } else { Some(buf[4]) };
+        let msg_type = MessageType::from_id(msg_id);
+
+        let payload_size = msg_length - 1;
+        let payload = buf
+            .get(5..(5 + payload_size as usize))
+            .map(|b| b.to_owned())
+            .unwrap_or_default();
+
+        Message { msg_type, payload }
+    }
+
+    fn serialize(self) -> Vec<u8> {
+        let msg_length = (self.payload.len() + 1) as u32;
+        let msg_length = msg_length.to_be_bytes();
+        let msg_id = self.msg_type.to_id();
+
+        let mut msg_buf: Vec<u8> = vec![];
+        msg_buf.extend(msg_length);
+        msg_buf.push(msg_id);
+        msg_buf.extend(self.payload);
+
+        msg_buf
+    }
+}
+
+async fn start_server(port: u16) -> Result<()> {
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+
+    loop {
+        let (mut socket, addr) = listener.accept().await?;
+        println!("New connection from {:?}", addr);
+
+        tokio::spawn(async move {
+            let mut buf = [0; 2028];
+
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) => {
+                        println!("Connection closed by {:?}", addr);
+                        break;
+                    }
+                    Ok(n) => {
+                        let bt_msg = Message::parse(&buf);
+                        info!("Received msg: {:#?}", bt_msg);
+
+                        handle_msg(bt_msg).await;
+                    }
+                    Err(e) => {
+                        println!("Failed to read from socket; err = {:?}", e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn handle_msg(bt_msg: Message) {
+    todo!()
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -301,16 +422,16 @@ async fn main() -> Result<()> {
 
     info!("Parsed metafile: {:#?}", meta_file);
 
-    let req = TrackerRequest::from_id_port(peer_id.clone(), 6881, &meta_file);
-    info!("Sending request to tracker: {:#?}", req);
+    // let req = TrackerRequest::from_id_port(peer_id.clone(), PORT, &meta_file);
+    // info!("Sending request to tracker: {:#?}", req);
+    // let peers = get_peers_from_tracker(&meta_file.announce, req)?;
+    // info!("GET peers: {:#?}", peers);
 
-    let peers = get_peers_from_tracker(&meta_file.announce, req)?;
+    // e.g. connecting with a peer
+    // let mut conn = peer_handshake(peers.peers[0].clone(), meta_file, peer_id).await?;
 
-    info!("GET peers: {:#?}", peers);
-
-    let mut conn = peer_handshake(peers.peers[0].clone(), meta_file, peer_id).await?;
-
-    conn.shutdown().await?;
+    // Listen on port 6881 for incoming requests
+    start_server(PORT).await?;
 
     Ok(())
 }
