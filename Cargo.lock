@@ -85,6 +85,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.93"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c95c10ba0b00a02636238b814946408b1322d5ac4760326e6fb8ec956d85775"
+
+[[package]]
 name = "ascii"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,6 +346,7 @@ dependencies = [
  "http_req",
  "local-ip-address",
  "log",
+ "percent-encoding",
  "pretty_env_logger",
  "rand",
  "serde",
@@ -350,6 +357,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "url",
+ "url_encoded_data",
  "waitmap",
 ]
 
@@ -1452,6 +1460,16 @@ dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
+]
+
+[[package]]
+name = "url_encoded_data"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e1fdf35657b22e2c3b485cfb5ab66d5aa9dd5b0dce9902a314a830e2ea05972"
+dependencies = [
+ "anyhow",
+ "url",
 ]
 
 [[package]]

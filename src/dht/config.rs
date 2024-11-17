@@ -7,9 +7,9 @@ use crate::dht::node::Node;
 // Number of bits for our IDs
 pub const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
-pub const K: usize = 1;
+pub const K: usize = 2;
 // Max concurrent requests
-pub const ALPHA: usize = 3;
+pub const ALPHA: usize = 2;
 
 // TOML config loading and clap CLI arg parse
 
