@@ -1,4 +1,5 @@
-use crate::node::Node;
+use crate::dht::node::Node;
+use log::info;
 use rand::{rngs::OsRng, Rng, RngCore};
 use std::net::{IpAddr, Ipv4Addr};
 // use hex;
@@ -27,11 +28,7 @@ pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> 
             info!("Ip decoded to {:#?}", ip);
             let port = u16::from_be_bytes([curr_chunk[5], curr_chunk[6]]);
 
-            nodes.push(Node {
-                id: id.into(),
-                port,
-                ip: std::net::IpAddr::V4(ip),
-            })
+            nodes.push(Node::new(id.into(), std::net::IpAddr::V4(ip), port));
         }
     }
 

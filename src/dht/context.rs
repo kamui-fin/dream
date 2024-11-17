@@ -12,7 +12,7 @@ use tokio::{sync::oneshot, time::sleep};
 
 use serde_json::{json, Value};
 
-use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
+use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {

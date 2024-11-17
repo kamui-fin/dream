@@ -2,12 +2,12 @@ use std::{net::Ipv4Addr, str::FromStr};
 
 use clap::{command, Parser};
 
-use crate::node::Node;
+use crate::dht::node::Node;
 
 // Number of bits for our IDs
 pub const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
-pub const K: usize = 4;
+pub const K: usize = 1;
 // Max concurrent requests
 pub const ALPHA: usize = 3;
 

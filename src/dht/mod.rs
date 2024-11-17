@@ -1,7 +1,14 @@
-use crate::{config::Args, kademlia::Kademlia};
+use crate::dht::{config::Args, kademlia::Kademlia};
 use std::{str::FromStr, sync::Arc, thread};
 use tiny_http::{Request, Response, Server};
 use tokio::runtime::{Handle, Runtime};
+
+pub mod config;
+pub mod context;
+pub mod kademlia;
+pub mod node;
+pub mod routing;
+pub mod utils;
 
 pub async fn start_dht(args: &Args) {
     let kademlia = Arc::new(Kademlia::init(args).await);
@@ -53,10 +60,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         ("POST", _) if url.starts_with("/closest/") => {
             let id_str = url.trim_start_matches("/closest/");
             if let Ok(id) = id_str.parse::<u32>() {
-
-                let closest_nodes = kademlia
-                    .recursive_find_nodes(id)
-                    .await;
+                let closest_nodes = kademlia.recursive_find_nodes(id).await;
 
                 let closest_nodes = serde_json::to_string(&closest_nodes).unwrap();
 
@@ -76,9 +80,11 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
 
             let ping_response = kademlia.handle_ping().await;
             let ping_response = serde_json::to_string(&ping_response).unwrap();
-            request.respond(Response::from_string(ping_response).with_header(
-                tiny_http::Header::from_str("Content-Type: application/json").unwrap()
-            )).unwrap();
+            request
+                .respond(Response::from_string(ping_response).with_header(
+                    tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
+                ))
+                .unwrap();
         }
         _ => {
             request

@@ -1,9 +1,10 @@
+use log::info;
 use serde::Serialize;
 use std::collections::LinkedList;
 
 use rand::Rng;
 
-use crate::{
+use crate::dht::{
     config::{K, NUM_BITS},
     node::Node,
 };

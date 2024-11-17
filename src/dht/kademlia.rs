@@ -15,6 +15,8 @@
 
 use futures::future::join_all;
 use futures::FutureExt;
+use log::error;
+use log::info;
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
@@ -32,12 +34,12 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use waitmap::WaitMap;
 
-use crate::utils::deserialize_compact_peers;
-use crate::{
+use crate::dht::utils::deserialize_compact_peers;
+use crate::dht::{
     config::{Args, ALPHA, K, NUM_BITS},
     node::{Node, NodeDistance},
 };
-use crate::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
+use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
 use tokio::time::Timeout;
 use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
@@ -614,11 +616,7 @@ impl Kademlia {
             info!("{:#?}", query);
 
             let source_id = query.a.get("id").unwrap().parse().unwrap();
-            let source_node = Node {
-                id: source_id,
-                ip: addr.ip(),
-                port: addr.port(),
-            };
+            let source_node = Node::new(source_id, addr.ip(), addr.port());
 
             // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
             let check_for_eviction = {
@@ -628,33 +626,46 @@ impl Kademlia {
 
             // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
             if check_for_eviction {
-                let (bucket, oldest_node) = {
-                    let routing_table = self.context.routing_table.lock().unwrap();
-                    let _bucket =
-                        routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
-                    (_bucket.clone(), _bucket.front().unwrap().clone())
-                };
+                let mut try_again = true;
 
-                let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
-                let mut response = self.send_ping(&addr).await;
-                // Retry once
-                if response.is_none() {
-                    response = self.send_ping(&addr).await;
-                }
+                while try_again {
+                    try_again = false;
 
-                {
-                    let mut routing_table = self.context.routing_table.lock().unwrap();
-                    let bucket_idx = routing_table.find_bucket_idx(source_id);
+                    let (bucket, mut oldest_node) = {
+                        let routing_table = self.context.routing_table.lock().unwrap();
+                        let _bucket =
+                            routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                        (_bucket.clone(), _bucket.front().unwrap().clone())
+                    };
 
-                    routing_table.buckets[bucket_idx].pop_front();
-                    // If the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
-                    if response.is_none() || response.unwrap().r["id"] != oldest_node.id.to_string()
-                    {
-                        routing_table.buckets[bucket_idx].push_back(source_node.clone());
-                    }
-                    // Otherwise, keep the oldest node and update its "freshness"
-                    else {
-                        routing_table.buckets[bucket_idx].push_back(oldest_node);
+                    if oldest_node.is_questionable() {
+                        let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
+                        let mut response = self.send_ping(&addr).await;
+                        // retry once
+                        if response.is_none() {
+                            response = self.send_ping(&addr).await;
+                        }
+
+                        {
+                            let mut routing_table = self.context.routing_table.lock().unwrap();
+                            let bucket_idx = routing_table.find_bucket_idx(source_id);
+
+                            routing_table.buckets[bucket_idx].pop_front();
+                            // if the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
+                            if response.is_none()
+                                || response.unwrap().r["id"] != oldest_node.id.to_string()
+                            {
+                                routing_table.buckets[bucket_idx].push_back(source_node.clone());
+                            }
+                            // otherwise, keep the oldest node and update its "freshness"
+                            else {
+                                oldest_node.update_last_seen();
+                                routing_table.buckets[bucket_idx].push_back(oldest_node);
+                                // the questionable node responded to our request, so we try again-
+                                // until all questionable nodes have been searched through
+                                try_again = true;
+                            }
+                        }
                     }
                 }
             }
