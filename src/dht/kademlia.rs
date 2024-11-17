@@ -233,7 +233,7 @@ impl Kademlia {
     ) -> Option<KrpcSuccessResponse> {
         info!("[CLIENT] Sending query to {addr}: {:#?}", query);
         let transaction_id = query.t.clone();
-        let query = serde_bencode::to_bytes(&query).unwrap();
+        let query = serde_bencoded::to_vec(&query).unwrap();
         self.socket.send_to(&query, addr).await.unwrap();
 
         let future = self.manager.create_future(transaction_id);
@@ -252,7 +252,7 @@ impl Kademlia {
             response, source_node
         );
         let addr = SocketAddr::new(source_node.ip, source_node.port);
-        let response = serde_bencode::to_bytes(&response).unwrap();
+        let response = serde_bencoded::to_vec(&response).unwrap();
         self.socket.send_to(&response, addr).await.unwrap();
     }
 
@@ -602,15 +602,15 @@ impl Kademlia {
     }
 
     async fn handle_krpc_call(&self, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
-        let query: KrpcMessage = serde_bencode::from_bytes(&buf[..len]).unwrap();
+        let query: KrpcMessage = serde_bencoded::from_bytes(&buf[..len]).unwrap();
 
         if query.y == "r" {
             // this is a response to an earlier request we made
             // future is ready
-            let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
+            let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
             self.manager.resolve_transaction(query.t, response);
         } else {
-            let query: KrpcRequest = serde_bencode::from_bytes(&buf[..len]).unwrap();
+            let query: KrpcRequest = serde_bencoded::from_bytes(&buf[..len]).unwrap();
 
             info!("Received query from {:#?}", addr);
             info!("{:#?}", query);
