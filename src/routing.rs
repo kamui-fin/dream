@@ -82,6 +82,7 @@ impl RoutingTable {
         } else {
             self.buckets[bucket_idx].push_back(node);
         }
+
     }
 
     pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {

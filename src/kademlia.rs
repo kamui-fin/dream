@@ -105,6 +105,7 @@ pub struct KrpcErrorResponse {
     e: (u8, String),
 }
 
+#[derive(Clone)]
 pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     pub context: Arc<RuntimeContext>,
@@ -136,9 +137,13 @@ impl Kademlia {
         let self_clone = self.clone();
         
         let mut binding = self_clone.timers.lock().unwrap();
-        let mut current_timer = &binding.get(&bucket_idx).unwrap();
 
-        current_timer.abort();
+        // only abort if it already exists 
+        if binding.contains_key(&bucket_idx) {
+            let mut current_timer = &binding.get(&bucket_idx).unwrap();
+
+            current_timer.abort();
+        }
 
         binding.insert(bucket_idx, tokio::spawn(async move {
             sleep(Duration::from_secs(15 * 60)).await;
@@ -174,6 +179,7 @@ impl Kademlia {
 
         for idx in (closest_idx + 1)..(NUM_BITS as u32) {
             let self_clone = self.clone();
+            self_clone.clone().reset_timer(idx as usize);
             self_clone.refresh_bucket(idx as usize).await;
         }
     }
@@ -489,6 +495,8 @@ impl Kademlia {
             port: addr.port(),
         };
 
+        let source_bucket = self.context.routing_table.lock().unwrap().find_bucket_idx(source_id);
+
         // Update the routing table's status of the source node
         let needs_evicting = self
             .context
@@ -497,6 +505,7 @@ impl Kademlia {
             .unwrap()
             .upsert_node(source_node.clone());
 
+        Arc::new(self.clone()).reset_timer(source_bucket as usize);
         let return_values = match query.q.as_str() {
             "ping" => self.handle_ping().await,
             "find_node" => self.handle_find_node(&query).await,

@@ -5,7 +5,7 @@ use std::{
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
-#[derive(Eq, PartialEq, Clone, Debug)]
+#[derive(Eq, PartialEq, Clone, Debug, serde::Serialize)]
 pub struct Node {
     pub id: u32,
     pub ip: IpAddr,
