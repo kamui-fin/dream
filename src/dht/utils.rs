@@ -1,4 +1,4 @@
-use crate::node::Node;
+use crate::dht::node::Node;
 use rand::{rngs::OsRng, Rng, RngCore};
 use std::net::{IpAddr, Ipv4Addr};
 // use hex;

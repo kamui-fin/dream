@@ -4,7 +4,7 @@ use serde::{Serialize};
 
 use rand::Rng;
 
-use crate::{config::{K, NUM_BITS}, node::Node};
+use crate::{dht::config::{K, NUM_BITS}, dht::node::Node};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //

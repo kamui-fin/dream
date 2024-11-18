@@ -3,6 +3,8 @@ use std::{
     net::{IpAddr, Ipv4Addr},
 };
 
+use serde::Serialize;
+
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug, serde::Serialize)]
@@ -48,7 +50,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Debug, Serialize)]
 pub struct NodeDistance {
     pub node: Node,
     pub dist: u32,

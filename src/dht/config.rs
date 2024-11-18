@@ -2,7 +2,7 @@ use std::{net::Ipv4Addr, str::FromStr};
 
 use clap::{command, Parser};
 
-use crate::node::Node;
+use crate::dht::node::Node;
 
 // Number of bits for our IDs
 pub const NUM_BITS: usize = 6;

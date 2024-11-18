@@ -1,17 +1,18 @@
 use std::{
     collections::HashMap,
+    net::Ipv4Addr,
+    str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
 use local_ip_address::local_ip;
 use rand::Rng;
-use tokio::time::sleep;
-use tokio::task::JoinHandle;
-use serde_json;
-use serde_json::json;
+use tokio::{sync::oneshot, time::sleep};
 
-use crate::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
+use serde_json::{json, Value};
+
+use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
@@ -30,7 +31,11 @@ impl RuntimeContext {
         });
         let routing_table = Arc::new(Mutex::new(RoutingTable::new(node_id)));
         let peer_store = Arc::new(Mutex::new(HashMap::<String, Vec<Node>>::new()));
-        let node = Node::new(node_id, local_ip().unwrap(), args.udp_port);
+        let node = Node::new(
+            node_id,
+            std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),
+            args.udp_port,
+        );
         let secret = Arc::new(Mutex::new(gen_secret()));
 
         Self {
@@ -54,14 +59,15 @@ impl RuntimeContext {
         });
     }
 
-    pub fn dump_state(&self){
-
+    pub fn dump_state(&self) -> Value {
         let current_state = json!({
             "time": SystemTime::now(),
             "node": serde_json::to_string(&self.node).unwrap(),
             "peer_store": serde_json::to_string(&self.peer_store.lock().unwrap().clone()).unwrap(),
             "routing_table": serde_json::to_string(&self.routing_table.lock().unwrap().clone()).unwrap(),
         });
+
+        current_state
     }
 }
 

@@ -5,11 +5,23 @@ edition = "2021"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_bencode = "0.2.4"
+serde_bencoded = { version = "0.3.2", features = ["sort_dictionary"]}
 rand = "0.8.5"
 sha1 = "0.10.6"
 tokio = { version = "1.41.0", features = ["full"] }
 local-ip-address = "0.6.3"
 clap = { version = "4.5.20", features = ["derive"] }
 hex = "0.4.3"
+futures = "0.3.31"
+log = "0.4"
+pretty_env_logger = "0.4"
+serde_json = "1.0"
+tiny_http = "0.11"
+waitmap = "1.1.0"
+serde_bytes = "0.11.15"
+http_req = "^0.13"
+url = "2.5.3"
+url_encoded_data = "0.6.1"
+percent-encoding = "2.3.1"
+anyhow = "1.0.93"
+debug-ignore = { version = "1.0.5", features = ["serde"]}
