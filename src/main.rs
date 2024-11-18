@@ -189,14 +189,11 @@ struct Peer {
 }
 
 impl Peer {
-    fn addr(&self) -> SocketAddr {
-        SocketAddr::new(std::net::IpAddr::V4(self.ip), self.port)
-    }
-}
-
-impl Peer {
     fn new(ip: Ipv4Addr, port: u16) -> Self {
         Self { ip, port }
+    }
+    fn addr(&self) -> SocketAddr {
+        SocketAddr::new(std::net::IpAddr::V4(self.ip), self.port)
     }
 }
 
@@ -404,6 +401,22 @@ async fn start_server(port: u16) -> Result<()> {
 
 async fn handle_msg(bt_msg: Message) {
     todo!()
+}
+
+struct BitField(Vec<u8>);
+
+impl BitField {
+    fn piece_exists(&self, index: usize) -> bool {
+        let byte_idx = index / 8;
+        let byte = self.0[byte_idx];
+        let offset = index % 8;
+
+        ((byte >> (8 - offset - 1)) % 1) == 1
+    }
+
+    fn mark_piece(&self, index: usize) -> bool {
+        let byte
+    }
 }
 
 #[tokio::main]
