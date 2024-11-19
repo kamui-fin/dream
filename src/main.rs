@@ -15,7 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 use std::hash::{Hash, Hasher};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::option::Option;
 use std::str::FromStr;
 use std::time::Duration;
@@ -236,10 +236,19 @@ fn get_peers_from_tracker(tracker_url: &str, body: TrackerRequest) -> Result<Tra
 
 struct RemotePeer {
     peer: Peer,
+    tcp_stream: Option<TcpStream>,
+
+    piece_lookup: BitField,
+
     am_choking: bool,      // = 1
     am_interested: bool,   // = 0
     peer_choking: bool,    // has this peer choked us? = 1
     peer_interested: bool, // is this peer interested in us? = 0
+}
+
+struct PeerManager {
+    swarm: Vec<RemotePeer>,
+    choke_list: Vec<RemotePeer>,
 }
 
 // 3. Handshake
@@ -399,23 +408,128 @@ async fn start_server(port: u16) -> Result<()> {
     }
 }
 
-async fn handle_msg(bt_msg: Message) {
-    todo!()
+async fn handle_msg(bt_msg: Message, peer: &mut RemotePeer, meta_file: &Metafile) {
+    match bt_msg.msg_type {
+        MessageType::KeepAlive => {
+            // close connection after 2 min of inactivity (no commands)
+            // keepalive is just a dummy msg to reset that timer
+        }
+        MessageType::Choke => {
+            // peer has choked us
+            peer.peer_choking = true;
+        }
+        MessageType::UnChoke => {
+            // peer has unchoked us
+            peer.peer_choking = false;
+        }
+        MessageType::Interested => {
+            // peer is interested in us
+            peer.peer_interested = true;
+        }
+        MessageType::NotInterested => {
+            // peer is not interested in us
+            peer.peer_interested = false;
+        }
+        MessageType::Have => {
+            // peer has piece <piece_index>
+            // sent after piece is downloaded and verified
+            let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
+            peer.piece_lookup.mark_piece(piece_index);
+        }
+        MessageType::Bitfield => {
+            // info about which pieces peer has
+            // only sent right after handshake, and before any other msg (so optional)
+            peer.piece_lookup = BitField(bt_msg.payload);
+        }
+        MessageType::Request => {
+            // requests a piece - (index, begin byte offset, length)
+        }
+        MessageType::Piece => {
+            // in response to Request, returns piece data
+            // index, begin, block data
+        }
+        MessageType::Cancel => {
+            // informing us that block <index><begin><length> is not needed anymore
+            // for endgame algo
+            todo!();
+        }
+        MessageType::Port => {
+            // port that their dht node is listening on
+            // only for DHT extension
+            todo!();
+        }
+        _ => {}
+    }
+}
+
+enum PieceStatus {
+    Pending,
+    Requested,
+    Received,
+}
+
+// Note: Avg block size is 2 ^ 14
+struct PieceStore<'a> {
+    num_pieces: u32,
+    meta_file: &'a Metafile, // contains
+    piece_status: Vec<PieceStatus>,
+    piece_buffer: Vec<Vec<u8>>,
+}
+
+impl<'a> PieceStore<'a> {
+    fn retrieve_block(&mut self, idx: usize, begin: usize, len: usize) -> Vec<u8> {
+        // TODO: validate constraints
+        self.piece_buffer[idx][begin..(begin + len)].to_vec()
+    }
+
+    fn store_block(&mut self, idx: usize, begin: usize, len: usize, data: &[u8]) {
+        self.piece_buffer[idx][begin..(begin + len)].copy_from_slice(data)
+    }
+
+    fn verify_piece_hash(&self, idx: usize) {
+        let buf = self.piece_buffer[idx];
+        let mut hasher = Sha1::new();
+        hasher.update(&buf);
+        let result = hasher.finalize();
+        let mut computed_hash = [0u8; 20];
+        computed_hash.copy_from_slice(&result[..]);
+
+        // TODO: compare with original
+    }
+
+    fn persist_piece(&self, idx: usize) {
+        // check if we got all the blocks for the piece
+        // save to name-{idx}.part
+    }
+
+    fn discard_piece(&mut self, idx: usize) {
+        self.piece_buffer[idx] = Vec::new();
+        self.piece_status[idx] = PieceStatus::Pending;
+    }
+
+    fn get_status_bitfield(&self) {}
 }
 
 struct BitField(Vec<u8>);
 
 impl BitField {
-    fn piece_exists(&self, index: usize) -> bool {
-        let byte_idx = index / 8;
-        let byte = self.0[byte_idx];
-        let offset = index % 8;
-
-        ((byte >> (8 - offset - 1)) % 1) == 1
+    fn new(n: u32) -> Self {
+        Self(vec![0; (n as f32 / 8f32).ceil() as usize])
     }
 
-    fn mark_piece(&self, index: usize) -> bool {
-        let byte
+    fn piece_exists(&self, index: u32) -> bool {
+        let byte_idx = index / 8;
+        let byte = self.0[byte_idx as usize];
+        let offset = index % 8;
+
+        ((byte >> (8 - offset - 1)) & 1) == 1
+    }
+
+    fn mark_piece(&mut self, index: u32) {
+        let byte_idx = index / 8;
+        let offset = index % 8;
+
+        self.0[byte_idx as usize] |= 1 << (8 - offset);
     }
 }
 
