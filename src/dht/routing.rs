@@ -67,7 +67,7 @@ impl RoutingTable {
         self.buckets[bucket_idx] = new_list;
     }
 
-    pub fn upsert_node(&mut self, node: Node) {
+    pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id) as usize;
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_none();
         let is_full = self.buckets[bucket_idx].len() >= K;
@@ -83,6 +83,7 @@ impl RoutingTable {
             self.buckets[bucket_idx].push_back(node);
         }
 
+        false
     }
 
     pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {

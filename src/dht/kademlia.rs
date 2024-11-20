@@ -146,6 +146,7 @@ pub struct KrpcErrorResponse {
     e: (u8, String),
 }
 
+// #[derive(Clone)]
 pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     manager: TransactionManager,
@@ -193,7 +194,6 @@ impl Kademlia {
             self.refresh_bucket(bucket_idx);
         }));
     }
-
     pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
         // 1. start dht server
         let self_clone = self.clone();
@@ -245,9 +245,8 @@ impl Kademlia {
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
         for idx in (closest_idx + 1)..(NUM_BITS as u32) {
-            let self_clone = self.clone();
-            self_clone.clone().reset_timer(idx as usize);
-            self_clone.refresh_bucket(idx as usize).await;
+            self.clone().reset_timer(idx as usize);
+            self.clone().refresh_bucket(idx as usize).await;
         }
     }
 
@@ -626,7 +625,7 @@ impl Kademlia {
         }
     }
 
-    async fn handle_krpc_call(&self, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+    async fn handle_krpc_call(self: Arc<Self>, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
         let query: KrpcMessage = serde_bencoded::from_bytes(&buf[..len]).unwrap();
 
         if query.y == "r" {
@@ -659,7 +658,7 @@ impl Kademlia {
                     let (bucket, mut oldest_node) = {
                         let routing_table = self.context.routing_table.lock().unwrap();
                         let _bucket =
-                            routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                            routing_table.buckets[routing_table.find_bucket_idx(source_id)as usize].clone();
                         (_bucket.clone(), _bucket.front().unwrap().clone())
                     };
 
@@ -675,17 +674,17 @@ impl Kademlia {
                             let mut routing_table = self.context.routing_table.lock().unwrap();
                             let bucket_idx = routing_table.find_bucket_idx(source_id);
 
-                            routing_table.buckets[bucket_idx].pop_front();
+                            routing_table.buckets[bucket_idx as usize].pop_front();
                             // if the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
                             if response.is_none()
                                 || response.unwrap().r["id"] != oldest_node.id.to_string()
                             {
-                                routing_table.buckets[bucket_idx].push_back(source_node.clone());
+                                routing_table.buckets[bucket_idx as usize].push_back(source_node.clone());
                             }
                             // otherwise, keep the oldest node and update its "freshness"
                             else {
                                 oldest_node.update_last_seen();
-                                routing_table.buckets[bucket_idx].push_back(oldest_node);
+                                routing_table.buckets[bucket_idx as usize].push_back(oldest_node);
                                 // the questionable node responded to our request, so we try again-
                                 // until all questionable nodes have been searched through
                                 try_again = true;
@@ -695,11 +694,11 @@ impl Kademlia {
                 }
             }
 
-            Arc::new(*self.clone()).reset_timer(source_id as usize);
+            self.clone().reset_timer(source_id as usize);
 
             // Step 3: Dispatch to respective handler functions
             let return_values = match query.q.as_str() {
-                "ping" => self.handle_ping().await,
+                "ping" => self.clone().handle_ping().await,
                 "find_node" => self.handle_find_node(&query).await,
                 "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
                 "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,

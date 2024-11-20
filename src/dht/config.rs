@@ -7,13 +7,13 @@ use crate::dht::node::Node;
 // Number of bits for our IDs
 pub const NUM_BITS: usize = 6;
 // Max number of entries in K-bucket
-pub const K: usize = 4;
+pub const K: usize = 2;
 // Max concurrent requests
-pub const ALPHA: usize = 3;
+pub const ALPHA: usize = 2;
 
 // TOML config loading and clap CLI arg parse
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     #[arg(long)]
@@ -21,9 +21,6 @@ pub struct Args {
 
     #[arg(short, long)]
     pub udp_port: u16,
-
-    #[arg(short, long)]
-    pub tcp_port: Option<u16>,
 
     #[arg(long)]
     pub bootstrap_id: Option<u32>,

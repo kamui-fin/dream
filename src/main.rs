@@ -414,9 +414,9 @@ impl BitField {
         ((byte >> (8 - offset - 1)) % 1) == 1
     }
 
-    fn mark_piece(&self, index: usize) -> bool {
-        let byte
-    }
+    // fn mark_piece(&self, index: usize) -> bool {
+    //     let byte
+    // }
 }
 
 #[tokio::main]
