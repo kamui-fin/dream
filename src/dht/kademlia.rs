@@ -21,9 +21,6 @@ use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
 use tokio::task::JoinHandle;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::Poll;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     collections::{BinaryHeap, HashSet},
@@ -33,7 +30,6 @@ use std::{
 };
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use waitmap::WaitMap;
 
 use crate::dht::utils::deserialize_compact_peers;
 use crate::dht::{
@@ -41,7 +37,6 @@ use crate::dht::{
     node::{Node, NodeDistance},
 };
 use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
-use tokio::time::Timeout;
 use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
@@ -146,7 +141,6 @@ pub struct KrpcErrorResponse {
     e: (u8, String),
 }
 
-// #[derive(Clone)]
 pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     manager: TransactionManager,
@@ -184,16 +178,19 @@ impl Kademlia {
 
         // only abort if it already exists 
         if binding.contains_key(&bucket_idx) {
-            let mut current_timer = &binding.get(&bucket_idx).unwrap();
+            let current_timer = &binding.get(&bucket_idx).unwrap();
 
             current_timer.abort();
         }
 
         binding.insert(bucket_idx, tokio::spawn(async move {
-            sleep(Duration::from_secs(15 * 60)).await;
-            self.refresh_bucket(bucket_idx);
+            sleep(Duration::from_secs(10)).await;
+            println!("TIMER RAN OUT!");
+            self.clone().refresh_bucket(bucket_idx).await;
+            // self.reset_timer(bucket_idx);
         }));
     }
+
     pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
         // 1. start dht server
         let self_clone = self.clone();
@@ -244,9 +241,10 @@ impl Kademlia {
             .unwrap()
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..(NUM_BITS) {
-            self.clone().reset_timer(idx as usize);
-            self.clone().refresh_bucket(idx).await;
+        for idx in (closest_idx + 1)..NUM_BITS {
+            self.clone().reset_timer(idx);
+            let self_clone = self.clone();
+            self_clone.refresh_bucket(idx).await;
         }
     }
 
@@ -478,6 +476,7 @@ impl Kademlia {
         let mut already_queried = HashSet::new();
         already_queried.insert(self.node_id); // avoid requesting to self
 
+        println!("Currently looking for infohash {}", info_hash);
         // pick α nodes from closest non-empty k-bucket, even if less than α entries
         let mut alpha_set = self.select_initial_nodes(info_hash);
         alpha_set.truncate(ALPHA);
@@ -658,7 +657,7 @@ impl Kademlia {
                     let (bucket, mut oldest_node) = {
                         let routing_table = self.context.routing_table.lock().unwrap();
                         let _bucket =
-                            routing_table.buckets[routing_table.find_bucket_idx(source_id)as usize].clone();
+                            routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
                         (_bucket.clone(), _bucket.front().unwrap().clone())
                     };
 
@@ -674,17 +673,17 @@ impl Kademlia {
                             let mut routing_table = self.context.routing_table.lock().unwrap();
                             let bucket_idx = routing_table.find_bucket_idx(source_id);
 
-                            routing_table.buckets[bucket_idx as usize].pop_front();
+                            routing_table.buckets[bucket_idx].pop_front();
                             // if the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
                             if response.is_none()
                                 || response.unwrap().r["id"] != oldest_node.id.to_string()
                             {
-                                routing_table.buckets[bucket_idx as usize].push_back(source_node.clone());
+                                routing_table.buckets[bucket_idx].push_back(source_node.clone());
                             }
                             // otherwise, keep the oldest node and update its "freshness"
                             else {
                                 oldest_node.update_last_seen();
-                                routing_table.buckets[bucket_idx as usize].push_back(oldest_node);
+                                routing_table.buckets[bucket_idx].push_back(oldest_node);
                                 // the questionable node responded to our request, so we try again-
                                 // until all questionable nodes have been searched through
                                 try_again = true;
@@ -694,11 +693,11 @@ impl Kademlia {
                 }
             }
 
-            self.clone().reset_timer(source_id as usize);
 
+            self.clone().reset_timer(source_id as usize);
             // Step 3: Dispatch to respective handler functions
             let return_values = match query.q.as_str() {
-                "ping" => self.clone().handle_ping().await,
+                "ping" => self.handle_ping().await,
                 "find_node" => self.handle_find_node(&query).await,
                 "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
                 "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,

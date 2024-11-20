@@ -6,9 +6,8 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use local_ip_address::local_ip;
 use rand::Rng;
-use tokio::{sync::oneshot, time::sleep};
+use tokio::time::sleep;
 
 use serde_json::{json, Value};
 
