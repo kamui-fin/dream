@@ -33,7 +33,7 @@ use tokio::time::timeout;
 
 use crate::dht::utils::deserialize_compact_peers;
 use crate::dht::{
-    config::{Args, ALPHA, K, NUM_BITS},
+    config::{Args, ALPHA, K, NUM_BITS, REFRESH_TIME},
     node::{Node, NodeDistance},
 };
 use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
@@ -184,10 +184,9 @@ impl Kademlia {
         }
 
         binding.insert(bucket_idx, tokio::spawn(async move {
-            sleep(Duration::from_secs(10)).await;
+            sleep(Duration::from_secs(REFRESH_TIME)).await;
             println!("TIMER RAN OUT!");
             self.clone().refresh_bucket(bucket_idx).await;
-            // self.reset_timer(bucket_idx);
         }));
     }
 
