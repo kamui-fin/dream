@@ -43,9 +43,9 @@ impl RoutingTable {
         all_nodes
     }
 
-    pub fn find_bucket_idx(&self, node_id: u32) -> u32 {
+    pub fn find_bucket_idx(&self, node_id: u32) -> usize {
         let xor_result = node_id ^ self.node_id;
-        xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)
+        (xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)) as usize
     }
 
     pub fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {

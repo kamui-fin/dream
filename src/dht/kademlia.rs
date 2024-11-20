@@ -244,9 +244,9 @@ impl Kademlia {
             .unwrap()
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..(NUM_BITS as u32) {
+        for idx in (closest_idx + 1)..(NUM_BITS) {
             self.clone().reset_timer(idx as usize);
-            self.clone().refresh_bucket(idx as usize).await;
+            self.clone().refresh_bucket(idx).await;
         }
     }
 
@@ -355,7 +355,7 @@ impl Kademlia {
         while routing_table_clone.buckets[bucket_idx as usize].is_empty()
             && traversed_buckets != routing_table_clone.buckets.len()
         {
-            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as u32;
+            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len();
             traversed_buckets += 1;
         }
 
