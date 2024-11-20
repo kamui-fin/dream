@@ -71,7 +71,7 @@ impl RoutingTable {
     }
 
     pub fn upsert_node(&mut self, node: Node) -> bool {
-        let bucket_idx = self.find_bucket_idx(node.id) as usize;
+        let bucket_idx = self.find_bucket_idx(node.id);
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
         let is_full = self.buckets[bucket_idx].len() >= K;
         info!("Adding node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);

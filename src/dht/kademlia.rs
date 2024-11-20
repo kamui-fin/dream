@@ -20,9 +20,6 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
-use std::future::Future;
-use std::pin::Pin;
-use std::task::Poll;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     collections::{BinaryHeap, HashSet},
@@ -32,7 +29,6 @@ use std::{
 };
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use waitmap::WaitMap;
 
 use crate::dht::utils::deserialize_compact_peers;
 use crate::dht::{
@@ -40,7 +36,6 @@ use crate::dht::{
     node::{Node, NodeDistance},
 };
 use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
-use tokio::time::Timeout;
 use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
@@ -220,9 +215,9 @@ impl Kademlia {
             .unwrap()
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..(NUM_BITS as usize) {
+        for idx in (closest_idx + 1)..NUM_BITS {
             let self_clone = self.clone();
-            self_clone.refresh_bucket(idx as usize).await;
+            self_clone.refresh_bucket(idx).await;
         }
     }
 
@@ -331,7 +326,7 @@ impl Kademlia {
         while routing_table_clone.buckets[bucket_idx as usize].is_empty()
             && traversed_buckets != routing_table_clone.buckets.len()
         {
-            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len() as usize;
+            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len();
             traversed_buckets += 1;
         }
 

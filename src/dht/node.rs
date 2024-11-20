@@ -59,7 +59,7 @@ impl Node {
             .unwrap()
             .as_secs();
         // 15 minute timer
-        return now - self.last_seen >= 60;
+        now - self.last_seen >= 60
     }
 
     pub fn update_last_seen(&mut self) {
