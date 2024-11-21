@@ -28,11 +28,12 @@ use std::{
     time::Duration,
 };
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::dht::utils::deserialize_compact_peers;
 use crate::dht::{
-    config::{Args, ALPHA, K, NUM_BITS},
+    config::{Args, ALPHA, K, NUM_BITS, REFRESH_TIME},
     node::{Node, NodeDistance},
 };
 use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
@@ -145,6 +146,7 @@ pub struct Kademlia {
     manager: TransactionManager,
     pub context: Arc<RuntimeContext>,
     node_id: u32,
+    pub timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>>,
 }
 
 impl Kademlia {
@@ -157,12 +159,38 @@ impl Kademlia {
         );
         let node_id = context.node.id;
 
+        let timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         Self {
             socket,
             manager: TransactionManager::new(),
             node_id,
             context,
+            timers,
         }
+    }
+
+    pub fn reset_timer(self: Arc<Self>, bucket_idx: usize) {
+        let self_clone = self.clone();
+
+        let mut binding = self_clone.timers.lock().unwrap();
+
+        // only abort if it already exists
+        if binding.contains_key(&bucket_idx) {
+            let current_timer = &binding.get(&bucket_idx).unwrap();
+
+            current_timer.abort();
+        }
+
+        binding.insert(
+            bucket_idx,
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(REFRESH_TIME)).await;
+                println!("TIMER RAN OUT!");
+                self.clone().refresh_bucket(bucket_idx).await;
+            }),
+        );
     }
 
     pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -449,6 +477,7 @@ impl Kademlia {
         let mut already_queried = HashSet::new();
         already_queried.insert(self.node_id); // avoid requesting to self
 
+        println!("Currently looking for infohash {}", info_hash);
         // pick α nodes from closest non-empty k-bucket, even if less than α entries
         let mut alpha_set = self.select_initial_nodes(info_hash);
         alpha_set.truncate(ALPHA);
@@ -596,7 +625,7 @@ impl Kademlia {
         }
     }
 
-    async fn handle_krpc_call(&self, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+    async fn handle_krpc_call(self: Arc<Self>, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
         let query: KrpcMessage = serde_bencoded::from_bytes(&buf[..len]).unwrap();
 
         if query.y == "r" {
@@ -665,6 +694,7 @@ impl Kademlia {
                 }
             }
 
+            self.clone().reset_timer(source_id as usize);
             // Step 3: Dispatch to respective handler functions
             let return_values = match query.q.as_str() {
                 "ping" => self.handle_ping().await,

@@ -55,9 +55,7 @@ where
 #[derive(Debug)]
 pub struct RemotePeer {
     pub peer: Peer,
-
     pub conn: Option<TcpStream>,
-
     pub piece_lookup: BitField,
     pub am_choking: bool,      // = 1
     pub am_interested: bool,   // = 0
@@ -65,6 +63,7 @@ pub struct RemotePeer {
     pub peer_interested: bool, // is this peer interested in us? = 0
 }
 
+#[derive(Debug)]
 pub struct PeerManager {
     pub swarm: Vec<RemotePeer>,
 }
@@ -117,18 +116,18 @@ impl RemotePeer {
         }
     }
 
-    pub async fn receive_message(&mut self) -> Option<Message> {
+    pub fn receive_message(&mut self) -> Option<Message> {
         if let Some(conn) = &mut self.conn {
             let mut len_buf = [0u8; 4];
-            conn.read_exact(&mut len_buf).await;
+            conn.read_exact(&mut len_buf);
 
             let msg_length = slice_to_u32_msb(&len_buf);
             if msg_length > 0 {
                 let mut id_buf = [0u8; 1];
-                conn.read_exact(&mut id_buf).await;
+                conn.read_exact(&mut id_buf);
 
                 let mut payload_buf = vec![0u8; msg_length as usize];
-                conn.read_exact(&mut payload_buf).await;
+                conn.read_exact(&mut payload_buf);
 
                 Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf))
             } else {
