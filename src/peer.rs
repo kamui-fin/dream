@@ -52,9 +52,12 @@ where
     Ok(peers)
 }
 
+#[derive(Debug)]
 pub struct RemotePeer {
     pub peer: Peer,
-    pub connection: PeerConnection,
+
+    pub conn: Option<TcpStream>,
+
     pub piece_lookup: BitField,
     pub am_choking: bool,      // = 1
     pub am_interested: bool,   // = 0
@@ -64,67 +67,68 @@ pub struct RemotePeer {
 
 pub struct PeerManager {
     pub swarm: Vec<RemotePeer>,
-    pub choke_list: Vec<RemotePeer>,
 }
 
-pub async fn peer_handshake(peer: Peer, meta_file: Metafile, my_id: String) -> Result<TcpStream> {
-    info!("Initiating peer handshake with {:#?}", peer);
+impl RemotePeer {
+    pub async fn peer_handshake(
+        &mut self,
+        meta_file: Metafile,
+        my_id: String,
+    ) -> Result<TcpStream> {
+        info!("Initiating peer handshake with {:#?}", self);
 
-    let mut handshake = [0u8; 68];
-    handshake[0] = 19;
-    handshake[1..20].copy_from_slice(b"BitTorrent protocol");
-    handshake[28..48].copy_from_slice(&meta_file.get_info_hash());
-    handshake[48..68].copy_from_slice(my_id.as_bytes());
+        let mut handshake = [0u8; 68];
+        handshake[0] = 19;
+        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
+        handshake[28..48].copy_from_slice(&meta_file.get_info_hash());
+        handshake[48..68].copy_from_slice(my_id.as_bytes());
 
-    let connect_timeout = Duration::from_secs(5);
-    let mut stream = match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => {
-            error!("Failed to connect: {}", e);
-            return Err(anyhow!(e));
+        let connect_timeout = Duration::from_secs(5);
+        let mut stream = match timeout(connect_timeout, TcpStream::connect(self.peer.addr())).await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                error!("Failed to connect: {}", e);
+                return Err(anyhow!(e));
+            }
+            Err(_) => {
+                error!("Connection attempt timed out");
+                return Err(anyhow!("Connection timed out"));
+            }
+        };
+
+        stream.write_all(&handshake).await?;
+
+        let mut res = [0u8; 68];
+        stream.read_exact(&mut res).await?;
+
+        if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
+            Ok(stream)
+        } else {
+            stream.shutdown().await?;
+            error!("Handshake mismatch");
+            Err(anyhow!("Handshake failed"))
         }
-        Err(_) => {
-            error!("Connection attempt timed out");
-            return Err(anyhow!("Connection timed out"));
-        }
-    };
-    stream.write_all(&handshake).await?;
-
-    let mut res = [0u8; 68];
-    stream.read_exact(&mut res).await?;
-
-    if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
-        Ok(stream)
-    } else {
-        stream.shutdown().await?;
-        error!("Handshake mismatch");
-        Err(anyhow!("Handshake failed"))
     }
-}
 
-pub struct PeerConnection {
-    conn: Option<TcpStream>,
-}
-
-impl PeerConnection {
     pub fn send_message(&mut self, msg: Message) {
         if let Some(conn) = &mut self.conn {
             conn.write_all(&msg.serialize());
         }
     }
 
-    pub fn receive_message(&mut self) -> Option<Message> {
+    pub async fn receive_message(&mut self) -> Option<Message> {
         if let Some(conn) = &mut self.conn {
             let mut len_buf = [0u8; 4];
-            conn.read_exact(&mut len_buf);
+            conn.read_exact(&mut len_buf).await;
 
             let msg_length = slice_to_u32_msb(&len_buf);
             if msg_length > 0 {
                 let mut id_buf = [0u8; 1];
-                conn.read_exact(&mut id_buf);
+                conn.read_exact(&mut id_buf).await;
 
                 let mut payload_buf = vec![0u8; msg_length as usize];
-                conn.read_exact(&mut payload_buf);
+                conn.read_exact(&mut payload_buf).await;
 
                 Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf))
             } else {

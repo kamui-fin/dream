@@ -2,6 +2,7 @@ use std::{fs::File, io::Write};
 
 use crate::{tracker::Metafile, utils::hash_obj};
 
+#[derive(Debug)]
 pub struct BitField(pub Vec<u8>);
 
 impl BitField {
@@ -81,7 +82,7 @@ impl Piece {
 }
 
 // Note: Avg block size is 2 ^ 14
-struct PieceStore<'a> {
+pub struct PieceStore<'a> {
     pub num_pieces: u32,
     pub meta_file: &'a Metafile, // contains
     pub pieces: Vec<Piece>,

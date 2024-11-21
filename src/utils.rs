@@ -1,5 +1,5 @@
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use sha1::{Sha1, Digest};
+use sha1::{Digest, Sha1};
 
 pub fn slice_to_u32_msb(bytes: &[u8]) -> u32 {
     // Ensure the slice has exactly 4 bytes
