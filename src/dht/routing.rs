@@ -73,20 +73,22 @@ impl RoutingTable {
     pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id);
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
-        let is_full = self.buckets[bucket_idx].len() >= K;
-        info!("Adding node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
+        let is_full = self.buckets[bucket_idx].len() >= 2;
+        info!("Attempting to add node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
 
-        if already_exists && !is_full {
+        if already_exists {
             self.remove_node(node.id, bucket_idx);
             self.buckets[bucket_idx].push_back(node);
-        } else if !already_exists && is_full {
-            // ping front of list and go from there
-            // if ping
-        } else {
+
+            return false; // since it already exists, eviction not necessary
+        } else if !is_full {
             self.buckets[bucket_idx].push_back(node);
+
+            return false; // since the bucket isn't full, eviction not necessary
         }
 
-        false
+        // eviction check is necessary since bucket is full and node doesn't already exist
+        true
     }
 
     pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {

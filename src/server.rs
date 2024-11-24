@@ -105,7 +105,7 @@ impl<'a> BitTorrent<'a> {
         }
     }
 }
-=======
+// =======
 pub async fn start_server(port: u16) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 
