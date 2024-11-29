@@ -20,6 +20,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use sha1::Digest;
 use sha1::Sha1;
+use std::any::Any;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
     collections::{BinaryHeap, HashSet},
@@ -221,7 +222,7 @@ impl Kademlia {
         self.context
             .routing_table
             .lock()
-            .unwrap()
+            .await
             .upsert_node(bootstrap_node);
 
         let self_clone = self.clone();
@@ -240,10 +241,11 @@ impl Kademlia {
             .context
             .routing_table
             .lock()
-            .unwrap()
+            .await
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
         for idx in (closest_idx + 1)..NUM_BITS {
+            // self.clone().reset_timer(idx);
             let self_clone = self.clone();
             self_clone.refresh_bucket(idx).await;
         }
@@ -345,9 +347,9 @@ impl Kademlia {
         self.send_request(request, &addr).await.unwrap()
     }
 
-    fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
+    async fn select_initial_nodes(&self, target_node_id: u32) -> Vec<NodeDistance> {
         let mut alpha_set = vec![];
-        let routing_table_clone = self.context.routing_table.lock().unwrap();
+        let routing_table_clone = self.context.routing_table.lock().await;
         let mut bucket_idx = std::cmp::min(routing_table_clone.find_bucket_idx(target_node_id), 5);
 
         let mut traversed_buckets = 0;
@@ -396,7 +398,7 @@ impl Kademlia {
         already_queried.insert(self.node_id); // avoid requesting to self
 
         // Select initial nodes
-        let mut alpha_set = self.select_initial_nodes(target_node_id);
+        let mut alpha_set = self.select_initial_nodes(target_node_id).await;
         alpha_set.truncate(ALPHA);
 
         info!("Alpha set: {:#?}", alpha_set);
@@ -479,12 +481,12 @@ impl Kademlia {
 
         println!("Currently looking for infohash {}", info_hash);
         // pick α nodes from closest non-empty k-bucket, even if less than α entries
-        let mut alpha_set = self.select_initial_nodes(info_hash);
+        let mut alpha_set = self.select_initial_nodes(info_hash).await;
         alpha_set.truncate(ALPHA);
 
         if alpha_set.is_empty() {
             // find locally, most likely we're the only node
-            let peer_store_guard = self.context.peer_store.lock().unwrap();
+            let peer_store_guard = self.context.peer_store.lock().await;
             let peers = peer_store_guard.get(&info_hash.to_string());
             if let Some(peers) = peers {
                 let values = peers
@@ -572,7 +574,7 @@ impl Kademlia {
             .context
             .routing_table
             .lock()
-            .unwrap()
+            .await
             .get_refresh_target(bucket_idx);
         self.recursive_find_nodes(node_id).await;
     }
@@ -587,7 +589,7 @@ impl Kademlia {
             self.context
                 .peer_store
                 .lock()
-                .unwrap()
+                .await
                 .entry(info_hash.clone())
                 .or_default()
                 .push(self.context.node.clone());
@@ -642,56 +644,51 @@ impl Kademlia {
             let source_id = query.a.get("id").unwrap().parse().unwrap();
             let source_node = Node::new(source_id, addr.ip(), addr.port());
 
-            // Step 1: Update the position/"freshness" of this node, or attempt to insert if it doesn't exist
             let check_for_eviction = {
-                let mut routing_table = self.context.routing_table.lock().unwrap();
+                let mut routing_table = self.context.routing_table.lock().await;
                 routing_table.upsert_node(source_node.clone())
             };
 
-            // Step 2: Try evicting the oldest node if the bucket that this node tried to be inserted into is full
             if check_for_eviction {
-                let mut try_again = true;
+                info!("Checking for eviction due to source node {}'s query onto queried node {}", source_id, self.context.node.id);
+                loop {
+                    let mut routing_table = self.context.routing_table.lock().await;
+                    let mut curr_bucket = routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
 
-                while try_again {
-                    try_again = false;
+                    let mut oldest_node = curr_bucket.front().unwrap().clone();
 
-                    let (bucket, mut oldest_node) = {
-                        let routing_table = self.context.routing_table.lock().unwrap();
-                        let _bucket =
-                            routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
-                        (_bucket.clone(), _bucket.front().unwrap().clone())
-                    };
+                    // if we loop through all the questionable nodes and encounter a node that isn't questionable, then we disregard the new node
+                    if !oldest_node.is_questionable(){
+                        info!("Oldest node not questionable, new source node is discarded");
+                        break;
+                    }
 
-                    if oldest_node.is_questionable() {
-                        let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
-                        let mut response = self.send_ping(&addr).await;
-                        // retry once
-                        if response.is_none() {
-                            response = self.send_ping(&addr).await;
-                        }
+                    let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
+                    
+                    info!("Node {} sent a ping to node {} to check if it should be evicted", self.context.node.id, oldest_node.id);
+                    let mut response = self.send_ping(&addr).await;
 
-                        {
-                            let mut routing_table = self.context.routing_table.lock().unwrap();
-                            let bucket_idx = routing_table.find_bucket_idx(source_id);
+                    // retry once
+                    if response.is_none() {
+                        info!("Node {} didn't respond to node {}'s ping and the ping is being retried", oldest_node.id, self.context.node.id);
+                        response = self.send_ping(&addr).await;
+                    }
 
-                            routing_table.buckets[bucket_idx].pop_front();
-                            // if the oldest node doesn't respond or sends an incorrect ID, replace it with the new node
-                            if response.is_none()
-                                || response.unwrap().r["id"] != oldest_node.id.to_string()
-                            {
-                                routing_table.buckets[bucket_idx].push_back(source_node.clone());
-                            }
-                            // otherwise, keep the oldest node and update its "freshness"
-                            else {
-                                oldest_node.update_last_seen();
-                                routing_table.buckets[bucket_idx].push_back(oldest_node);
-                                // the questionable node responded to our request, so we try again-
-                                // until all questionable nodes have been searched through
-                                try_again = true;
-                            }
-                        }
+                    // if we get a response, we need to upsert the oldest node and update its last seen and continue our search
+                    if !response.is_none() {
+                        info!("Node {} responded to node {}'s ping and is being updated in the bucket", oldest_node.id, self.context.node.id);
+                        oldest_node.update_last_seen();
+                        routing_table.upsert_node(oldest_node);
+                    } 
+                    // if we don't get a reponse after second try, we must remove it and insert the current node
+                    else {
+                        info!("Node {} didn't respond to node {}'s ping and is being removed from the bucket to make place for node {}", oldest_node.id, self.context.node.id, source_id);
+                        curr_bucket.pop_front();
+                        routing_table.upsert_node(source_node.clone());
                     }
                 }
+            } else {
+                info!("Eviction not necessary, source node {} is succesfully upserted to {}'s bucket", source_id, self.context.node.id);
             }
 
             self.clone().reset_timer(source_id as usize);
@@ -721,7 +718,7 @@ impl Kademlia {
             .context
             .routing_table
             .lock()
-            .unwrap()
+            .await
             .get_nodes(target_node_id);
         info!("{:#?}", k_closest_nodes);
         let compact_node_info = k_closest_nodes
@@ -744,7 +741,7 @@ impl Kademlia {
 
         let mut return_values = HashMap::from([("id".into(), self.node_id.to_string())]);
 
-        let peer_store_guard = self.context.peer_store.lock().unwrap();
+        let peer_store_guard = self.context.peer_store.lock().await;
         let peers = peer_store_guard.get(info_hash);
         if let Some(peers) = peers {
             let values = peers
@@ -758,7 +755,7 @@ impl Kademlia {
                 .context
                 .routing_table
                 .lock()
-                .unwrap()
+                .await
                 .get_nodes(info_hash.parse().unwrap());
             let compact_node_info = k_closest_nodes
                 .iter()
@@ -805,7 +802,7 @@ impl Kademlia {
         self.context
             .peer_store
             .lock()
-            .unwrap()
+            .await
             .entry(info_hash.clone())
             .or_default()
             .push(source_node);
@@ -814,7 +811,7 @@ impl Kademlia {
             self.context
                 .peer_store
                 .lock()
-                .unwrap()
+                .await
                 .get(info_hash.as_str())
         );
 

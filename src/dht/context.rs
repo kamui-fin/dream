@@ -15,8 +15,8 @@ use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_sec
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
-    pub routing_table: Arc<Mutex<RoutingTable>>,
-    pub peer_store: Arc<Mutex<HashMap<String, Vec<Node>>>>,
+    pub routing_table: Arc<tokio::sync::Mutex<RoutingTable>>,
+    pub peer_store: Arc<tokio::sync::Mutex<HashMap<String, Vec<Node>>>>,
     pub node: Node,
     pub secret: Arc<Mutex<[u8; 16]>>,
     pub announce_log: Arc<Vec<String>>,
@@ -28,8 +28,8 @@ impl RuntimeContext {
             let mut rng = rand::thread_rng();
             rng.gen_range(0..64)
         });
-        let routing_table = Arc::new(Mutex::new(RoutingTable::new(node_id)));
-        let peer_store = Arc::new(Mutex::new(HashMap::<String, Vec<Node>>::new()));
+        let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
+        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<String, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
             std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),
@@ -58,12 +58,12 @@ impl RuntimeContext {
         });
     }
 
-    pub fn dump_state(&self) -> Value {
+    pub async fn dump_state(&self) -> Value {
         let current_state = json!({
             "time": SystemTime::now(),
             "node": serde_json::to_string(&self.node).unwrap(),
-            "peer_store": serde_json::to_string(&self.peer_store.lock().unwrap().clone()).unwrap(),
-            "routing_table": serde_json::to_string(&self.routing_table.lock().unwrap().clone()).unwrap(),
+            "peer_store": serde_json::to_string(&self.peer_store.lock().await.clone()).unwrap(),
+            "routing_table": serde_json::to_string(&self.routing_table.lock().await.clone()).unwrap(),
         });
 
         current_state
