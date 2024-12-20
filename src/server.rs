@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU32;
+
 use anyhow::Result;
 use log::info;
 use tokio::{io::AsyncReadExt, net::TcpListener};

@@ -1,6 +1,7 @@
 mod msg;
 mod peer;
 mod piece;
+mod server;
 mod tracker;
 mod utils;
 
