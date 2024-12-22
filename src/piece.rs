@@ -99,39 +99,11 @@ impl Piece {
     }
 }
 
-// maybe implement Iter
-// tells us which block to get next
-#[derive(Default)]
-pub struct DownloadMeta {
-    next_piece: AtomicU32,
-    next_block: AtomicU32,
-}
-
-impl DownloadMeta {
-    fn increment(&self, piece_size: u32) {
-        let block_id = self.next_block.load(std::sync::atomic::Ordering::SeqCst);
-        let last_byte_num = (block_id + 1) * BLOCK_SIZE;
-
-        if last_byte_num < piece_size {
-            self.next_block
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        } else {
-            // check if we're done with all pieces
-            self.next_piece
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.next_block
-                .store(0, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-}
-
 // Note: Avg block size is 2 ^ 14
 pub struct PieceStore {
     pub num_pieces: u32,
     pub meta_file: Metafile, // contains
     pub pieces: Vec<Piece>,
-
-    download_meta: DownloadMeta,
 }
 
 impl PieceStore {
@@ -151,7 +123,6 @@ impl PieceStore {
             num_pieces,
             pieces,
             meta_file,
-            download_meta: DownloadMeta::default(),
         }
     }
 
@@ -182,29 +153,5 @@ impl PieceStore {
             self.meta_file.get_piece_len(idx as usize),
             self.meta_file.get_piece_hashes().0[idx as usize],
         )
-    }
-
-    pub fn get_next_block_dl(&self) -> Option<(u32, u32)> {
-        let piece_id = self
-            .download_meta
-            .next_piece
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        if piece_id == self.num_pieces {
-            return None;
-        }
-
-        let block_id = self
-            .download_meta
-            .next_block
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        let piece = &self.pieces[piece_id as usize];
-        self.download_meta.increment(piece.buffer.len() as u32);
-
-        // we can keep this function simple because of sequential downloading
-        // assumption: block_id + 1 has not been requested yet
-
-        Some((piece_id, block_id))
     }
 }

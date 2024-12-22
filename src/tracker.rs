@@ -1,4 +1,6 @@
 use crate::peer::Peer;
+use crate::peer::DREAM_ID;
+use crate::PORT;
 use anyhow::Result;
 use http_req::request;
 use log::info;
@@ -13,7 +15,7 @@ use crate::{peer::deserialize_peers, utils::hash_obj};
 
 pub struct Hashes(pub Vec<[u8; 20]>);
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Metafile {
     pub announce: String, // URL of the tracker
     pub comment: Option<String>,
@@ -62,14 +64,14 @@ pub fn parse_torrent_file(file_path: &str) -> Result<Metafile> {
     Ok(meta_file)
 }
 
-#[derive(Serialize, Deserialize, Debug, Hash)]
+#[derive(Clone, Serialize, Deserialize, Debug, Hash)]
 pub struct FileInfo {
     pub length: u64,       // # of bytes
     pub path: Vec<String>, // path split up, last is filename (0 len is error)
     pub md5sum: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Info {
     pub name: String,
     pub pieces: ByteBuf,
@@ -106,8 +108,6 @@ enum Event {
 #[derive(Debug)]
 pub struct TrackerRequest {
     pub info_hash: String,
-    pub peer_id: String,
-    pub port: u16,
     pub uploaded: usize,
     pub downloaded: usize,
     pub left: usize,
@@ -115,12 +115,10 @@ pub struct TrackerRequest {
 }
 
 impl TrackerRequest {
-    pub fn from_id_port(peer_id: String, port: u16, torrent_file: &Metafile) -> Self {
+    pub fn new(torrent_file: &Metafile) -> Self {
         let left = torrent_file.info.length.unwrap_or_default() as usize;
         Self {
             info_hash: form_urlencoded::byte_serialize(&torrent_file.get_info_hash()).collect(),
-            peer_id,
-            port,
             uploaded: 0,
             downloaded: 0,
             left,
@@ -136,7 +134,7 @@ impl TrackerRequest {
     }
 
     pub fn to_url(&self, tracker_url: &str) -> String {
-        let port_ascii = self.port.to_string();
+        let port_ascii = PORT.to_string();
         let uploaded_ascii = self.uploaded.to_string();
         let downloaded_ascii = self.downloaded.to_string();
         let left_ascii = self.left.to_string();
@@ -144,7 +142,7 @@ impl TrackerRequest {
         let mut url = Url::parse(tracker_url).expect("Invalid tracker URL");
 
         url.query_pairs_mut()
-            .append_pair("peer_id", &self.peer_id)
+            .append_pair("peer_id", &DREAM_ID)
             .append_pair("port", &port_ascii)
             .append_pair("uploaded", &uploaded_ascii)
             .append_pair("downloaded", &downloaded_ascii)
@@ -166,7 +164,7 @@ impl TrackerRequest {
 }
 
 #[derive(Deserialize, Debug)]
-struct TrackerResponse {
+pub struct TrackerResponse {
     pub interval: u64,
     #[serde(deserialize_with = "deserialize_peers")]
     pub peers: Vec<Peer>,

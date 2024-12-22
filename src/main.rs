@@ -1,11 +1,12 @@
+mod bittorrent;
 mod msg;
 mod peer;
 mod piece;
-mod bittorrent;
 mod tracker;
 mod utils;
 
 use anyhow::Result;
+use bittorrent::BitTorrent;
 
 const PORT: u16 = 6881;
 
@@ -13,13 +14,11 @@ const PORT: u16 = 6881;
 async fn main() -> Result<()> {
     pretty_env_logger::init();
 
-    // let peer_id = gen_peer_id();
-    // info!("Initialized peer {peer_id}");
+    let input_file = "debian.torrent";
+    let output_dir = "output";
 
-    // let meta_file = parse_torrent_file("debian.torrent")?;
-    // info!("Parsed metafile: {:#?}", meta_file);
-
-    // start_server(PORT).await?;
+    let mut client = BitTorrent::from_torrent_file(input_file).await?;
+    client.begin_download(output_dir).await;
 
     Ok(())
 }

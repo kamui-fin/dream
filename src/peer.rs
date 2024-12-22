@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use futures::future;
 use futures::{stream::FuturesUnordered, StreamExt};
 use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
@@ -6,12 +7,7 @@ use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{
-    collections::VecDeque,
-    future::Future,
-    net::{Ipv4Addr, SocketAddr},
-    ops::Range,
-    pin::Pin,
-    sync::Arc,
+    collections::VecDeque, future::Future, net::SocketAddr, ops::Range, pin::Pin, sync::Arc,
     time::Duration,
 };
 use tokio::sync::Mutex;
@@ -24,6 +20,7 @@ use tokio::{
     time::timeout,
 };
 
+use crate::tracker::TrackerResponse;
 use crate::{
     msg::{Message, MessageType},
     piece::{BitField, PieceStore, RequestStatus, BLOCK_SIZE},
@@ -32,7 +29,7 @@ use crate::{
 };
 
 lazy_static! {
-    static ref DREAM_ID: String = thread_rng()
+    pub static ref DREAM_ID: String = thread_rng()
         .sample_iter(&Alphanumeric)
         .take(20)
         .map(char::from)
@@ -106,26 +103,18 @@ pub struct PipelineEntry {
 
 pub struct PeerSession {
     conn: Arc<Mutex<TcpStream>>,
-    piece_store: Arc<Mutex<PieceStore>>,
-    // must always keep pipeline full with outgoing requests
-    // -> therefore must have access to next block id
-    // -> pass in closure to retrieve
-    // entry must exit pipeline after block is received
     pipeline: Vec<PipelineEntry>,
     buffer: VecDeque<PipelineEntry>,
 }
 
 impl PeerSession {
-    async fn connect_peer(peer: Peer, piece_store: Arc<Mutex<PieceStore>>) -> Self {
-        let conn = Self::peer_handshake(peer, &piece_store.lock().await.meta_file.get_info_hash())
-            .await
-            .unwrap();
+    async fn connect_peer(peer: Peer, info_hash: &[u8; 20]) -> Self {
+        let conn = Self::peer_handshake(peer, info_hash).await.unwrap();
         let conn = Arc::new(Mutex::new(conn));
         let pipeline = Vec::new();
 
         Self {
             conn,
-            piece_store,
             pipeline,
             buffer: VecDeque::new(),
         }
@@ -206,30 +195,25 @@ impl PeerSession {
         Self::send_message(conn, msg).await;
     }
 
-    pub fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
+    pub async fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
         for block_id in blocks {
             self.buffer.push_back(PipelineEntry { piece_id, block_id });
         }
 
-        self.refresh_pipeline();
+        self.refresh_pipeline().await;
     }
 
-    fn refresh_pipeline(&mut self) {
+    async fn refresh_pipeline(&mut self) {
         for _ in 0..(MAX_PIPELINE_SIZE - self.pipeline.len()) {
             if let Some(entry) = self.buffer.pop_front() {
-                self.pipeline_enqueue(entry);
+                self.pipeline_enqueue(entry).await;
             }
         }
     }
 
     async fn pipeline_enqueue(&mut self, entry: PipelineEntry) {
         self.pipeline.push(entry.clone());
-        let conn = self.conn.clone();
-
-        tokio::spawn(async move {
-            Self::request_block(conn, entry).await;
-        });
-        // start request
+        Self::request_block(self.conn.clone(), entry).await;
     }
 }
 
@@ -240,10 +224,10 @@ pub struct UnchokeMessage {
 impl RemotePeer {
     async fn from_peer(
         peer: Peer,
-        piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
     ) -> Self {
-        let session = PeerSession::connect_peer(peer.clone(), piece_store).await;
+        let session = PeerSession::connect_peer(peer.clone(), info_hash).await;
 
         Self {
             peer,
@@ -272,6 +256,23 @@ pub struct PeerManager {
 }
 
 impl PeerManager {
+    // Initializes all the peers from the tracker response
+    pub async fn connect_peers(
+        peers_response: TrackerResponse,
+        info_hash: &[u8; 20],
+        unchoke_channel: &Sender<UnchokeMessage>,
+    ) -> PeerManager {
+        let swarm: Vec<_> = peers_response
+            .peers
+            .into_iter()
+            .map(|p| RemotePeer::from_peer(p, info_hash, unchoke_channel.clone()))
+            .collect();
+
+        let swarm = future::join_all(swarm).await;
+
+        Self { swarm }
+    }
+
     pub fn with_piece(&self, piece_idx: u32) -> Vec<&RemotePeer> {
         self.swarm
             .iter()
@@ -282,12 +283,12 @@ impl PeerManager {
     pub async fn find_or_create(
         &mut self,
         addr: SocketAddr,
-        piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
     ) {
         if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
             let new_peer =
-                RemotePeer::from_peer(Peer::from_addr(addr), piece_store, unchoke_channel).await;
+                RemotePeer::from_peer(Peer::from_addr(addr), info_hash, unchoke_channel).await;
             self.swarm.push(new_peer); // will be at len - 1
         }
     }
@@ -300,10 +301,15 @@ impl PeerManager {
         self.swarm.iter_mut().find(|p| p.peer == *peer)
     }
 
-    pub fn queue_blocks_for_peer(&mut self, peer: &Peer, piece_idx: u32, num_blocks: Range<u32>) {
+    pub async fn queue_blocks_for_peer(
+        &mut self,
+        peer: &Peer,
+        piece_idx: u32,
+        num_blocks: Range<u32>,
+    ) {
         let peer = self.find_peer_mut(peer);
         if let Some(peer) = peer {
-            peer.session.queue_blocks(piece_idx, num_blocks);
+            peer.session.queue_blocks(piece_idx, num_blocks).await;
         }
     }
 

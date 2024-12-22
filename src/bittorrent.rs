@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
@@ -7,7 +8,9 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::{io::AsyncReadExt, net::TcpListener};
 
-use crate::peer::UnchokeMessage;
+use crate::peer::{UnchokeMessage, DREAM_ID};
+use crate::tracker::{self, parse_torrent_file};
+use crate::PORT;
 use crate::{
     msg::{Message, MessageType},
     peer::{PeerManager, RemotePeer},
@@ -18,7 +21,7 @@ use crate::{
 
 pub struct BitTorrent {
     meta_file: Metafile,
-    piece_store: Arc<Mutex<PieceStore>>, // references meta_file
+    piece_store: PieceStore, // references meta_file
     peer_manager: PeerManager,
 
     pub unchoke_tx: Sender<UnchokeMessage>,
@@ -26,9 +29,37 @@ pub struct BitTorrent {
 }
 
 impl BitTorrent {
-    pub async fn begin_download(&mut self) {
+    pub async fn from_torrent_file(torrent_file: &str) -> anyhow::Result<Self> {
+        let (unchoke_tx, unchoke_rx) = tokio::sync::mpsc::channel(100);
+
+        let meta_file = parse_torrent_file(torrent_file)?;
+
+        let peers = tracker::get_peers_from_tracker(
+            &meta_file.announce,
+            tracker::TrackerRequest::new(&meta_file),
+        )?;
+        let peer_manager =
+            PeerManager::connect_peers(peers, &meta_file.get_info_hash(), &unchoke_tx).await;
+
+        let piece_store = PieceStore::new(meta_file.clone());
+
+        Ok(Self {
+            meta_file,
+            piece_store,
+            peer_manager,
+            unchoke_rx,
+            unchoke_tx,
+        })
+    }
+
+    pub async fn begin_download(&mut self, output_dir: &str) {
+        let output_path = Path::new(output_dir);
+        if !output_path.exists() {
+            std::fs::create_dir(output_path).unwrap();
+        }
+
         // request each piece sequentially for now (sensible for streaming but could use optimization)
-        for piece_idx in 0..(self.piece_store.lock().await.num_pieces) {
+        for piece_idx in 0..(self.piece_store.num_pieces) {
             let piece_size = self.meta_file.get_piece_len(piece_idx as usize);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
@@ -48,11 +79,9 @@ impl BitTorrent {
                     if let Some(UnchokeMessage { peer }) = unchoke_msg {
                         if self.peer_manager.peer_has_piece(&peer, piece_idx) {
                             // let this peer download the whole piece for now, TODO optimize
-                            self.peer_manager.queue_blocks_for_peer(
-                                &peer,
-                                piece_idx,
-                                0..num_blocks,
-                            );
+                            self.peer_manager
+                                .queue_blocks_for_peer(&peer, piece_idx, 0..num_blocks)
+                                .await;
                             break;
                         }
                     }
@@ -68,50 +97,51 @@ impl BitTorrent {
                         (i as u32 + 1) * blocks_per_peer
                     };
                     self.peer_manager
-                        .queue_blocks_for_peer(peer, piece_idx, start..end);
+                        .queue_blocks_for_peer(peer, piece_idx, start..end)
+                        .await;
                 }
             }
         }
     }
 
-    pub async fn start_server(&mut self, port: u16) -> Result<()> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    /* pub async fn start_server(&mut self, port: u16) -> Result<()> {
+           let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
 
-        loop {
-            let (mut socket, addr) = listener.accept().await?;
+           loop {
+               let (mut socket, addr) = listener.accept().await?;
 
-            self.peer_manager
-                .find_or_create(addr, self.piece_store.clone(), self.unchoke_tx.clone())
-                .await;
+               self.peer_manager
+                   .find_or_create(addr, self.piece_store.clone(), self.unchoke_tx.clone())
+                   .await;
 
-            let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
-            println!("New connection from {:?}", peer.peer);
+               let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
+               println!("New connection from {:?}", peer.peer);
 
-            tokio::spawn(async move {
-                let mut buf = [0; 2028];
+               tokio::spawn(async move {
+                   let mut buf = [0; 2028];
 
-                loop {
-                    match socket.read(&mut buf).await {
-                        Ok(0) => {
-                            println!("Connection closed by {:?}", addr);
-                            break;
-                        }
-                        Ok(_) => {
-                            let bt_msg = Message::parse(&buf);
-                            info!("Received msg: {:#?}", bt_msg);
+                   loop {
+                       match socket.read(&mut buf).await {
+                           Ok(0) => {
+                               println!("Connection closed by {:?}", addr);
+                               break;
+                           }
+                           Ok(_) => {
+                               let bt_msg = Message::parse(&buf);
+                               info!("Received msg: {:#?}", bt_msg);
 
-                            self.handle_msg(bt_msg, &mut peer).await;
-                        }
-                        Err(e) => {
-                            println!("Failed to read from socket; err = {:?}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-    }
-
+                               self.handle_msg(bt_msg, &mut peer).await;
+                           }
+                           Err(e) => {
+                               println!("Failed to read from socket; err = {:?}", e);
+                               break;
+                           }
+                       }
+                   }
+               });
+           }
+       }
+    */
     pub async fn handle_msg(&mut self, bt_msg: Message, peer: &mut RemotePeer) {
         match bt_msg.msg_type {
             MessageType::KeepAlive => {
