@@ -106,6 +106,7 @@ pub struct DownloadMeta {
     next_piece: AtomicU32,
     next_block: AtomicU32,
 }
+
 impl DownloadMeta {
     fn increment(&self, piece_size: u32) {
         let block_id = self.next_block.load(std::sync::atomic::Ordering::SeqCst);

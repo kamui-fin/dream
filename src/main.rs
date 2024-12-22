@@ -1,7 +1,7 @@
 mod msg;
 mod peer;
 mod piece;
-mod server;
+mod bittorrent;
 mod tracker;
 mod utils;
 
