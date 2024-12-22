@@ -1,16 +1,9 @@
 use std::path::Path;
-use std::sync::atomic::AtomicU32;
-use std::sync::Arc;
 
-use anyhow::Result;
-use log::info;
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
-use tokio::{io::AsyncReadExt, net::TcpListener};
+use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::peer::{UnchokeMessage, DREAM_ID};
+use crate::peer::UnchokeMessage;
 use crate::tracker::{self, parse_torrent_file};
-use crate::PORT;
 use crate::{
     msg::{Message, MessageType},
     peer::{PeerManager, RemotePeer},
@@ -101,6 +94,12 @@ impl BitTorrent {
                         .await;
                 }
             }
+
+            // listen for responses here UNTIL we assemble the whole piece
+            self.peer_manager.flush_pipeline();
+
+            // verify hash & persist
+            // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
         }
     }
 

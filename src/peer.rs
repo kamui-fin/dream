@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
 use futures::future;
-use futures::{stream::FuturesUnordered, StreamExt};
+use futures::StreamExt;
 use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{
-    collections::VecDeque, future::Future, net::SocketAddr, ops::Range, pin::Pin, sync::Arc,
+    collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc,
     time::Duration,
 };
 use tokio::sync::Mutex;
@@ -15,16 +15,15 @@ use tokio::sync::Mutex;
 use log::{error, info};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{unix::pipe::pipe, TcpStream},
-    sync::mpsc::{Receiver, Sender},
+    net::TcpStream,
+    sync::mpsc::Sender,
     time::timeout,
 };
 
 use crate::tracker::TrackerResponse;
 use crate::{
     msg::{Message, MessageType},
-    piece::{BitField, PieceStore, RequestStatus, BLOCK_SIZE},
-    tracker::Metafile,
+    piece::{BitField, BLOCK_SIZE},
     utils::slice_to_u32_msb,
 };
 

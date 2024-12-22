@@ -1,8 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File,
     io::Write,
-    sync::atomic::AtomicU32,
 };
 
 use crate::{tracker::Metafile, utils::hash_obj};
