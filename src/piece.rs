@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::File,
-    io::Write,
+    io::Write, vec,
 };
 
 use crate::{tracker::Metafile, utils::hash_obj};

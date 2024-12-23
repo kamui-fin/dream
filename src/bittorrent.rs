@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::peer::UnchokeMessage;
+use crate::piece;
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
     msg::{Message, MessageType},
@@ -31,10 +33,13 @@ impl BitTorrent {
             &meta_file.announce,
             tracker::TrackerRequest::new(&meta_file),
         )?;
-        let peer_manager =
-            PeerManager::connect_peers(peers, &meta_file.get_info_hash(), &unchoke_tx).await;
 
         let piece_store = PieceStore::new(meta_file.clone());
+
+        let peer_manager =
+            PeerManager::connect_peers(peers, Arc::new(Mutex::new(piece_store)), &unchoke_tx).await;
+
+        
 
         Ok(Self {
             meta_file,
@@ -176,10 +181,32 @@ impl BitTorrent {
             }
             MessageType::Request => {
                 // requests a piece - (index, begin byte offset, length)
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+
+                if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx){
+                    let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                    let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
+
+                    self.piece_store.pieces[piece_idx as usize].requested();
+                    let target_block = self.piece_store.pieces[piece_idx as usize].retrieve_block(byte_offset as usize, length as usize).unwrap();
+                    
+                    let mut pay_load = Vec::with_capacity(target_block.len()+8);
+
+                    pay_load.extend_from_slice(&piece_idx.to_be_bytes());
+                    pay_load.extend_from_slice(&byte_offset.to_be_bytes());
+                    pay_load.extend_from_slice(&target_block);
+
+                    peer.send_message(MessageType::Piece.build_msg(pay_load));
+                } 
             }
             MessageType::Piece => {
                 // in response to Request, returns piece data
                 // index, begin, block data
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                let block_data = &bt_msg.payload[8..];
+
+                self.piece_store.pieces[piece_idx as usize].store_block(begin_offset as usize, block_data.len(), block_data);
             }
             MessageType::Cancel => {
                 // informing us that block <index><begin><length> is not needed anymore
