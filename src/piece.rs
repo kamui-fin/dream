@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs::File,
-    io::Write, vec,
-};
+use std::{collections::HashSet, fs::File, io::Write, vec};
 
 use crate::{tracker::Metafile, utils::hash_obj};
 
@@ -56,10 +52,6 @@ impl Piece {
             downloaded_bytes: 0,
             hash,
         }
-    }
-
-    pub fn requested(&mut self) {
-        self.status = RequestStatus::Requested;
     }
 
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {

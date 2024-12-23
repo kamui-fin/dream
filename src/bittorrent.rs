@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Mutex;
 
 use crate::peer::UnchokeMessage;
 use crate::piece;
@@ -16,7 +17,7 @@ use crate::{
 
 pub struct BitTorrent {
     meta_file: Metafile,
-    piece_store: PieceStore, // references meta_file
+    piece_store: Arc<Mutex<PieceStore>>, // references meta_file
     peer_manager: PeerManager,
 
     pub unchoke_tx: Sender<UnchokeMessage>,
@@ -35,11 +36,10 @@ impl BitTorrent {
         )?;
 
         let piece_store = PieceStore::new(meta_file.clone());
+        let piece_store = Arc::new(Mutex::new(piece_store));
 
         let peer_manager =
-            PeerManager::connect_peers(peers, Arc::new(Mutex::new(piece_store)), &unchoke_tx).await;
-
-        
+            PeerManager::connect_peers(peers, piece_store.clone(), &unchoke_tx).await;
 
         Ok(Self {
             meta_file,
@@ -57,7 +57,7 @@ impl BitTorrent {
         }
 
         // request each piece sequentially for now (sensible for streaming but could use optimization)
-        for piece_idx in 0..(self.piece_store.num_pieces) {
+        for piece_idx in 0..(self.piece_store.lock().await.num_pieces) {
             let piece_size = self.meta_file.get_piece_len(piece_idx as usize);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece

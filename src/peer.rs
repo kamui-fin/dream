@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use byteorder::{BigEndian, ByteOrder};
 use futures::future;
 use futures::StreamExt;
 use lazy_static::lazy_static;
@@ -6,12 +7,8 @@ use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use std::net::{IpAddr, Ipv4Addr};
-use std::{
-    collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc,
-    time::Duration,
-};
+use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
-use byteorder::{ByteOrder, BigEndian};
 
 use log::{error, info};
 use tokio::{
@@ -95,7 +92,7 @@ pub struct RemotePeer {
     pub peer_interested: bool, // is this peer interested in us? = 0
     piece_store: Arc<Mutex<PieceStore>>,
 
-    // pertaining to connection 
+    // pertaining to connection
     conn: Arc<Mutex<TcpStream>>,
     pipeline: Vec<PipelineEntry>,
     buffer: VecDeque<PipelineEntry>,
@@ -119,8 +116,12 @@ impl RemotePeer {
         piece_store: Arc<Mutex<PieceStore>>,
         unchoke_channel: Sender<UnchokeMessage>,
     ) -> Self {
-
-        let conn = Self::peer_handshake(peer.clone(), &piece_store.lock().await.meta_file.get_info_hash()).await.unwrap();
+        let conn = Self::peer_handshake(
+            peer.clone(),
+            &piece_store.lock().await.meta_file.get_info_hash(),
+        )
+        .await
+        .unwrap();
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
@@ -176,7 +177,7 @@ impl RemotePeer {
         }
     }
 
-    pub async fn send_message(& self, msg: Message) {
+    pub async fn send_message(&self, msg: Message) {
         self.conn.lock().await.write_all(&msg.serialize()).await;
     }
 
@@ -217,22 +218,23 @@ impl RemotePeer {
                 // requests a piece - (index, begin byte offset, length)
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
 
-                if !self.am_choking && self.piece_lookup.piece_exists(piece_idx){
+                if !self.am_choking && self.piece_lookup.piece_exists(piece_idx) {
                     let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                     let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
 
                     let mut piece_store_guard = self.piece_store.lock().await;
-                    piece_store_guard.pieces[piece_idx as usize].requested();
-                    let target_block = piece_store_guard.pieces[piece_idx as usize].retrieve_block(byte_offset as usize, length as usize).unwrap();
-                    
-                    let mut pay_load = Vec::with_capacity(target_block.len()+8);
+                    let target_block = piece_store_guard.pieces[piece_idx as usize]
+                        .retrieve_block(byte_offset as usize, length as usize)
+                        .unwrap();
+
+                    let mut pay_load = Vec::with_capacity(target_block.len() + 8);
 
                     pay_load.extend_from_slice(&piece_idx.to_be_bytes());
                     pay_load.extend_from_slice(&byte_offset.to_be_bytes());
                     pay_load.extend_from_slice(&target_block);
 
                     self.send_message(MessageType::Piece.build_msg(pay_load));
-                } 
+                }
             }
             MessageType::Piece => {
                 // in response to Request, returns piece data
@@ -241,7 +243,11 @@ impl RemotePeer {
                 let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
 
-                self.piece_store.lock().await.pieces[piece_idx as usize].store_block(begin_offset as usize, block_data.len(), block_data);
+                self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
+                    begin_offset as usize,
+                    block_data.len(),
+                    block_data,
+                );
             }
             MessageType::Cancel => {
                 // informing us that block <index><begin><length> is not needed anymore
@@ -257,8 +263,32 @@ impl RemotePeer {
         }
     }
 
-    pub async fn listen(&mut self) -> Option<Message>{
+    pub async fn flush_pipeline(&mut self) {
+        while !self.pipeline.is_empty() || !self.buffer.is_empty() {
+            let msg = self.receive_message().await;
+            if let Some(msg) = msg {
+                if let MessageType::Piece = msg.msg_type {
+                    // get piece_id, block_id from payload
+                    // find it in pipeline and delete
+                    // pop from queue and add to pipeline
 
+                    let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
+                    let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
+                    let block_id =
+                        ((block_offset as usize / &msg.payload.len() - 8) as f32).floor() as u32;
+
+                    self.pipeline
+                        .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
+
+                    if let Some(entry) = self.buffer.pop_front() {
+                        self.pipeline_enqueue(entry);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn receive_message(&mut self) -> Option<Message> {
         loop {
             let mut conn = self.conn.lock().await;
             let mut len_buf = [0u8; 4];
@@ -269,11 +299,12 @@ impl RemotePeer {
             if msg_length > 0 {
                 let mut id_buf = [0u8; 1];
                 conn.read_exact(&mut id_buf).await.ok()?;
-    
+
                 let mut payload_buf = vec![0u8; msg_length as usize];
                 conn.read_exact(&mut payload_buf).await.ok()?;
-    
-                let return_msg = Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
+
+                let return_msg =
+                    Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
 
                 drop(conn);
                 self.handle_msg(&return_msg).await;
@@ -399,6 +430,12 @@ impl PeerManager {
             peer.piece_lookup.piece_exists(piece_idx)
         } else {
             false
+        }
+    }
+
+    pub async fn flush_pipeline(&mut self) {
+        for peer in self.swarm.iter_mut() {
+            peer.flush_pipeline();
         }
     }
 }
