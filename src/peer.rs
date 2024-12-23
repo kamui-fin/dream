@@ -180,7 +180,7 @@ impl RemotePeer {
         self.conn.lock().await.write_all(&msg.serialize()).await;
     }
 
-    pub async fn handle_msg(&mut self, bt_msg: Message) {
+    pub async fn handle_msg(&mut self, bt_msg: &Message) {
         match bt_msg.msg_type {
             MessageType::KeepAlive => {
                 // close connection after 2 min of inactivity (no commands)
@@ -211,7 +211,7 @@ impl RemotePeer {
             MessageType::Bitfield => {
                 // info about which pieces peer has
                 // only sent right after handshake, and before any other msg (so optional)
-                self.piece_lookup = BitField(bt_msg.payload);
+                self.piece_lookup = BitField(bt_msg.payload.clone());
             }
             MessageType::Request => {
                 // requests a piece - (index, begin byte offset, length)
@@ -257,24 +257,32 @@ impl RemotePeer {
         }
     }
 
-    pub async fn receive_message(&mut self) -> Option<Message> {
-        let mut conn = self.conn.lock().await;
+    pub async fn listen(&mut self) -> Option<Message>{
 
-        let mut len_buf = [0u8; 4];
-        conn.read_exact(&mut len_buf).await.ok()?;
+        loop {
+            let mut conn = self.conn.lock().await;
+            let mut len_buf = [0u8; 4];
+            conn.read_exact(&mut len_buf).await.ok();
 
-        let msg_length = slice_to_u32_msb(&len_buf);
-        if msg_length > 0 {
-            let mut id_buf = [0u8; 1];
-            conn.read_exact(&mut id_buf).await.ok()?;
+            let msg_length = slice_to_u32_msb(&len_buf);
 
-            let mut payload_buf = vec![0u8; msg_length as usize];
-            conn.read_exact(&mut payload_buf).await.ok()?;
+            if msg_length > 0 {
+                let mut id_buf = [0u8; 1];
+                conn.read_exact(&mut id_buf).await.ok()?;
+    
+                let mut payload_buf = vec![0u8; msg_length as usize];
+                conn.read_exact(&mut payload_buf).await.ok()?;
+    
+                let return_msg = Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
 
-            let return_msg = Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf));
-            return_msg
-        } else {
-            Some(MessageType::KeepAlive.build_msg(vec![]))
+                drop(conn);
+                self.handle_msg(&return_msg).await;
+
+                return Some(return_msg);
+            } else {
+                // get rid of the guard if it's useless so you don't deadlock
+                drop(conn);
+            }
         }
     }
 
