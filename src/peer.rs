@@ -176,8 +176,85 @@ impl RemotePeer {
         }
     }
 
-    pub async fn send_message(&mut self, msg: Message) {
+    pub async fn send_message(& self, msg: Message) {
         self.conn.lock().await.write_all(&msg.serialize()).await;
+    }
+
+    pub async fn handle_msg(&mut self, bt_msg: Message) {
+        match bt_msg.msg_type {
+            MessageType::KeepAlive => {
+                // close connection after 2 min of inactivity (no commands)
+                // keepalive is just a dummy msg to reset that timer
+            }
+            MessageType::Choke => {
+                // peer has choked us
+                self.peer_choking = true;
+            }
+            MessageType::UnChoke => {
+                // peer has unchoked us
+                self.unchoke_us().await;
+            }
+            MessageType::Interested => {
+                // peer is interested in us
+                self.peer_interested = true;
+            }
+            MessageType::NotInterested => {
+                // peer is not interested in us
+                self.peer_interested = false;
+            }
+            MessageType::Have => {
+                // peer has piece <piece_index>
+                // sent after piece is downloaded and verified
+                let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                self.piece_lookup.mark_piece(piece_index);
+            }
+            MessageType::Bitfield => {
+                // info about which pieces peer has
+                // only sent right after handshake, and before any other msg (so optional)
+                self.piece_lookup = BitField(bt_msg.payload);
+            }
+            MessageType::Request => {
+                // requests a piece - (index, begin byte offset, length)
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+
+                if !self.am_choking && self.piece_lookup.piece_exists(piece_idx){
+                    let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                    let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
+
+                    let mut piece_store_guard = self.piece_store.lock().await;
+                    piece_store_guard.pieces[piece_idx as usize].requested();
+                    let target_block = piece_store_guard.pieces[piece_idx as usize].retrieve_block(byte_offset as usize, length as usize).unwrap();
+                    
+                    let mut pay_load = Vec::with_capacity(target_block.len()+8);
+
+                    pay_load.extend_from_slice(&piece_idx.to_be_bytes());
+                    pay_load.extend_from_slice(&byte_offset.to_be_bytes());
+                    pay_load.extend_from_slice(&target_block);
+
+                    self.send_message(MessageType::Piece.build_msg(pay_load));
+                } 
+            }
+            MessageType::Piece => {
+                // in response to Request, returns piece data
+                // index, begin, block data
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                let block_data = &bt_msg.payload[8..];
+
+                self.piece_store.lock().await.pieces[piece_idx as usize].store_block(begin_offset as usize, block_data.len(), block_data);
+            }
+            MessageType::Cancel => {
+                // informing us that block <index><begin><length> is not needed anymore
+                // for endgame algo
+                todo!();
+            }
+            MessageType::Port => {
+                // port that their dht node is listening on
+                // only for DHT extension
+                todo!();
+            }
+            _ => {}
+        }
     }
 
     pub async fn receive_message(&mut self) -> Option<Message> {
