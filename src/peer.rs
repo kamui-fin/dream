@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+use byteorder::{ByteOrder, BigEndian};
 
 use log::{error, info};
 use tokio::{
@@ -20,6 +21,8 @@ use tokio::{
     time::timeout,
 };
 
+use crate::bittorrent::BitTorrent;
+use crate::piece::PieceStore;
 use crate::tracker::TrackerResponse;
 use crate::{
     msg::{Message, MessageType},
@@ -85,12 +88,18 @@ where
 
 pub struct RemotePeer {
     pub peer: Peer,
-    pub session: PeerSession,
     pub piece_lookup: BitField,
     pub am_choking: bool,      // = 1
     pub am_interested: bool,   // = 0
     pub peer_choking: bool,    // has this peer choked us? = 1
     pub peer_interested: bool, // is this peer interested in us? = 0
+    piece_store: Arc<Mutex<PieceStore>>,
+
+    // pertaining to connection 
+    conn: Arc<Mutex<TcpStream>>,
+    pipeline: Vec<PipelineEntry>,
+    buffer: VecDeque<PipelineEntry>,
+
     unchoke_tx: Sender<UnchokeMessage>,
 }
 
@@ -100,19 +109,31 @@ pub struct PipelineEntry {
     block_id: u32,
 }
 
-pub struct PeerSession {
-    conn: Arc<Mutex<TcpStream>>,
-    pipeline: Vec<PipelineEntry>,
-    buffer: VecDeque<PipelineEntry>,
+pub struct UnchokeMessage {
+    pub peer: Peer,
 }
 
-impl PeerSession {
-    async fn connect_peer(peer: Peer, info_hash: &[u8; 20]) -> Self {
-        let conn = Self::peer_handshake(peer, info_hash).await.unwrap();
+impl RemotePeer {
+    async fn from_peer(
+        peer: Peer,
+        piece_store: Arc<Mutex<PieceStore>>,
+        unchoke_channel: Sender<UnchokeMessage>,
+    ) -> Self {
+
+        let conn = Self::peer_handshake(peer.clone(), &piece_store.lock().await.meta_file.get_info_hash()).await.unwrap();
         let conn = Arc::new(Mutex::new(conn));
+
         let pipeline = Vec::new();
 
         Self {
+            peer,
+            piece_lookup: BitField::new(0),
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
+            piece_store,
+            unchoke_tx: unchoke_channel,
             conn,
             pipeline,
             buffer: VecDeque::new(),
@@ -155,31 +176,117 @@ impl PeerSession {
         }
     }
 
-    pub async fn send_message(conn: Arc<Mutex<TcpStream>>, msg: Message) {
-        conn.lock().await.write_all(&msg.serialize()).await;
+    pub async fn send_message(& self, msg: Message) {
+        self.conn.lock().await.write_all(&msg.serialize()).await;
     }
 
-    pub async fn receive_message(conn: Arc<Mutex<TcpStream>>) -> Option<Message> {
-        let mut conn = conn.lock().await;
+    pub async fn handle_msg(&mut self, bt_msg: &Message) {
+        match bt_msg.msg_type {
+            MessageType::KeepAlive => {
+                // close connection after 2 min of inactivity (no commands)
+                // keepalive is just a dummy msg to reset that timer
+            }
+            MessageType::Choke => {
+                // peer has choked us
+                self.peer_choking = true;
+            }
+            MessageType::UnChoke => {
+                // peer has unchoked us
+                self.unchoke_us().await;
+            }
+            MessageType::Interested => {
+                // peer is interested in us
+                self.peer_interested = true;
+            }
+            MessageType::NotInterested => {
+                // peer is not interested in us
+                self.peer_interested = false;
+            }
+            MessageType::Have => {
+                // peer has piece <piece_index>
+                // sent after piece is downloaded and verified
+                let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                self.piece_lookup.mark_piece(piece_index);
+            }
+            MessageType::Bitfield => {
+                // info about which pieces peer has
+                // only sent right after handshake, and before any other msg (so optional)
+                self.piece_lookup = BitField(bt_msg.payload.clone());
+            }
+            MessageType::Request => {
+                // requests a piece - (index, begin byte offset, length)
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
 
-        let mut len_buf = [0u8; 4];
-        conn.read_exact(&mut len_buf).await.ok()?;
+                if !self.am_choking && self.piece_lookup.piece_exists(piece_idx){
+                    let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                    let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
 
-        let msg_length = slice_to_u32_msb(&len_buf);
-        if msg_length > 0 {
-            let mut id_buf = [0u8; 1];
-            conn.read_exact(&mut id_buf).await.ok()?;
+                    let mut piece_store_guard = self.piece_store.lock().await;
+                    piece_store_guard.pieces[piece_idx as usize].requested();
+                    let target_block = piece_store_guard.pieces[piece_idx as usize].retrieve_block(byte_offset as usize, length as usize).unwrap();
+                    
+                    let mut pay_load = Vec::with_capacity(target_block.len()+8);
 
-            let mut payload_buf = vec![0u8; msg_length as usize];
-            conn.read_exact(&mut payload_buf).await.ok()?;
+                    pay_load.extend_from_slice(&piece_idx.to_be_bytes());
+                    pay_load.extend_from_slice(&byte_offset.to_be_bytes());
+                    pay_load.extend_from_slice(&target_block);
 
-            Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf))
-        } else {
-            Some(MessageType::KeepAlive.build_msg(vec![]))
+                    self.send_message(MessageType::Piece.build_msg(pay_load));
+                } 
+            }
+            MessageType::Piece => {
+                // in response to Request, returns piece data
+                // index, begin, block data
+                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                let block_data = &bt_msg.payload[8..];
+
+                self.piece_store.lock().await.pieces[piece_idx as usize].store_block(begin_offset as usize, block_data.len(), block_data);
+            }
+            MessageType::Cancel => {
+                // informing us that block <index><begin><length> is not needed anymore
+                // for endgame algo
+                todo!();
+            }
+            MessageType::Port => {
+                // port that their dht node is listening on
+                // only for DHT extension
+                todo!();
+            }
+            _ => {}
         }
     }
 
-    async fn request_block(conn: Arc<Mutex<TcpStream>>, entry: PipelineEntry) {
+    pub async fn listen(&mut self) -> Option<Message>{
+
+        loop {
+            let mut conn = self.conn.lock().await;
+            let mut len_buf = [0u8; 4];
+            conn.read_exact(&mut len_buf).await.ok();
+
+            let msg_length = slice_to_u32_msb(&len_buf);
+
+            if msg_length > 0 {
+                let mut id_buf = [0u8; 1];
+                conn.read_exact(&mut id_buf).await.ok()?;
+    
+                let mut payload_buf = vec![0u8; msg_length as usize];
+                conn.read_exact(&mut payload_buf).await.ok()?;
+    
+                let return_msg = Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
+
+                drop(conn);
+                self.handle_msg(&return_msg).await;
+
+                return Some(return_msg);
+            } else {
+                // get rid of the guard if it's useless so you don't deadlock
+                drop(conn);
+            }
+        }
+    }
+
+    async fn request_block(&mut self, entry: PipelineEntry) {
         let PipelineEntry { piece_id, block_id } = entry;
         let piece_id_bytes = piece_id.to_be_bytes();
         let block_id_bytes = block_id.to_be_bytes();
@@ -191,7 +298,7 @@ impl PeerSession {
         payload.extend_from_slice(&block_size);
 
         let msg = MessageType::Request.build_msg(payload);
-        Self::send_message(conn, msg).await;
+        self.send_message(msg).await;
     }
 
     pub async fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
@@ -212,32 +319,7 @@ impl PeerSession {
 
     async fn pipeline_enqueue(&mut self, entry: PipelineEntry) {
         self.pipeline.push(entry.clone());
-        Self::request_block(self.conn.clone(), entry).await;
-    }
-}
-
-pub struct UnchokeMessage {
-    pub peer: Peer,
-}
-
-impl RemotePeer {
-    async fn from_peer(
-        peer: Peer,
-        info_hash: &[u8; 20],
-        unchoke_channel: Sender<UnchokeMessage>,
-    ) -> Self {
-        let session = PeerSession::connect_peer(peer.clone(), info_hash).await;
-
-        Self {
-            peer,
-            session,
-            piece_lookup: BitField::new(0),
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            unchoke_tx: unchoke_channel,
-        }
+        self.request_block(entry).await;
     }
 
     pub async fn unchoke_us(&mut self) {
@@ -258,13 +340,13 @@ impl PeerManager {
     // Initializes all the peers from the tracker response
     pub async fn connect_peers(
         peers_response: TrackerResponse,
-        info_hash: &[u8; 20],
+        piece_store: Arc<Mutex<PieceStore>>,
         unchoke_channel: &Sender<UnchokeMessage>,
     ) -> PeerManager {
         let swarm: Vec<_> = peers_response
             .peers
             .into_iter()
-            .map(|p| RemotePeer::from_peer(p, info_hash, unchoke_channel.clone()))
+            .map(|p| RemotePeer::from_peer(p, piece_store.clone(), unchoke_channel.clone()))
             .collect();
 
         let swarm = future::join_all(swarm).await;
@@ -282,12 +364,12 @@ impl PeerManager {
     pub async fn find_or_create(
         &mut self,
         addr: SocketAddr,
-        info_hash: &[u8; 20],
+        piece_store: Arc<Mutex<PieceStore>>,
         unchoke_channel: Sender<UnchokeMessage>,
     ) {
         if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
             let new_peer =
-                RemotePeer::from_peer(Peer::from_addr(addr), info_hash, unchoke_channel).await;
+                RemotePeer::from_peer(Peer::from_addr(addr), piece_store, unchoke_channel).await;
             self.swarm.push(new_peer); // will be at len - 1
         }
     }
@@ -308,7 +390,7 @@ impl PeerManager {
     ) {
         let peer = self.find_peer_mut(peer);
         if let Some(peer) = peer {
-            peer.session.queue_blocks(piece_idx, num_blocks).await;
+            peer.queue_blocks(piece_idx, num_blocks).await;
         }
     }
 

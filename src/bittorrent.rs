@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::peer::UnchokeMessage;
+use crate::piece;
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
     msg::{Message, MessageType},
@@ -31,10 +33,13 @@ impl BitTorrent {
             &meta_file.announce,
             tracker::TrackerRequest::new(&meta_file),
         )?;
-        let peer_manager =
-            PeerManager::connect_peers(peers, &meta_file.get_info_hash(), &unchoke_tx).await;
 
         let piece_store = PieceStore::new(meta_file.clone());
+
+        let peer_manager =
+            PeerManager::connect_peers(peers, Arc::new(Mutex::new(piece_store)), &unchoke_tx).await;
+
+        
 
         Ok(Self {
             meta_file,
@@ -141,57 +146,4 @@ impl BitTorrent {
            }
        }
     */
-    pub async fn handle_msg(&mut self, bt_msg: Message, peer: &mut RemotePeer) {
-        match bt_msg.msg_type {
-            MessageType::KeepAlive => {
-                // close connection after 2 min of inactivity (no commands)
-                // keepalive is just a dummy msg to reset that timer
-            }
-            MessageType::Choke => {
-                // peer has choked us
-                peer.peer_choking = true;
-            }
-            MessageType::UnChoke => {
-                // peer has unchoked us
-                peer.unchoke_us().await;
-            }
-            MessageType::Interested => {
-                // peer is interested in us
-                peer.peer_interested = true;
-            }
-            MessageType::NotInterested => {
-                // peer is not interested in us
-                peer.peer_interested = false;
-            }
-            MessageType::Have => {
-                // peer has piece <piece_index>
-                // sent after piece is downloaded and verified
-                let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                peer.piece_lookup.mark_piece(piece_index);
-            }
-            MessageType::Bitfield => {
-                // info about which pieces peer has
-                // only sent right after handshake, and before any other msg (so optional)
-                peer.piece_lookup = BitField(bt_msg.payload);
-            }
-            MessageType::Request => {
-                // requests a piece - (index, begin byte offset, length)
-            }
-            MessageType::Piece => {
-                // in response to Request, returns piece data
-                // index, begin, block data
-            }
-            MessageType::Cancel => {
-                // informing us that block <index><begin><length> is not needed anymore
-                // for endgame algo
-                todo!();
-            }
-            MessageType::Port => {
-                // port that their dht node is listening on
-                // only for DHT extension
-                todo!();
-            }
-            _ => {}
-        }
-    }
 }

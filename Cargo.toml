@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+byteorder = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_bencoded = { version = "0.3.2", features = ["sort_dictionary"]}
 rand = "0.8.5"
