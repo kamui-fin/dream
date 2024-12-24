@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let output_dir = "output";
 
     let mut client = BitTorrent::from_torrent_file(input_file).await?;
-    client.begin_download(output_dir).await;
+    // client.begin_download(output_dir).await;
 
     Ok(())
 }

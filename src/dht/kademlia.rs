@@ -153,7 +153,7 @@ impl Kademlia {
     pub async fn init(args: &Args) -> Self {
         let context = Arc::new(RuntimeContext::init(args));
         let socket = Arc::new(
-            UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
+            UdpSocket::bind(format!("0.0.0.0:{}", context.node.port))
                 .await
                 .unwrap(),
         );
@@ -205,7 +205,7 @@ impl Kademlia {
         self.clone().republish_peer_task();
         self.context.clone().regen_token_task();
 
-        handle.await;
+        handle.await.unwrap();
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
@@ -649,22 +649,29 @@ impl Kademlia {
             };
 
             if check_for_eviction {
-                info!("Checking for eviction due to source node {}'s query onto queried node {}", source_id, self.context.node.id);
+                info!(
+                    "Checking for eviction due to source node {}'s query onto queried node {}",
+                    source_id, self.context.node.id
+                );
                 loop {
                     let mut routing_table = self.context.routing_table.lock().await;
-                    let mut curr_bucket = routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
+                    let mut curr_bucket =
+                        routing_table.buckets[routing_table.find_bucket_idx(source_id)].clone();
 
                     let mut oldest_node = curr_bucket.front().unwrap().clone();
 
                     // if we loop through all the questionable nodes and encounter a node that isn't questionable, then we disregard the new node
-                    if !oldest_node.is_questionable(){
+                    if !oldest_node.is_questionable() {
                         info!("Oldest node not questionable, new source node is discarded");
                         break;
                     }
 
                     let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
-                    
-                    info!("Node {} sent a ping to node {} to check if it should be evicted", self.context.node.id, oldest_node.id);
+
+                    info!(
+                        "Node {} sent a ping to node {} to check if it should be evicted",
+                        self.context.node.id, oldest_node.id
+                    );
                     let mut response = self.send_ping(&addr).await;
 
                     // retry once
@@ -678,7 +685,7 @@ impl Kademlia {
                         info!("Node {} responded to node {}'s ping and is being updated in the bucket", oldest_node.id, self.context.node.id);
                         oldest_node.update_last_seen();
                         routing_table.upsert_node(oldest_node);
-                    } 
+                    }
                     // if we don't get a reponse after second try, we must remove it and insert the current node
                     else {
                         info!("Node {} didn't respond to node {}'s ping and is being removed from the bucket to make place for node {}", oldest_node.id, self.context.node.id, source_id);
@@ -687,7 +694,10 @@ impl Kademlia {
                     }
                 }
             } else {
-                info!("Eviction not necessary, source node {} is succesfully upserted to {}'s bucket", source_id, self.context.node.id);
+                info!(
+                    "Eviction not necessary, source node {} is succesfully upserted to {}'s bucket",
+                    source_id, self.context.node.id
+                );
             }
 
             self.clone().reset_timer(source_id as usize);
@@ -807,11 +817,7 @@ impl Kademlia {
             .push(source_node);
         info!(
             "[CONFIRM] {:#?}",
-            self.context
-                .peer_store
-                .lock()
-                .await
-                .get(info_hash.as_str())
+            self.context.peer_store.lock().await.get(info_hash.as_str())
         );
 
         HashMap::from([("id".into(), self.node_id.to_string())])

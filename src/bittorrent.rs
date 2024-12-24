@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -29,17 +30,22 @@ impl BitTorrent {
         let (unchoke_tx, unchoke_rx) = tokio::sync::mpsc::channel(100);
 
         let meta_file = parse_torrent_file(torrent_file)?;
+        info!("Parsed metafile: {:#?}", meta_file);
 
         let peers = tracker::get_peers_from_tracker(
             &meta_file.announce,
             tracker::TrackerRequest::new(&meta_file),
         )?;
 
+        info!("Get Peers: {:#?}", peers);
+
         let piece_store = PieceStore::new(meta_file.clone());
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         let peer_manager =
             PeerManager::connect_peers(peers, piece_store.clone(), &unchoke_tx).await;
+
+        info!("Connected successfully to {:#?}", peer_manager.swarm.len());
 
         Ok(Self {
             meta_file,
@@ -101,7 +107,7 @@ impl BitTorrent {
             }
 
             // listen for responses here UNTIL we assemble the whole piece
-            self.peer_manager.flush_pipeline();
+            self.peer_manager.flush_pipeline().await;
 
             // verify hash & persist
             // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??

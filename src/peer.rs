@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
 use futures::future;
@@ -6,6 +7,7 @@ use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -100,6 +102,20 @@ pub struct RemotePeer {
     unchoke_tx: Sender<UnchokeMessage>,
 }
 
+impl fmt::Debug for RemotePeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemotePeer")
+            .field("peer", &self.peer)
+            // .field("pieces", &self.piece_lookup)
+            // .field("am_interested", &self.am_interested)
+            // .field("am_choking", &self.am_choking)
+            // .field("peer_interested", &self.peer_interested)
+            // .field("am_interested", &self.am_interested)
+            // .field("queue", &self.buffer)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct PipelineEntry {
     piece_id: u32,
@@ -115,18 +131,18 @@ impl RemotePeer {
         peer: Peer,
         piece_store: Arc<Mutex<PieceStore>>,
         unchoke_channel: Sender<UnchokeMessage>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        info!("DREAM ID: {:#?}", DREAM_ID.to_string());
         let conn = Self::peer_handshake(
             peer.clone(),
             &piece_store.lock().await.meta_file.get_info_hash(),
         )
-        .await
-        .unwrap();
+        .await?;
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
 
-        Self {
+        Ok(Self {
             peer,
             piece_lookup: BitField::new(0),
             am_choking: true,
@@ -138,11 +154,12 @@ impl RemotePeer {
             conn,
             pipeline,
             buffer: VecDeque::new(),
-        }
+        })
     }
 
     pub async fn peer_handshake(peer: Peer, info_hash: &[u8; 20]) -> Result<TcpStream> {
         info!("Initiating peer handshake with {:#?}", peer);
+        info!("info_hash = {:#?}", info_hash);
 
         let mut handshake = [0u8; 68];
         handshake[0] = 19;
@@ -150,9 +167,12 @@ impl RemotePeer {
         handshake[28..48].copy_from_slice(info_hash);
         handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
 
-        let connect_timeout = Duration::from_secs(5);
+        let connect_timeout = Duration::from_secs(1);
         let mut stream = match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(stream)) => {
+                info!("Connection established");
+                stream
+            }
             Ok(Err(e)) => {
                 error!("Failed to connect: {}", e);
                 return Err(anyhow!(e));
@@ -163,10 +183,10 @@ impl RemotePeer {
             }
         };
 
-        stream.write_all(&handshake).await?;
+        stream.write_all(&handshake).await;
 
         let mut res = [0u8; 68];
-        stream.read_exact(&mut res).await?;
+        stream.read_exact(&mut res).await;
 
         if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
             Ok(stream)
@@ -379,8 +399,9 @@ impl PeerManager {
             .into_iter()
             .map(|p| RemotePeer::from_peer(p, piece_store.clone(), unchoke_channel.clone()))
             .collect();
-
         let swarm = future::join_all(swarm).await;
+        info!("{:#?}", swarm);
+        let swarm: Vec<RemotePeer> = swarm.into_iter().filter_map(Result::ok).collect();
 
         Self { swarm }
     }
@@ -401,7 +422,9 @@ impl PeerManager {
         if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
             let new_peer =
                 RemotePeer::from_peer(Peer::from_addr(addr), piece_store, unchoke_channel).await;
-            self.swarm.push(new_peer); // will be at len - 1
+            if let Ok(peer) = new_peer {
+                self.swarm.push(peer); // will be at len - 1
+            }
         }
     }
 

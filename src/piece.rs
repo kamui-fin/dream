@@ -28,6 +28,12 @@ impl BitField {
     }
 }
 
+// impl fmt::Debug for BitField {
+//     fn fmt(&self, f: &mut fmt::Formatter<_>) -> fmt::Result{
+//         f.write_all(b"")
+//     }
+// }
+
 #[derive(PartialEq)]
 pub enum RequestStatus {
     Pending,
