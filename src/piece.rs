@@ -1,5 +1,7 @@
 use std::{collections::HashSet, fs::File, io::Write, vec};
 
+use log::{info, trace};
+
 use crate::{tracker::Metafile, utils::hash_obj};
 
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
@@ -56,6 +58,7 @@ impl Piece {
 
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {
         if begin + len < self.buffer.len() {
+
             Some(self.buffer[begin..(begin + len)].to_vec())
         } else {
             None
@@ -71,9 +74,12 @@ impl Piece {
 
             self.buffer[begin..(begin + len)].copy_from_slice(data);
             self.downloaded_bytes += len as u32;
+            
+            info!("Block stored, currently recieved {} out of {} bytes", self.downloaded_bytes, self.buffer.len());
 
             if self.downloaded_bytes as usize == self.buffer.len() {
                 self.status = RequestStatus::Received;
+                info!("The whole piece has been recieved");
             }
         }
     }
@@ -109,6 +115,8 @@ impl PieceStore {
                 hashes.0[idx as usize],
             ));
         }
+
+        trace!("Meta File created");
 
         Self {
             num_pieces,

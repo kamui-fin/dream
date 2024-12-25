@@ -3,6 +3,8 @@ use byteorder::{BigEndian, ByteOrder};
 use futures::future;
 use futures::StreamExt;
 use lazy_static::lazy_static;
+use log::trace;
+use log::warn;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
@@ -19,6 +21,7 @@ use tokio::{
 };
 
 use crate::bittorrent::BitTorrent;
+use crate::piece;
 use crate::piece::PieceStore;
 use crate::tracker::TrackerResponse;
 use crate::{
@@ -125,6 +128,7 @@ impl RemotePeer {
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
+        info!("Pipeline created for Peer: {:#?}", peer);
 
         Self {
             peer,
@@ -142,7 +146,7 @@ impl RemotePeer {
     }
 
     pub async fn peer_handshake(peer: Peer, info_hash: &[u8; 20]) -> Result<TcpStream> {
-        info!("Initiating peer handshake with {:#?}", peer);
+        trace!("Initiating peer handshake with {:#?}", peer);
 
         let mut handshake = [0u8; 68];
         handshake[0] = 19;
@@ -152,7 +156,10 @@ impl RemotePeer {
 
         let connect_timeout = Duration::from_secs(5);
         let mut stream = match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
-            Ok(Ok(stream)) => stream,
+            Ok(Ok(stream)) => {
+                trace!("Connection established with {:#?}", peer);
+                stream
+            },
             Ok(Err(e)) => {
                 error!("Failed to connect: {}", e);
                 return Err(anyhow!(e));
@@ -169,6 +176,7 @@ impl RemotePeer {
         stream.read_exact(&mut res).await?;
 
         if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
+            trace!("Handshake successful with peer: {:#?}", peer);
             Ok(stream)
         } else {
             stream.shutdown().await?;
@@ -178,6 +186,7 @@ impl RemotePeer {
     }
 
     pub async fn send_message(&self, msg: Message) {
+        trace!("Sending message to peer: {:#?}", self.peer);
         self.conn.lock().await.write_all(&msg.serialize()).await;
     }
 
@@ -190,50 +199,68 @@ impl RemotePeer {
             MessageType::Choke => {
                 // peer has choked us
                 self.peer_choking = true;
+                info!("Peer {:#?} has choked us", self.peer);
             }
             MessageType::UnChoke => {
                 // peer has unchoked us
                 self.unchoke_us().await;
+                info!("Peer {:#?} has unchoked us", self.peer);
             }
             MessageType::Interested => {
                 // peer is interested in us
                 self.peer_interested = true;
+                info!("Peer {:#?} is interested in us", self.peer);
             }
             MessageType::NotInterested => {
                 // peer is not interested in us
                 self.peer_interested = false;
+                info!("Peer {:#?} is uninterested in us", self.peer);
             }
             MessageType::Have => {
                 // peer has piece <piece_index>
                 // sent after piece is downloaded and verified
                 let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 self.piece_lookup.mark_piece(piece_index);
+
+                info!("Peer {:#?} has confirmed that they have piece with piece-index {}", self.peer, piece_index);
             }
             MessageType::Bitfield => {
                 // info about which pieces peer has
                 // only sent right after handshake, and before any other msg (so optional)
                 self.piece_lookup = BitField(bt_msg.payload.clone());
+                info!("Peer {:#?} has given us its bitfield", self.peer);
             }
             MessageType::Request => {
+                
                 // requests a piece - (index, begin byte offset, length)
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+                info!("Peer {:#?} has requested a piece with index {}", self.peer, piece_idx);
 
                 if !self.am_choking && self.piece_lookup.piece_exists(piece_idx) {
                     let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                     let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
 
+                    trace!("About to begin fulfill the request for piece {} with block starting at offset {}", piece_idx, byte_offset);
+
                     let mut piece_store_guard = self.piece_store.lock().await;
                     let target_block = piece_store_guard.pieces[piece_idx as usize]
                         .retrieve_block(byte_offset as usize, length as usize)
                         .unwrap();
-
+                    
+                    info!("Piece {} with Block offset {} retrieved", piece_idx, byte_offset);
                     let mut pay_load = Vec::with_capacity(target_block.len() + 8);
 
                     pay_load.extend_from_slice(&piece_idx.to_be_bytes());
                     pay_load.extend_from_slice(&byte_offset.to_be_bytes());
                     pay_load.extend_from_slice(&target_block);
 
+                    info!("Payload in response to request ready to send");
+
                     self.send_message(MessageType::Piece.build_msg(pay_load));
+                } else if self.am_choking{
+                    info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", self.peer, piece_idx);
+                } else {
+                    info!("Do not have the piece with index {} that peer {:#?} has requested", piece_idx, self.peer);
                 }
             }
             MessageType::Piece => {
@@ -242,6 +269,8 @@ impl RemotePeer {
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
+
+                info!("Peer {:#?} has sent us piece {} starting at offset {}", self.peer, piece_idx, begin_offset);
 
                 self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
                     begin_offset as usize,
@@ -259,11 +288,14 @@ impl RemotePeer {
                 // only for DHT extension
                 todo!();
             }
-            _ => {}
+            _ => {
+                warn!("Invalid message from peer {:#?}", self.peer);
+            }
         }
     }
 
     pub async fn flush_pipeline(&mut self) {
+        trace!("Begginning flush of peer {:#?}'s pipeline", self.peer);
         while !self.pipeline.is_empty() || !self.buffer.is_empty() {
             let msg = self.receive_message().await;
             if let Some(msg) = msg {
@@ -271,7 +303,6 @@ impl RemotePeer {
                     // get piece_id, block_id from payload
                     // find it in pipeline and delete
                     // pop from queue and add to pipeline
-
                     let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
                     let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
                     let block_id =
@@ -279,13 +310,15 @@ impl RemotePeer {
 
                     self.pipeline
                         .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
-
+                    
+                    info!("Block {} from Piece {} removed from peer {:#?}'s pipeline", block_id, piece_idx, self.peer);
                     if let Some(entry) = self.buffer.pop_front() {
                         self.pipeline_enqueue(entry);
                     }
                 }
             }
         }
+        info!("Pipeline of peer {:#?} flushed", self.peer);
     }
 
     pub async fn receive_message(&mut self) -> Option<Message> {
@@ -297,6 +330,7 @@ impl RemotePeer {
             let msg_length = slice_to_u32_msb(&len_buf);
 
             if msg_length > 0 {
+                trace!("Message read and it has more data");
                 let mut id_buf = [0u8; 1];
                 conn.read_exact(&mut id_buf).await.ok()?;
 
@@ -306,12 +340,14 @@ impl RemotePeer {
                 let return_msg =
                     Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
 
+                trace!("Message read and handing over to handler");
                 drop(conn);
                 self.handle_msg(&return_msg).await;
 
                 return Some(return_msg);
             } else {
                 // get rid of the guard if it's useless so you don't deadlock
+                warn!("Message from peer {:#?} has no data", self.peer);
                 drop(conn);
             }
         }
@@ -328,6 +364,7 @@ impl RemotePeer {
         payload.extend_from_slice(&block_id_bytes);
         payload.extend_from_slice(&block_size);
 
+        info!("Sent a request for block {} of piece {}", block_id, piece_id);
         let msg = MessageType::Request.build_msg(payload);
         self.send_message(msg).await;
     }
@@ -350,6 +387,7 @@ impl RemotePeer {
 
     async fn pipeline_enqueue(&mut self, entry: PipelineEntry) {
         self.pipeline.push(entry.clone());
+
         self.request_block(entry).await;
     }
 

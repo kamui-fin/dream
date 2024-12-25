@@ -153,7 +153,7 @@ impl Kademlia {
     pub async fn init(args: &Args) -> Self {
         let context = Arc::new(RuntimeContext::init(args));
         let socket = Arc::new(
-            UdpSocket::bind(format!("127.0.0.1:{}", context.node.port))
+            UdpSocket::bind(format!("0.0.0.0:{}", context.node.port))
                 .await
                 .unwrap(),
         );

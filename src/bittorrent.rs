@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use log::{info, trace};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -35,12 +36,15 @@ impl BitTorrent {
             tracker::TrackerRequest::new(&meta_file),
         )?;
 
+        info!("Tracker has found {} peers", peers.peers.len());
+
         let piece_store = PieceStore::new(meta_file.clone());
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         let peer_manager =
             PeerManager::connect_peers(peers, piece_store.clone(), &unchoke_tx).await;
-
+        
+        info!("Peer Manager has allowed {} peers", peer_manager.swarm.len());
         Ok(Self {
             meta_file,
             piece_store,
