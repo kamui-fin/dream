@@ -128,7 +128,6 @@ impl RemotePeer {
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
-        info!("Pipeline created for Peer: {:#?}", peer);
 
         Self {
             peer,
@@ -186,7 +185,7 @@ impl RemotePeer {
     }
 
     pub async fn send_message(&self, msg: Message) {
-        trace!("Sending message to peer: {:#?}", self.peer);
+        trace!("Sending message \"{:#?}\" to peer: {:#?}", self.peer, msg);
         self.conn.lock().await.write_all(&msg.serialize()).await;
     }
 
@@ -228,7 +227,7 @@ impl RemotePeer {
                 // info about which pieces peer has
                 // only sent right after handshake, and before any other msg (so optional)
                 self.piece_lookup = BitField(bt_msg.payload.clone());
-                info!("Peer {:#?} has given us its bitfield", self.peer);
+                info!("Peer {:#?} has given us its bitfield: {:#?}", self.peer, self.piece_lookup);
             }
             MessageType::Request => {
                 
@@ -240,12 +239,15 @@ impl RemotePeer {
                     let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                     let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
 
-                    trace!("About to begin fulfill the request for piece {} with block starting at offset {}", piece_idx, byte_offset);
-
                     let mut piece_store_guard = self.piece_store.lock().await;
-                    let target_block = piece_store_guard.pieces[piece_idx as usize]
-                        .retrieve_block(byte_offset as usize, length as usize)
-                        .unwrap();
+                    let target_block = match piece_store_guard.pieces[piece_idx as usize]
+                        .retrieve_block(byte_offset as usize, length as usize) {
+                            Some(block) => block,
+                            None => {
+                                error!("Piece Retrieval failed for blockoffset {} of piece {}", byte_offset, piece_idx);
+                                return;
+                            }
+                        };
                     
                     info!("Piece {} with Block offset {} retrieved", piece_idx, byte_offset);
                     let mut pay_load = Vec::with_capacity(target_block.len() + 8);
@@ -330,17 +332,20 @@ impl RemotePeer {
             let msg_length = slice_to_u32_msb(&len_buf);
 
             if msg_length > 0 {
-                trace!("Message read and it has more data");
+                trace!("Message read: {:#?}", len_buf);
                 let mut id_buf = [0u8; 1];
                 conn.read_exact(&mut id_buf).await.ok()?;
 
                 let mut payload_buf = vec![0u8; msg_length as usize];
                 conn.read_exact(&mut payload_buf).await.ok()?;
 
-                let return_msg =
-                    Some(MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf)).unwrap();
-
-                trace!("Message read and handing over to handler");
+                let return_msg = match Some(MessageType::from_id(Some(id_buf[0]))) {
+                    Some(message_type) => message_type.build_msg(payload_buf),
+                    None => {
+                        error!("Failed to create response message to peer: {:#?}", self.peer);
+                        continue;
+                    }
+                };
                 drop(conn);
                 self.handle_msg(&return_msg).await;
 

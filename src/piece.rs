@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::File, io::Write, vec};
+use std::{collections::HashSet, fmt, fs::File, io::Write, vec};
 
 use log::{info, trace};
 
@@ -6,7 +6,6 @@ use crate::{tracker::Metafile, utils::hash_obj};
 
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
 
-#[derive(Debug)]
 pub struct BitField(pub Vec<u8>);
 
 impl BitField {
@@ -27,6 +26,14 @@ impl BitField {
         let offset = index % 8;
 
         self.0[byte_idx as usize] |= 1 << (8 - offset);
+    }
+}
+
+impl fmt::Debug for BitField {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("BitField")
+            .field("bits", &self.0)
+            .finish()
     }
 }
 
@@ -58,7 +65,6 @@ impl Piece {
 
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {
         if begin + len < self.buffer.len() {
-
             Some(self.buffer[begin..(begin + len)].to_vec())
         } else {
             None
@@ -116,7 +122,6 @@ impl PieceStore {
             ));
         }
 
-        trace!("Meta File created");
 
         Self {
             num_pieces,
