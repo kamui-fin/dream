@@ -2,11 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use log::info;
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
 use crate::peer::UnchokeMessage;
-use crate::piece;
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
     msg::{Message, MessageType},
@@ -15,6 +16,7 @@ use crate::{
     tracker::Metafile,
     utils::slice_to_u32_msb,
 };
+use crate::{piece, PORT};
 
 pub struct BitTorrent {
     meta_file: Metafile,
@@ -40,10 +42,11 @@ impl BitTorrent {
         info!("Get Peers: {:#?}", peers);
 
         let piece_store = PieceStore::new(meta_file.clone());
+        let info_hash = piece_store.meta_file.get_info_hash();
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         let peer_manager =
-            PeerManager::connect_peers(peers, piece_store.clone(), &unchoke_tx).await;
+            PeerManager::connect_peers(peers, piece_store.clone(), &info_hash, &unchoke_tx).await;
 
         info!("Connected successfully to {:#?}", peer_manager.swarm.len());
 
@@ -114,42 +117,47 @@ impl BitTorrent {
         }
     }
 
-    /* pub async fn start_server(&mut self, port: u16) -> Result<()> {
-           let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    pub async fn start_server(&mut self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
-           loop {
-               let (mut socket, addr) = listener.accept().await?;
+        loop {
+            let (mut socket, addr) = listener.accept().await?;
+            let info_hash = &self.piece_store.lock().await.meta_file.get_info_hash();
 
-               self.peer_manager
-                   .find_or_create(addr, self.piece_store.clone(), self.unchoke_tx.clone())
-                   .await;
+            self.peer_manager
+                .find_or_create(
+                    addr,
+                    self.piece_store.clone(),
+                    info_hash,
+                    self.unchoke_tx.clone(),
+                )
+                .await;
 
-               let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
-               println!("New connection from {:?}", peer.peer);
+            let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
+            println!("New connection from {:?}", peer.peer);
 
-               tokio::spawn(async move {
-                   let mut buf = [0; 2028];
+            tokio::spawn(async move {
+                let mut buf = [0; 2028];
 
-                   loop {
-                       match socket.read(&mut buf).await {
-                           Ok(0) => {
-                               println!("Connection closed by {:?}", addr);
-                               break;
-                           }
-                           Ok(_) => {
-                               let bt_msg = Message::parse(&buf);
-                               info!("Received msg: {:#?}", bt_msg);
+                loop {
+                    match socket.read(&mut buf).await {
+                        Ok(0) => {
+                            println!("Connection closed by {:?}", addr);
+                            break;
+                        }
+                        Ok(_) => {
+                            let bt_msg = Message::parse(&buf);
+                            info!("Received msg: {:#?}", bt_msg);
 
-                               self.handle_msg(bt_msg, &mut peer).await;
-                           }
-                           Err(e) => {
-                               println!("Failed to read from socket; err = {:?}", e);
-                               break;
-                           }
-                       }
-                   }
-               });
-           }
-       }
-    */
+                            // self.handle_msg(bt_msg, &mut peer).await;
+                        }
+                        Err(e) => {
+                            println!("Failed to read from socket; err = {:?}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
 }

@@ -18,6 +18,11 @@ async fn main() -> Result<()> {
     let output_dir = "output";
 
     let mut client = BitTorrent::from_torrent_file(input_file).await?;
+
+    tokio::spawn(async move {
+        client.start_server().await.unwrap();
+    });
+
     // client.begin_download(output_dir).await;
 
     Ok(())

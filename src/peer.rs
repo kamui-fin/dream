@@ -130,14 +130,10 @@ impl RemotePeer {
     async fn from_peer(
         peer: Peer,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
     ) -> anyhow::Result<Self> {
-        info!("DREAM ID: {:#?}", DREAM_ID.to_string());
-        let conn = Self::peer_handshake(
-            peer.clone(),
-            &piece_store.lock().await.meta_file.get_info_hash(),
-        )
-        .await?;
+        let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
@@ -183,10 +179,10 @@ impl RemotePeer {
             }
         };
 
-        stream.write_all(&handshake).await;
+        stream.write_all(&handshake).await?;
 
         let mut res = [0u8; 68];
-        stream.read_exact(&mut res).await;
+        stream.read_exact(&mut res).await?;
 
         if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
             Ok(stream)
@@ -392,12 +388,19 @@ impl PeerManager {
     pub async fn connect_peers(
         peers_response: TrackerResponse,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: &Sender<UnchokeMessage>,
     ) -> PeerManager {
+        info!(
+            "Attempting to connect to {} peers",
+            peers_response.peers.len()
+        );
         let swarm: Vec<_> = peers_response
             .peers
             .into_iter()
-            .map(|p| RemotePeer::from_peer(p, piece_store.clone(), unchoke_channel.clone()))
+            .map(|p| {
+                RemotePeer::from_peer(p, piece_store.clone(), info_hash, unchoke_channel.clone())
+            })
             .collect();
         let swarm = future::join_all(swarm).await;
         info!("{:#?}", swarm);
@@ -417,11 +420,17 @@ impl PeerManager {
         &mut self,
         addr: SocketAddr,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
     ) {
         if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
-            let new_peer =
-                RemotePeer::from_peer(Peer::from_addr(addr), piece_store, unchoke_channel).await;
+            let new_peer = RemotePeer::from_peer(
+                Peer::from_addr(addr),
+                piece_store,
+                info_hash,
+                unchoke_channel,
+            )
+            .await;
             if let Ok(peer) = new_peer {
                 self.swarm.push(peer); // will be at len - 1
             }
@@ -458,7 +467,7 @@ impl PeerManager {
 
     pub async fn flush_pipeline(&mut self) {
         for peer in self.swarm.iter_mut() {
-            peer.flush_pipeline();
+            peer.flush_pipeline().await;
         }
     }
 }
