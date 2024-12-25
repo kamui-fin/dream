@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
 use futures::future;
@@ -8,6 +9,7 @@ use log::warn;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -103,6 +105,20 @@ pub struct RemotePeer {
     unchoke_tx: Sender<UnchokeMessage>,
 }
 
+impl fmt::Debug for RemotePeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemotePeer")
+            .field("peer", &self.peer)
+            // .field("pieces", &self.piece_lookup)
+            // .field("am_interested", &self.am_interested)
+            // .field("am_choking", &self.am_choking)
+            // .field("peer_interested", &self.peer_interested)
+            // .field("am_interested", &self.am_interested)
+            // .field("queue", &self.buffer)
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct PipelineEntry {
     piece_id: u32,
@@ -117,19 +133,15 @@ impl RemotePeer {
     async fn from_peer(
         peer: Peer,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
-    ) -> Self {
-        let conn = Self::peer_handshake(
-            peer.clone(),
-            &piece_store.lock().await.meta_file.get_info_hash(),
-        )
-        .await
-        .unwrap();
+    ) -> anyhow::Result<Self> {
+        let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
         let conn = Arc::new(Mutex::new(conn));
 
         let pipeline = Vec::new();
 
-        Self {
+        Ok(Self {
             peer,
             piece_lookup: BitField::new(0),
             am_choking: true,
@@ -141,11 +153,11 @@ impl RemotePeer {
             conn,
             pipeline,
             buffer: VecDeque::new(),
-        }
+        })
     }
 
     pub async fn peer_handshake(peer: Peer, info_hash: &[u8; 20]) -> Result<TcpStream> {
-        trace!("Initiating peer handshake with {:#?}", peer);
+        info!("Initiating peer handshake with {:#?}", peer);
 
         let mut handshake = [0u8; 68];
         handshake[0] = 19;
@@ -153,12 +165,12 @@ impl RemotePeer {
         handshake[28..48].copy_from_slice(info_hash);
         handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
 
-        let connect_timeout = Duration::from_secs(5);
+        let connect_timeout = Duration::from_secs(1);
         let mut stream = match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
             Ok(Ok(stream)) => {
-                trace!("Connection established with {:#?}", peer);
+                info!("Connection established");
                 stream
-            },
+            }
             Ok(Err(e)) => {
                 error!("Failed to connect: {}", e);
                 return Err(anyhow!(e));
@@ -221,19 +233,27 @@ impl RemotePeer {
                 let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 self.piece_lookup.mark_piece(piece_index);
 
-                info!("Peer {:#?} has confirmed that they have piece with piece-index {}", self.peer, piece_index);
+                info!(
+                    "Peer {:#?} has confirmed that they have piece with piece-index {}",
+                    self.peer, piece_index
+                );
             }
             MessageType::Bitfield => {
                 // info about which pieces peer has
                 // only sent right after handshake, and before any other msg (so optional)
                 self.piece_lookup = BitField(bt_msg.payload.clone());
-                info!("Peer {:#?} has given us its bitfield: {:#?}", self.peer, self.piece_lookup);
+                info!(
+                    "Peer {:#?} has given us its bitfield: {:#?}",
+                    self.peer, self.piece_lookup
+                );
             }
             MessageType::Request => {
-                
                 // requests a piece - (index, begin byte offset, length)
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                info!("Peer {:#?} has requested a piece with index {}", self.peer, piece_idx);
+                info!(
+                    "Peer {:#?} has requested a piece with index {}",
+                    self.peer, piece_idx
+                );
 
                 if !self.am_choking && self.piece_lookup.piece_exists(piece_idx) {
                     let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
@@ -241,15 +261,22 @@ impl RemotePeer {
 
                     let mut piece_store_guard = self.piece_store.lock().await;
                     let target_block = match piece_store_guard.pieces[piece_idx as usize]
-                        .retrieve_block(byte_offset as usize, length as usize) {
-                            Some(block) => block,
-                            None => {
-                                error!("Piece Retrieval failed for blockoffset {} of piece {}", byte_offset, piece_idx);
-                                return;
-                            }
-                        };
-                    
-                    info!("Piece {} with Block offset {} retrieved", piece_idx, byte_offset);
+                        .retrieve_block(byte_offset as usize, length as usize)
+                    {
+                        Some(block) => block,
+                        None => {
+                            error!(
+                                "Piece Retrieval failed for blockoffset {} of piece {}",
+                                byte_offset, piece_idx
+                            );
+                            return;
+                        }
+                    };
+
+                    info!(
+                        "Piece {} with Block offset {} retrieved",
+                        piece_idx, byte_offset
+                    );
                     let mut pay_load = Vec::with_capacity(target_block.len() + 8);
 
                     pay_load.extend_from_slice(&piece_idx.to_be_bytes());
@@ -259,10 +286,13 @@ impl RemotePeer {
                     info!("Payload in response to request ready to send");
 
                     self.send_message(MessageType::Piece.build_msg(pay_load));
-                } else if self.am_choking{
+                } else if self.am_choking {
                     info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", self.peer, piece_idx);
                 } else {
-                    info!("Do not have the piece with index {} that peer {:#?} has requested", piece_idx, self.peer);
+                    info!(
+                        "Do not have the piece with index {} that peer {:#?} has requested",
+                        piece_idx, self.peer
+                    );
                 }
             }
             MessageType::Piece => {
@@ -272,7 +302,10 @@ impl RemotePeer {
                 let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
 
-                info!("Peer {:#?} has sent us piece {} starting at offset {}", self.peer, piece_idx, begin_offset);
+                info!(
+                    "Peer {:#?} has sent us piece {} starting at offset {}",
+                    self.peer, piece_idx, begin_offset
+                );
 
                 self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
                     begin_offset as usize,
@@ -312,8 +345,11 @@ impl RemotePeer {
 
                     self.pipeline
                         .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
-                    
-                    info!("Block {} from Piece {} removed from peer {:#?}'s pipeline", block_id, piece_idx, self.peer);
+
+                    info!(
+                        "Block {} from Piece {} removed from peer {:#?}'s pipeline",
+                        block_id, piece_idx, self.peer
+                    );
                     if let Some(entry) = self.buffer.pop_front() {
                         self.pipeline_enqueue(entry);
                     }
@@ -342,7 +378,10 @@ impl RemotePeer {
                 let return_msg = match Some(MessageType::from_id(Some(id_buf[0]))) {
                     Some(message_type) => message_type.build_msg(payload_buf),
                     None => {
-                        error!("Failed to create response message to peer: {:#?}", self.peer);
+                        error!(
+                            "Failed to create response message to peer: {:#?}",
+                            self.peer
+                        );
                         continue;
                     }
                 };
@@ -369,7 +408,10 @@ impl RemotePeer {
         payload.extend_from_slice(&block_id_bytes);
         payload.extend_from_slice(&block_size);
 
-        info!("Sent a request for block {} of piece {}", block_id, piece_id);
+        info!(
+            "Sent a request for block {} of piece {}",
+            block_id, piece_id
+        );
         let msg = MessageType::Request.build_msg(payload);
         self.send_message(msg).await;
     }
@@ -415,15 +457,23 @@ impl PeerManager {
     pub async fn connect_peers(
         peers_response: TrackerResponse,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: &Sender<UnchokeMessage>,
     ) -> PeerManager {
+        info!(
+            "Attempting to connect to {} peers",
+            peers_response.peers.len()
+        );
         let swarm: Vec<_> = peers_response
             .peers
             .into_iter()
-            .map(|p| RemotePeer::from_peer(p, piece_store.clone(), unchoke_channel.clone()))
+            .map(|p| {
+                RemotePeer::from_peer(p, piece_store.clone(), info_hash, unchoke_channel.clone())
+            })
             .collect();
-
         let swarm = future::join_all(swarm).await;
+        info!("{:#?}", swarm);
+        let swarm: Vec<RemotePeer> = swarm.into_iter().filter_map(Result::ok).collect();
 
         Self { swarm }
     }
@@ -439,12 +489,20 @@ impl PeerManager {
         &mut self,
         addr: SocketAddr,
         piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
         unchoke_channel: Sender<UnchokeMessage>,
     ) {
         if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
-            let new_peer =
-                RemotePeer::from_peer(Peer::from_addr(addr), piece_store, unchoke_channel).await;
-            self.swarm.push(new_peer); // will be at len - 1
+            let new_peer = RemotePeer::from_peer(
+                Peer::from_addr(addr),
+                piece_store,
+                info_hash,
+                unchoke_channel,
+            )
+            .await;
+            if let Ok(peer) = new_peer {
+                self.swarm.push(peer); // will be at len - 1
+            }
         }
     }
 
@@ -478,7 +536,7 @@ impl PeerManager {
 
     pub async fn flush_pipeline(&mut self) {
         for peer in self.swarm.iter_mut() {
-            peer.flush_pipeline();
+            peer.flush_pipeline().await;
         }
     }
 }

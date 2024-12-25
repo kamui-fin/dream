@@ -1,11 +1,17 @@
-use std::{collections::HashSet, fmt, fs::File, io::Write, vec};
-
 use log::{info, trace};
+use std::{
+    collections::HashSet,
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    vec,
+};
 
 use crate::{tracker::Metafile, utils::hash_obj};
 
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
 
+#[derive(Debug)]
 pub struct BitField(pub Vec<u8>);
 
 impl BitField {
@@ -26,14 +32,6 @@ impl BitField {
         let offset = index % 8;
 
         self.0[byte_idx as usize] |= 1 << (8 - offset);
-    }
-}
-
-impl fmt::Debug for BitField {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("BitField")
-            .field("bits", &self.0)
-            .finish()
     }
 }
 
@@ -63,6 +61,8 @@ impl Piece {
         }
     }
 
+    // TODO: set requested status
+
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {
         if begin + len < self.buffer.len() {
             Some(self.buffer[begin..(begin + len)].to_vec())
@@ -80,8 +80,12 @@ impl Piece {
 
             self.buffer[begin..(begin + len)].copy_from_slice(data);
             self.downloaded_bytes += len as u32;
-            
-            info!("Block stored, currently recieved {} out of {} bytes", self.downloaded_bytes, self.buffer.len());
+
+            info!(
+                "Block stored, currently recieved {} out of {} bytes",
+                self.downloaded_bytes,
+                self.buffer.len()
+            );
 
             if self.downloaded_bytes as usize == self.buffer.len() {
                 self.status = RequestStatus::Received;
@@ -105,7 +109,9 @@ impl Piece {
 // Note: Avg block size is 2 ^ 14
 pub struct PieceStore {
     pub num_pieces: u32,
-    pub meta_file: Metafile, // contains
+    pub meta_file: Metafile,
+    // TODO: kinda doesn't make sense to have a whole vector when operating on piece one at a time, but mainly just to allow future optimizations for downloading multiple pieces concurrently
+    // not sure if it will ever make sense though even from a protocol standpoint, TBD..
     pub pieces: Vec<Piece>,
 }
 
@@ -122,7 +128,6 @@ impl PieceStore {
             ));
         }
 
-
         Self {
             num_pieces,
             pieces,
@@ -130,14 +135,37 @@ impl PieceStore {
         }
     }
 
-    pub fn persist(&self, idx: usize) {
+    pub fn persist(&self, idx: usize, output_dir: &Path) -> anyhow::Result<()> {
         let piece = &self.pieces[idx];
 
         if piece.status == RequestStatus::Received {
-            let mut file =
-                File::create(format!("{}-{idx}.part", self.meta_file.info.name)).unwrap();
-            file.write_all(&piece.buffer);
+            let output_path = output_dir.join(format!("{}-{idx}.part", self.meta_file.info.name));
+            let mut file = File::create(output_path)?;
+            file.write_all(&piece.buffer)?;
         }
+
+        Ok(())
+    }
+
+    pub fn concat(&self, output_dir: &Path) -> anyhow::Result<()> {
+        let piece_files = (0..(self.num_pieces))
+            .map(|idx| output_dir.join(format!("{}-{idx}.part", self.meta_file.info.name)));
+
+        let dest_file_path = output_dir.join(&self.meta_file.info.name);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dest_file_path)?;
+
+        for input_path in piece_files {
+            let mut input = File::open(input_path)?;
+            let mut buffer = Vec::new();
+            input.read_to_end(&mut buffer)?;
+            output.write_all(&buffer)?;
+        }
+
+        Ok(())
     }
 
     pub fn get_status_bitfield(&self) -> BitField {

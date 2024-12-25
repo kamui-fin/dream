@@ -1,12 +1,14 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
 use log::{info, trace};
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
 use crate::peer::UnchokeMessage;
-use crate::piece;
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
     msg::{Message, MessageType},
@@ -15,6 +17,7 @@ use crate::{
     tracker::Metafile,
     utils::slice_to_u32_msb,
 };
+use crate::{piece, PORT};
 
 pub struct BitTorrent {
     meta_file: Metafile,
@@ -30,6 +33,7 @@ impl BitTorrent {
         let (unchoke_tx, unchoke_rx) = tokio::sync::mpsc::channel(100);
 
         let meta_file = parse_torrent_file(torrent_file)?;
+        info!("Parsed metafile: {:#?}", meta_file);
 
         let peers = tracker::get_peers_from_tracker(
             &meta_file.announce,
@@ -37,14 +41,17 @@ impl BitTorrent {
         )?;
 
         info!("Tracker has found {} peers", peers.peers.len());
+        info!("Get Peers: {:#?}", peers);
 
         let piece_store = PieceStore::new(meta_file.clone());
+        let info_hash = piece_store.meta_file.get_info_hash();
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         let peer_manager =
-            PeerManager::connect_peers(peers, piece_store.clone(), &unchoke_tx).await;
-        
-        info!("Peer Manager has allowed {} peers", peer_manager.swarm.len());
+            PeerManager::connect_peers(peers, piece_store.clone(), &info_hash, &unchoke_tx).await;
+
+        info!("Connected successfully to {:#?}", peer_manager.swarm.len());
+
         Ok(Self {
             meta_file,
             piece_store,
@@ -54,18 +61,22 @@ impl BitTorrent {
         })
     }
 
-    pub async fn begin_download(&mut self, output_dir: &str) {
+    pub async fn begin_download(&mut self, output_dir: &str) -> anyhow::Result<()> {
         let output_path = Path::new(output_dir);
         if !output_path.exists() {
-            std::fs::create_dir(output_path).unwrap();
+            std::fs::create_dir(output_path)?;
         }
 
+        let mut main_piece_queue = VecDeque::from(
+            (0usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
+        );
+
         // request each piece sequentially for now (sensible for streaming but could use optimization)
-        for piece_idx in 0..(self.piece_store.lock().await.num_pieces) {
-            let piece_size = self.meta_file.get_piece_len(piece_idx as usize);
+        while let Some(piece_idx) = main_piece_queue.pop_front() {
+            let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
-            let candidates = self.peer_manager.with_piece(piece_idx);
+            let candidates = self.peer_manager.with_piece(piece_idx as u32);
             // if = 0 then wait on mpsc channel for someone to advertise it
             // TODO: zero seeders even possible?
             // check if any have us unchoked
@@ -79,10 +90,10 @@ impl BitTorrent {
                 loop {
                     let unchoke_msg = self.unchoke_rx.recv().await;
                     if let Some(UnchokeMessage { peer }) = unchoke_msg {
-                        if self.peer_manager.peer_has_piece(&peer, piece_idx) {
+                        if self.peer_manager.peer_has_piece(&peer, piece_idx as u32) {
                             // let this peer download the whole piece for now, TODO optimize
                             self.peer_manager
-                                .queue_blocks_for_peer(&peer, piece_idx, 0..num_blocks)
+                                .queue_blocks_for_peer(&peer, piece_idx as u32, 0..num_blocks)
                                 .await;
                             break;
                         }
@@ -99,55 +110,73 @@ impl BitTorrent {
                         (i as u32 + 1) * blocks_per_peer
                     };
                     self.peer_manager
-                        .queue_blocks_for_peer(peer, piece_idx, start..end)
+                        .queue_blocks_for_peer(peer, piece_idx as u32, start..end)
                         .await;
                 }
             }
 
             // listen for responses here UNTIL we assemble the whole piece
-            self.peer_manager.flush_pipeline();
+            self.peer_manager.flush_pipeline().await;
 
             // verify hash & persist
-            // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
+            let mut store = self.piece_store.lock().await;
+            let piece = &store.pieces[piece_idx as usize];
+            if piece.verify_hash() {
+                store.persist(piece_idx, output_path)?;
+                store.reset_piece(piece_idx);
+            } else {
+                // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
+                main_piece_queue.push_front(piece_idx);
+            }
         }
+
+        // collected all pieces, now simply concat files
+        self.piece_store.lock().await.concat(output_path)?;
+
+        Ok(())
     }
 
-    /* pub async fn start_server(&mut self, port: u16) -> Result<()> {
-           let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    pub async fn start_server(&mut self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
-           loop {
-               let (mut socket, addr) = listener.accept().await?;
+        loop {
+            let (mut socket, addr) = listener.accept().await?;
+            let info_hash = &self.piece_store.lock().await.meta_file.get_info_hash();
 
-               self.peer_manager
-                   .find_or_create(addr, self.piece_store.clone(), self.unchoke_tx.clone())
-                   .await;
+            self.peer_manager
+                .find_or_create(
+                    addr,
+                    self.piece_store.clone(),
+                    info_hash,
+                    self.unchoke_tx.clone(),
+                )
+                .await;
 
-               let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
-               println!("New connection from {:?}", peer.peer);
+            let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
+            println!("New connection from {:?}", peer.peer);
 
-               tokio::spawn(async move {
-                   let mut buf = [0; 2028];
+            tokio::spawn(async move {
+                let mut buf = [0; 2028];
 
-                   loop {
-                       match socket.read(&mut buf).await {
-                           Ok(0) => {
-                               println!("Connection closed by {:?}", addr);
-                               break;
-                           }
-                           Ok(_) => {
-                               let bt_msg = Message::parse(&buf);
-                               info!("Received msg: {:#?}", bt_msg);
+                loop {
+                    match socket.read(&mut buf).await {
+                        Ok(0) => {
+                            println!("Connection closed by {:?}", addr);
+                            break;
+                        }
+                        Ok(_) => {
+                            let bt_msg = Message::parse(&buf);
+                            info!("Received msg: {:#?}", bt_msg);
 
-                               self.handle_msg(bt_msg, &mut peer).await;
-                           }
-                           Err(e) => {
-                               println!("Failed to read from socket; err = {:?}", e);
-                               break;
-                           }
-                       }
-                   }
-               });
-           }
-       }
-    */
+                            // self.handle_msg(bt_msg, &mut peer).await;
+                        }
+                        Err(e) => {
+                            println!("Failed to read from socket; err = {:?}", e);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    }
 }
