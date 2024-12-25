@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,18 +60,22 @@ impl BitTorrent {
         })
     }
 
-    pub async fn begin_download(&mut self, output_dir: &str) {
+    pub async fn begin_download(&mut self, output_dir: &str) -> anyhow::Result<()> {
         let output_path = Path::new(output_dir);
         if !output_path.exists() {
-            std::fs::create_dir(output_path).unwrap();
+            std::fs::create_dir(output_path)?;
         }
 
+        let mut main_piece_queue = VecDeque::from(
+            (0usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
+        );
+
         // request each piece sequentially for now (sensible for streaming but could use optimization)
-        for piece_idx in 0..(self.piece_store.lock().await.num_pieces) {
-            let piece_size = self.meta_file.get_piece_len(piece_idx as usize);
+        while let Some(piece_idx) = main_piece_queue.pop_front() {
+            let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
-            let candidates = self.peer_manager.with_piece(piece_idx);
+            let candidates = self.peer_manager.with_piece(piece_idx as u32);
             // if = 0 then wait on mpsc channel for someone to advertise it
             // TODO: zero seeders even possible?
             // check if any have us unchoked
@@ -84,10 +89,10 @@ impl BitTorrent {
                 loop {
                     let unchoke_msg = self.unchoke_rx.recv().await;
                     if let Some(UnchokeMessage { peer }) = unchoke_msg {
-                        if self.peer_manager.peer_has_piece(&peer, piece_idx) {
+                        if self.peer_manager.peer_has_piece(&peer, piece_idx as u32) {
                             // let this peer download the whole piece for now, TODO optimize
                             self.peer_manager
-                                .queue_blocks_for_peer(&peer, piece_idx, 0..num_blocks)
+                                .queue_blocks_for_peer(&peer, piece_idx as u32, 0..num_blocks)
                                 .await;
                             break;
                         }
@@ -104,7 +109,7 @@ impl BitTorrent {
                         (i as u32 + 1) * blocks_per_peer
                     };
                     self.peer_manager
-                        .queue_blocks_for_peer(peer, piece_idx, start..end)
+                        .queue_blocks_for_peer(peer, piece_idx as u32, start..end)
                         .await;
                 }
             }
@@ -113,8 +118,21 @@ impl BitTorrent {
             self.peer_manager.flush_pipeline().await;
 
             // verify hash & persist
-            // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
+            let mut store = self.piece_store.lock().await;
+            let piece = &store.pieces[piece_idx as usize];
+            if piece.verify_hash() {
+                store.persist(piece_idx, output_path)?;
+                store.reset_piece(piece_idx);
+            } else {
+                // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
+                main_piece_queue.push_front(piece_idx);
+            }
         }
+
+        // collected all pieces, now simply concat files
+        self.piece_store.lock().await.concat(output_path)?;
+
+        Ok(())
     }
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {

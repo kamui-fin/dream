@@ -5,8 +5,11 @@ mod piece;
 mod tracker;
 mod utils;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use bittorrent::BitTorrent;
+use tokio::sync::Mutex;
 
 const PORT: u16 = 6881;
 
@@ -17,13 +20,14 @@ async fn main() -> Result<()> {
     let input_file = "debian.torrent";
     let output_dir = "output";
 
-    let mut client = BitTorrent::from_torrent_file(input_file).await?;
+    let client = Arc::new(Mutex::new(BitTorrent::from_torrent_file(input_file).await?));
 
+    let client_clone = client.clone();
     tokio::spawn(async move {
-        client.start_server().await.unwrap();
+        client_clone.lock().await.start_server().await.unwrap();
     });
 
-    // client.begin_download(output_dir).await;
+    client.lock().await.begin_download(output_dir).await?;
 
     Ok(())
 }
