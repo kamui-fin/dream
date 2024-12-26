@@ -100,10 +100,6 @@ impl Piece {
 
         orig_hash == piece_hash
     }
-
-    pub fn block_exists(&self, idx: u32) -> bool {
-        self.block_set.contains(&idx)
-    }
 }
 
 // Note: Avg block size is 2 ^ 14

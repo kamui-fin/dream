@@ -138,6 +138,7 @@ impl RemotePeer {
     ) -> anyhow::Result<Self> {
         let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
         let conn = Arc::new(Mutex::new(conn));
+        let bitfield = Self::receive_bitfield(conn.clone()).await?;
 
         let pipeline = Vec::new();
 
@@ -335,9 +336,6 @@ impl RemotePeer {
             let msg = self.receive_message().await;
             if let Some(msg) = msg {
                 if let MessageType::Piece = msg.msg_type {
-                    // get piece_id, block_id from payload
-                    // find it in pipeline and delete
-                    // pop from queue and add to pipeline
                     let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
                     let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
                     let block_id =
@@ -360,40 +358,31 @@ impl RemotePeer {
     }
 
     pub async fn receive_message(&mut self) -> Option<Message> {
-        loop {
-            let mut conn = self.conn.lock().await;
-            let mut len_buf = [0u8; 4];
-            conn.read_exact(&mut len_buf).await.ok();
+        let mut conn = self.conn.lock().await;
+        let mut len_buf = [0u8; 4];
+        conn.read_exact(&mut len_buf).await.ok();
 
-            let msg_length = slice_to_u32_msb(&len_buf);
+        let msg_length = slice_to_u32_msb(&len_buf);
 
-            if msg_length > 0 {
-                trace!("Message read: {:#?}", len_buf);
-                let mut id_buf = [0u8; 1];
-                conn.read_exact(&mut id_buf).await.ok()?;
+        if msg_length > 0 {
+            let mut id_buf = [0u8; 1];
+            conn.read_exact(&mut id_buf).await.ok()?;
 
-                let mut payload_buf = vec![0u8; msg_length as usize];
-                conn.read_exact(&mut payload_buf).await.ok()?;
+            let mut payload_buf = vec![0u8; msg_length as usize];
+            conn.read_exact(&mut payload_buf).await.ok()?;
 
-                let return_msg = match Some(MessageType::from_id(Some(id_buf[0]))) {
-                    Some(message_type) => message_type.build_msg(payload_buf),
-                    None => {
-                        error!(
-                            "Failed to create response message to peer: {:#?}",
-                            self.peer
-                        );
-                        continue;
-                    }
-                };
-                drop(conn);
-                self.handle_msg(&return_msg).await;
+            let return_msg = MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf);
+            drop(conn);
+            self.handle_msg(&return_msg).await;
 
-                return Some(return_msg);
-            } else {
-                // get rid of the guard if it's useless so you don't deadlock
-                warn!("Message from peer {:#?} has no data", self.peer);
-                drop(conn);
-            }
+            info!("Received msg {:#?} from peer {:#?}", return_msg, &self);
+
+            return Some(return_msg);
+        } else {
+            // get rid of the guard if it's useless so you don't deadlock
+            warn!("Message from peer {:#?} has no data", self.peer);
+            drop(conn);
+            None
         }
     }
 
@@ -417,6 +406,7 @@ impl RemotePeer {
     }
 
     pub async fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
+        info!("Queuing blocks {:#?} for {piece_id}", blocks);
         for block_id in blocks {
             self.buffer.push_back(PipelineEntry { piece_id, block_id });
         }
