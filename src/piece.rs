@@ -1,3 +1,4 @@
+use log::{info, trace};
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
@@ -33,12 +34,6 @@ impl BitField {
         self.0[byte_idx as usize] |= 1 << (8 - offset);
     }
 }
-
-// impl fmt::Debug for BitField {
-//     fn fmt(&self, f: &mut fmt::Formatter<_>) -> fmt::Result{
-//         f.write_all(b"")
-//     }
-// }
 
 #[derive(PartialEq)]
 pub enum RequestStatus {
@@ -86,8 +81,15 @@ impl Piece {
             self.buffer[begin..(begin + len)].copy_from_slice(data);
             self.downloaded_bytes += len as u32;
 
+            info!(
+                "Block stored, currently recieved {} out of {} bytes",
+                self.downloaded_bytes,
+                self.buffer.len()
+            );
+
             if self.downloaded_bytes as usize == self.buffer.len() {
                 self.status = RequestStatus::Received;
+                info!("The whole piece has been recieved");
             }
         }
     }
@@ -97,10 +99,6 @@ impl Piece {
         let orig_hash = self.hash;
 
         orig_hash == piece_hash
-    }
-
-    pub fn block_exists(&self, idx: u32) -> bool {
-        self.block_set.contains(&idx)
     }
 }
 
