@@ -9,10 +9,14 @@ use log::warn;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
+use sha1::digest::typenum::Bit;
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::{mpsc, Mutex};
 
 use log::{error, info};
 use tokio::{
@@ -42,8 +46,8 @@ lazy_static! {
 
 const MAX_PIPELINE_SIZE: usize = 4;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Peer {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ConnectionInfo {
     ip: Ipv4Addr,
     port: u16,
 }
@@ -55,7 +59,7 @@ fn ip_to_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {
     }
 }
 
-impl Peer {
+impl ConnectionInfo {
     pub fn new(ip: Ipv4Addr, port: u16) -> Self {
         Self { ip, port }
     }
@@ -72,7 +76,7 @@ impl Peer {
     }
 }
 
-pub fn deserialize_peers<'de, D>(deserializer: D) -> Result<Vec<Peer>, D::Error>
+pub fn deserialize_peers<'de, D>(deserializer: D) -> Result<Vec<ConnectionInfo>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -82,82 +86,36 @@ where
         if curr_chunk.len() == 6 {
             let ip = Ipv4Addr::new(curr_chunk[0], curr_chunk[1], curr_chunk[2], curr_chunk[3]);
             let port = u16::from_be_bytes([curr_chunk[4], curr_chunk[5]]);
-            peers.push(Peer::new(ip, port))
+            peers.push(ConnectionInfo::new(ip, port))
         }
     }
     Ok(peers)
 }
 
-pub struct RemotePeer {
-    pub peer: Peer,
-    pub piece_lookup: BitField,
-    pub am_choking: bool,      // = 1
-    pub am_interested: bool,   // = 0
-    pub peer_choking: bool,    // has this peer choked us? = 1
-    pub peer_interested: bool, // is this peer interested in us? = 0
-    piece_store: Arc<Mutex<PieceStore>>,
-
+struct PeerSession {
     // pertaining to connection
     conn: Arc<Mutex<TcpStream>>,
-    pipeline: Vec<PipelineEntry>,
-    buffer: VecDeque<PipelineEntry>,
-
-    unchoke_tx: Sender<UnchokeMessage>,
+    sender: mpsc::Sender<Message>,
+    recv_msg: Arc<Mutex<mpsc::Receiver<Message>>>,
 }
 
-impl fmt::Debug for RemotePeer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RemotePeer")
-            .field("peer", &self.peer)
-            // .field("pieces", &self.piece_lookup)
-            // .field("am_interested", &self.am_interested)
-            // .field("am_choking", &self.am_choking)
-            // .field("peer_interested", &self.peer_interested)
-            // .field("am_interested", &self.am_interested)
-            // .field("queue", &self.buffer)
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct PipelineEntry {
-    piece_id: u32,
-    block_id: u32,
-}
-
-pub struct UnchokeMessage {
-    pub peer: Peer,
-}
-
-impl RemotePeer {
-    async fn from_peer(
-        peer: Peer,
-        piece_store: Arc<Mutex<PieceStore>>,
+impl PeerSession {
+    async fn new_session(
+        sender: mpsc::Sender<Message>,
+        recv_msg: mpsc::Receiver<Message>,
+        peer: ConnectionInfo,
         info_hash: &[u8; 20],
-        unchoke_channel: Sender<UnchokeMessage>,
     ) -> anyhow::Result<Self> {
         let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
         let conn = Arc::new(Mutex::new(conn));
-        let bitfield = Self::receive_bitfield(conn.clone()).await?;
-
-        let pipeline = Vec::new();
-
         Ok(Self {
-            peer,
-            piece_lookup: BitField::new(0),
-            am_choking: true,
-            am_interested: false,
-            peer_choking: true,
-            peer_interested: false,
-            piece_store,
-            unchoke_tx: unchoke_channel,
             conn,
-            pipeline,
-            buffer: VecDeque::new(),
+            sender,
+            recv_msg: Arc::new(Mutex::new(recv_msg)),
         })
     }
 
-    pub async fn peer_handshake(peer: Peer, info_hash: &[u8; 20]) -> Result<TcpStream> {
+    pub async fn peer_handshake(peer: ConnectionInfo, info_hash: &[u8; 20]) -> Result<TcpStream> {
         info!("Initiating peer handshake with {:#?}", peer);
 
         let mut handshake = [0u8; 68];
@@ -197,55 +155,325 @@ impl RemotePeer {
         }
     }
 
-    pub async fn send_message(&self, msg: Message) {
-        trace!("Sending message \"{:#?}\" to peer: {:#?}", self.peer, msg);
-        self.conn.lock().await.write_all(&msg.serialize()).await;
+    pub async fn start_listening(&mut self) {
+        loop {
+            let mut recv_msg_lock = self.recv_msg.lock().await;
+            tokio::select! {
+                Some(msg) = self.receive_message() => {
+                    self.sender.send(msg).await;
+                }
+                Some(msg) = recv_msg_lock.recv() => {
+                    self.send_message(msg).await;
+                }
+            }
+        }
     }
 
-    pub async fn handle_msg(&mut self, bt_msg: &Message) {
+    pub async fn send_message(&self, msg: Message) {
+        self.conn
+            .lock()
+            .await
+            .write_all(&msg.serialize())
+            .await
+            .unwrap();
+    }
+
+    pub async fn receive_message(&self) -> Option<Message> {
+        let mut len_buf = [0u8; 4];
+        let mut conn = self.conn.lock().await;
+
+        conn.read_exact(&mut len_buf).await.ok();
+
+        let msg_length = slice_to_u32_msb(&len_buf);
+
+        if msg_length > 0 {
+            let mut id_buf = [0u8; 1];
+            conn.read_exact(&mut id_buf).await.ok()?;
+
+            let mut payload_buf = vec![0u8; msg_length as usize];
+            conn.read_exact(&mut payload_buf).await.ok()?;
+
+            let incoming_msg = MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf);
+
+            // info!("Received msg from peer {:#?}", &self);
+
+            return Some(incoming_msg);
+        } else {
+            Some(MessageType::KeepAlive.build_msg(vec![]))
+        }
+    }
+}
+
+pub struct RemotePeer {
+    pub conn_info: ConnectionInfo,
+    pub piece_lookup: BitField,
+    pub am_choking: bool,      // = 1
+    pub am_interested: bool,   // = 0
+    pub peer_choking: bool,    // has this peer choked us? = 1
+    pub peer_interested: bool, // is this peer interested in us? = 0
+
+    pipeline: Vec<PipelineEntry>,
+    buffer: VecDeque<PipelineEntry>,
+}
+
+impl fmt::Debug for RemotePeer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemotePeer")
+            .field("peer", &self.conn_info)
+            // .field("pieces", &self.piece_lookup)
+            // .field("am_interested", &self.am_interested)
+            // .field("am_choking", &self.am_choking)
+            // .field("peer_interested", &self.peer_interested)
+            // .field("am_interested", &self.am_interested)
+            // .field("queue", &self.buffer)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+
+pub struct PipelineEntry {
+    piece_id: u32,
+    block_id: u32,
+}
+
+pub struct UnchokeMessage {
+    pub peer: ConnectionInfo,
+}
+
+impl RemotePeer {
+    fn from_peer(peer: ConnectionInfo, num_pieces: u32) -> Self {
+        Self {
+            conn_info: peer,
+            piece_lookup: BitField::new(num_pieces),
+            am_choking: true,
+            am_interested: false,
+            peer_choking: true,
+            peer_interested: false,
+            pipeline: Vec::new(),
+            buffer: VecDeque::new(),
+        }
+    }
+}
+
+pub struct PeerManager {
+    pub peers: Vec<RemotePeer>,
+    piece_store: Arc<Mutex<PieceStore>>,
+
+    queue: VecDeque<PipelineEntry>,
+
+    // channels
+    send_channels: HashMap<ConnectionInfo, Sender<Message>>,
+    msg_tx: Sender<Message>, // only stored in case we want to add new peers dynamically
+    msg_rx: Receiver<Message>,
+    unchoke_tx: Sender<UnchokeMessage>,
+}
+
+impl PeerManager {
+    // Initializes all the peers from the tracker response
+    pub async fn connect_peers(
+        peers_response: TrackerResponse,
+        piece_store: Arc<Mutex<PieceStore>>,
+        info_hash: &[u8; 20],
+        num_pieces: u32,
+        unchoke_tx: Sender<UnchokeMessage>,
+    ) -> PeerManager {
+        info!(
+            "Attempting to connect to {} peers",
+            peers_response.peers.len()
+        );
+
+        // the channel for receiving messages from peer sessions
+        let (msg_tx, msg_rx) = mpsc::channel(500);
+
+        let mut send_channels: HashMap<ConnectionInfo, Sender<Message>> = HashMap::new();
+
+        let peers: Vec<_> = peers_response
+            .peers
+            .into_iter()
+            .map(|peer| RemotePeer::from_peer(peer, num_pieces))
+            .collect();
+
+        info!("{:#?}", peers);
+
+        for remote_peer in &peers {
+            let info_hash_clone = info_hash.clone();
+            let conn_info = remote_peer.conn_info.clone();
+            let tx_clone = msg_tx.clone();
+
+            // the channel for sending messages to this peer session
+            let (send_msg, recv_msg) = mpsc::channel(500);
+
+            send_channels.insert(conn_info.clone(), send_msg);
+
+            tokio::spawn(async move {
+                let session =
+                    PeerSession::new_session(tx_clone, recv_msg, conn_info, &info_hash_clone).await;
+                if let Ok(mut session) = session {
+                    session.start_listening().await;
+                }
+            });
+        }
+
+        let queue = VecDeque::new();
+
+        Self {
+            peers,
+            queue,
+            send_channels,
+            msg_tx,
+            msg_rx,
+            unchoke_tx,
+            piece_store,
+        }
+    }
+
+    pub async fn with_piece(&self, piece_idx: u32) -> Vec<&RemotePeer> {
+        let mut result = Vec::new();
+        for peer in &self.peers {
+            info!("Trying to lock peer");
+            info!("Successfully locked peer");
+            if peer.piece_lookup.piece_exists(piece_idx) {
+                result.push(peer);
+            }
+        }
+        result
+    }
+
+    pub async fn find_or_create(&mut self, addr: SocketAddr, num_pieces: u32, info_hash: [u8; 20]) {
+        if !self.peers.iter().any(|p| p.conn_info.addr() == addr) {
+            let new_peer = RemotePeer::from_peer(ConnectionInfo::from_addr(addr), num_pieces);
+            // launch new session
+
+            // the channel for sending messages to this peer session
+            let (send_msg, recv_msg) = mpsc::channel(500);
+
+            self.send_channels
+                .insert(new_peer.conn_info.clone(), send_msg);
+
+            let conn_info = new_peer.conn_info.clone();
+            let tx_clone = self.msg_tx.clone();
+
+            tokio::spawn(async move {
+                let session =
+                    PeerSession::new_session(tx_clone, recv_msg, conn_info, &info_hash).await;
+                if let Ok(mut session) = session {
+                    session.start_listening().await;
+                }
+            });
+
+            self.peers.push(new_peer);
+        }
+    }
+
+    pub async fn find_peer(&self, peer: &ConnectionInfo) -> Option<&RemotePeer> {
+        for arc_peer in &self.peers {
+            if arc_peer.conn_info == *peer {
+                return Some(arc_peer.clone());
+            }
+        }
+        None
+    }
+
+    pub async fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
+        info!("Queuing blocks {:#?} for {piece_id}", blocks);
+        for block_id in blocks {
+            self.queue.push_back(PipelineEntry { piece_id, block_id });
+        }
+    }
+
+    pub async fn peer_has_piece(&self, peer: &ConnectionInfo, piece_idx: u32) -> bool {
+        if let Some(peer) = self.find_peer(peer).await {
+            peer.piece_lookup.piece_exists(piece_idx)
+        } else {
+            false
+        }
+    }
+
+    pub async fn show_interest_in_peer(&mut self, peer: &mut RemotePeer) {
+        peer.am_interested = true;
+        self.send_message(peer, MessageType::Interested.build_msg(vec![]));
+    }
+
+    pub fn send_message(&mut self, peer: &RemotePeer, msg: Message) {
+        self.send_channels[&peer.conn_info].send(msg);
+    }
+
+    pub async fn flush_pipeline(&mut self) {
+        // wait for every peer's pipeline to become empty, as well as queue
+        // easiest way is to just use mpsc and have each peer communicate when no work left
+    }
+
+    async fn request_block(&mut self, entry: PipelineEntry, peer: &mut RemotePeer) {
+        let PipelineEntry { piece_id, block_id } = entry;
+        let piece_id_bytes = piece_id.to_be_bytes();
+        let block_id_bytes = block_id.to_be_bytes();
+        let block_size = BLOCK_SIZE.to_be_bytes();
+
+        let mut payload = Vec::with_capacity(12);
+        payload.extend_from_slice(&piece_id_bytes);
+        payload.extend_from_slice(&block_id_bytes);
+        payload.extend_from_slice(&block_size);
+
+        info!(
+            "Sent a request for block {} of piece {}",
+            block_id, piece_id
+        );
+        let msg = MessageType::Request.build_msg(payload);
+        self.send_channels[&peer.conn_info.clone()].send(msg).await;
+    }
+
+    pub async fn handle_msg(&mut self, bt_msg: &Message, peer: &mut RemotePeer) {
         match bt_msg.msg_type {
             MessageType::KeepAlive => {
                 // close connection after 2 min of inactivity (no commands)
                 // keepalive is just a dummy msg to reset that timer
+                // info!("Received keep alive")
             }
             MessageType::Choke => {
                 // peer has choked us
-                self.peer_choking = true;
-                info!("Peer {:#?} has choked us", self.peer);
+                peer.peer_choking = true;
+                info!("Peer {:#?} has choked us", peer.conn_info);
             }
             MessageType::UnChoke => {
                 // peer has unchoked us
-                self.unchoke_us().await;
-                info!("Peer {:#?} has unchoked us", self.peer);
+                peer.peer_choking = false;
+                self.unchoke_tx
+                    .send(UnchokeMessage {
+                        peer: peer.conn_info.clone(),
+                    })
+                    .await
+                    .unwrap();
+                info!("Peer {:#?} has unchoked us", peer.conn_info);
             }
             MessageType::Interested => {
                 // peer is interested in us
-                self.peer_interested = true;
-                info!("Peer {:#?} is interested in us", self.peer);
+                peer.peer_interested = true;
+                info!("Peer {:#?} is interested in us", peer.conn_info);
             }
             MessageType::NotInterested => {
                 // peer is not interested in us
-                self.peer_interested = false;
-                info!("Peer {:#?} is uninterested in us", self.peer);
+                peer.peer_interested = false;
+                info!("Peer {:#?} is uninterested in us", peer.conn_info);
             }
             MessageType::Have => {
                 // peer has piece <piece_index>
                 // sent after piece is downloaded and verified
                 let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                self.piece_lookup.mark_piece(piece_index);
+                peer.piece_lookup.mark_piece(piece_index);
 
                 info!(
                     "Peer {:#?} has confirmed that they have piece with piece-index {}",
-                    self.peer, piece_index
+                    peer.conn_info, piece_index
                 );
             }
             MessageType::Bitfield => {
                 // info about which pieces peer has
                 // only sent right after handshake, and before any other msg (so optional)
-                self.piece_lookup = BitField(bt_msg.payload.clone());
+                peer.piece_lookup = BitField(bt_msg.payload.clone());
                 info!(
-                    "Peer {:#?} has given us its bitfield: {:#?}",
-                    self.peer, self.piece_lookup
+                    "Peer {:#?} has given us its bitfield: {:?}",
+                    peer.conn_info, peer.piece_lookup
                 );
             }
             MessageType::Request => {
@@ -253,10 +481,10 @@ impl RemotePeer {
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 info!(
                     "Peer {:#?} has requested a piece with index {}",
-                    self.peer, piece_idx
+                    peer.conn_info, piece_idx
                 );
 
-                if !self.am_choking && self.piece_lookup.piece_exists(piece_idx) {
+                if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx) {
                     let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                     let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
 
@@ -286,13 +514,15 @@ impl RemotePeer {
 
                     info!("Payload in response to request ready to send");
 
-                    self.send_message(MessageType::Piece.build_msg(pay_load));
-                } else if self.am_choking {
-                    info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", self.peer, piece_idx);
+                    self.send_channels[&peer.conn_info.clone()]
+                        .send(MessageType::Piece.build_msg(pay_load))
+                        .await;
+                } else if peer.am_choking {
+                    info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", peer.conn_info, piece_idx);
                 } else {
                     info!(
                         "Do not have the piece with index {} that peer {:#?} has requested",
-                        piece_idx, self.peer
+                        piece_idx, peer.conn_info
                     );
                 }
             }
@@ -300,19 +530,33 @@ impl RemotePeer {
                 // in response to Request, returns piece data
                 // index, begin, block data
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                let begin_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+                let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
 
                 info!(
                     "Peer {:#?} has sent us piece {} starting at offset {}",
-                    self.peer, piece_idx, begin_offset
+                    peer.conn_info, piece_idx, block_offset
                 );
 
                 self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
-                    begin_offset as usize,
+                    block_offset as usize,
                     block_data.len(),
                     block_data,
                 );
+
+                let block_id =
+                    ((block_offset as usize / &bt_msg.payload.len() - 8) as f32).floor() as u32;
+
+                peer.pipeline
+                    .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
+
+                info!(
+                    "Block {} from Piece {} removed from peer {:#?}'s pipeline",
+                    block_id, piece_idx, peer.conn_info
+                );
+                if let Some(entry) = peer.buffer.pop_front() {
+                    peer.pipeline_enqueue(entry).await;
+                }
             }
             MessageType::Cancel => {
                 // informing us that block <index><begin><length> is not needed anymore
@@ -325,208 +569,8 @@ impl RemotePeer {
                 todo!();
             }
             _ => {
-                warn!("Invalid message from peer {:#?}", self.peer);
+                warn!("Invalid message from peer {:#?}", peer.conn_info);
             }
-        }
-    }
-
-    pub async fn flush_pipeline(&mut self) {
-        trace!("Begginning flush of peer {:#?}'s pipeline", self.peer);
-        while !self.pipeline.is_empty() || !self.buffer.is_empty() {
-            let msg = self.receive_message().await;
-            if let Some(msg) = msg {
-                if let MessageType::Piece = msg.msg_type {
-                    let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
-                    let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
-                    let block_id =
-                        ((block_offset as usize / &msg.payload.len() - 8) as f32).floor() as u32;
-
-                    self.pipeline
-                        .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
-
-                    info!(
-                        "Block {} from Piece {} removed from peer {:#?}'s pipeline",
-                        block_id, piece_idx, self.peer
-                    );
-                    if let Some(entry) = self.buffer.pop_front() {
-                        self.pipeline_enqueue(entry);
-                    }
-                }
-            }
-        }
-        info!("Pipeline of peer {:#?} flushed", self.peer);
-    }
-
-    pub async fn receive_message(&mut self) -> Option<Message> {
-        let mut conn = self.conn.lock().await;
-        let mut len_buf = [0u8; 4];
-        conn.read_exact(&mut len_buf).await.ok();
-
-        let msg_length = slice_to_u32_msb(&len_buf);
-
-        if msg_length > 0 {
-            let mut id_buf = [0u8; 1];
-            conn.read_exact(&mut id_buf).await.ok()?;
-
-            let mut payload_buf = vec![0u8; msg_length as usize];
-            conn.read_exact(&mut payload_buf).await.ok()?;
-
-            let return_msg = MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf);
-            drop(conn);
-            self.handle_msg(&return_msg).await;
-
-            info!("Received msg {:#?} from peer {:#?}", return_msg, &self);
-
-            return Some(return_msg);
-        } else {
-            // get rid of the guard if it's useless so you don't deadlock
-            warn!("Message from peer {:#?} has no data", self.peer);
-            drop(conn);
-            None
-        }
-    }
-
-    async fn request_block(&mut self, entry: PipelineEntry) {
-        let PipelineEntry { piece_id, block_id } = entry;
-        let piece_id_bytes = piece_id.to_be_bytes();
-        let block_id_bytes = block_id.to_be_bytes();
-        let block_size = BLOCK_SIZE.to_be_bytes();
-
-        let mut payload = Vec::with_capacity(12);
-        payload.extend_from_slice(&piece_id_bytes);
-        payload.extend_from_slice(&block_id_bytes);
-        payload.extend_from_slice(&block_size);
-
-        info!(
-            "Sent a request for block {} of piece {}",
-            block_id, piece_id
-        );
-        let msg = MessageType::Request.build_msg(payload);
-        self.send_message(msg).await;
-    }
-
-    pub async fn queue_blocks(&mut self, piece_id: u32, blocks: Range<u32>) {
-        info!("Queuing blocks {:#?} for {piece_id}", blocks);
-        for block_id in blocks {
-            self.buffer.push_back(PipelineEntry { piece_id, block_id });
-        }
-
-        self.refresh_pipeline().await;
-    }
-
-    async fn refresh_pipeline(&mut self) {
-        for _ in 0..(MAX_PIPELINE_SIZE - self.pipeline.len()) {
-            if let Some(entry) = self.buffer.pop_front() {
-                self.pipeline_enqueue(entry).await;
-            }
-        }
-    }
-
-    async fn pipeline_enqueue(&mut self, entry: PipelineEntry) {
-        self.pipeline.push(entry.clone());
-
-        self.request_block(entry).await;
-    }
-
-    pub async fn unchoke_us(&mut self) {
-        self.peer_choking = false;
-        self.unchoke_tx
-            .send(UnchokeMessage {
-                peer: self.peer.clone(),
-            })
-            .await;
-    }
-}
-
-pub struct PeerManager {
-    pub swarm: Vec<RemotePeer>,
-}
-
-impl PeerManager {
-    // Initializes all the peers from the tracker response
-    pub async fn connect_peers(
-        peers_response: TrackerResponse,
-        piece_store: Arc<Mutex<PieceStore>>,
-        info_hash: &[u8; 20],
-        unchoke_channel: &Sender<UnchokeMessage>,
-    ) -> PeerManager {
-        info!(
-            "Attempting to connect to {} peers",
-            peers_response.peers.len()
-        );
-        let swarm: Vec<_> = peers_response
-            .peers
-            .into_iter()
-            .map(|p| {
-                RemotePeer::from_peer(p, piece_store.clone(), info_hash, unchoke_channel.clone())
-            })
-            .collect();
-        let swarm = future::join_all(swarm).await;
-        info!("{:#?}", swarm);
-        let swarm: Vec<RemotePeer> = swarm.into_iter().filter_map(Result::ok).collect();
-
-        Self { swarm }
-    }
-
-    pub fn with_piece(&self, piece_idx: u32) -> Vec<&RemotePeer> {
-        self.swarm
-            .iter()
-            .filter(|p| p.piece_lookup.piece_exists(piece_idx))
-            .collect()
-    }
-
-    pub async fn find_or_create(
-        &mut self,
-        addr: SocketAddr,
-        piece_store: Arc<Mutex<PieceStore>>,
-        info_hash: &[u8; 20],
-        unchoke_channel: Sender<UnchokeMessage>,
-    ) {
-        if !self.swarm.iter().any(|p| p.peer.addr() == addr) {
-            let new_peer = RemotePeer::from_peer(
-                Peer::from_addr(addr),
-                piece_store,
-                info_hash,
-                unchoke_channel,
-            )
-            .await;
-            if let Ok(peer) = new_peer {
-                self.swarm.push(peer); // will be at len - 1
-            }
-        }
-    }
-
-    pub fn find_peer(&self, peer: &Peer) -> Option<&RemotePeer> {
-        self.swarm.iter().find(|p| p.peer == *peer)
-    }
-
-    pub fn find_peer_mut(&mut self, peer: &Peer) -> Option<&mut RemotePeer> {
-        self.swarm.iter_mut().find(|p| p.peer == *peer)
-    }
-
-    pub async fn queue_blocks_for_peer(
-        &mut self,
-        peer: &Peer,
-        piece_idx: u32,
-        num_blocks: Range<u32>,
-    ) {
-        let peer = self.find_peer_mut(peer);
-        if let Some(peer) = peer {
-            peer.queue_blocks(piece_idx, num_blocks).await;
-        }
-    }
-
-    pub fn peer_has_piece(&self, peer: &Peer, piece_idx: u32) -> bool {
-        if let Some(peer) = self.find_peer(peer) {
-            peer.piece_lookup.piece_exists(piece_idx)
-        } else {
-            false
-        }
-    }
-
-    pub async fn flush_pipeline(&mut self) {
-        for peer in self.swarm.iter_mut() {
-            peer.flush_pipeline().await;
         }
     }
 }

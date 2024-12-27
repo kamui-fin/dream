@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
-use crate::peer::UnchokeMessage;
+use crate::peer::{self, UnchokeMessage};
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
     msg::{Message, MessageType},
@@ -45,15 +45,24 @@ impl BitTorrent {
 
         let piece_store = PieceStore::new(meta_file.clone());
         let info_hash = piece_store.meta_file.get_info_hash();
+        let num_pieces = piece_store.meta_file.get_num_pieces();
         let piece_store = Arc::new(Mutex::new(piece_store));
 
-        let peer_manager =
-            PeerManager::connect_peers(peers, piece_store.clone(), &info_hash, &unchoke_tx).await;
+        let mut peer_manager = PeerManager::connect_peers(
+            peers,
+            piece_store.clone(),
+            &info_hash,
+            num_pieces,
+            &unchoke_tx,
+        )
+        .await;
 
         info!(
-            "Connected successfully to {:#?} peers",
-            peer_manager.swarm.len()
+            "Connected successfully to {:#?} peers.",
+            peer_manager.peers.len()
         );
+
+        peer_manager.spawn_listen_tasks();
 
         Ok(Self {
             meta_file,
@@ -85,27 +94,35 @@ impl BitTorrent {
             let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
-            let candidates = self.peer_manager.with_piece(piece_idx as u32);
+            let mut candidates = self.peer_manager.with_piece(piece_idx as u32).await;
             info!("Found {} peers with piece {piece_idx}", candidates.len());
-            // if = 0 then wait on mpsc channel for someone to advertise it
-            // TODO: zero seeders even possible?
+            // send "interested" to all all of them
+            for candidate in candidates.iter_mut() {
+                (*candidate).lock().await.show_interest().await;
+            }
             // check if any have us unchoked
-            let candidates: Vec<_> = candidates
-                .iter()
-                .filter(|p| !p.peer_choking)
-                .map(|p| p.peer.clone())
-                .collect();
+            let mut candidates_unchoked = Vec::new();
+            for candidate in &candidates {
+                let candidate_guard = candidate.lock().await;
+                if !candidate_guard.peer_choking {
+                    candidates_unchoked.push(candidate_guard.peer.clone());
+                }
+            }
             info!(
                 "{} matched candidates that haven't choked us",
-                candidates.len()
+                candidates_unchoked.len()
             );
-            if candidates.is_empty() {
+            if candidates_unchoked.is_empty() {
                 // if none, then wait on mpsc channel for them to unchoke us
                 info!("Waiting for peer to unchoke us");
                 loop {
                     let unchoke_msg = self.unchoke_rx.recv().await;
                     if let Some(UnchokeMessage { peer }) = unchoke_msg {
-                        if self.peer_manager.peer_has_piece(&peer, piece_idx as u32) {
+                        if self
+                            .peer_manager
+                            .peer_has_piece(&peer, piece_idx as u32)
+                            .await
+                        {
                             info!("Received unchoke msg from relevant peer {:#?}", peer);
                             // let this peer download the whole piece for now, TODO optimize
                             self.peer_manager
@@ -118,10 +135,10 @@ impl BitTorrent {
                     }
                 }
             } else {
-                let blocks_per_peer = num_blocks / candidates.len() as u32;
+                let blocks_per_peer = num_blocks / candidates_unchoked.len() as u32;
                 info!("Distributed {} blocks per peer", blocks_per_peer);
 
-                for (i, peer) in candidates.iter().enumerate() {
+                for (i, peer) in candidates_unchoked.iter().enumerate() {
                     let start = i as u32 * blocks_per_peer;
                     let end = if i == candidates.len() - 1 {
                         num_blocks
@@ -133,6 +150,8 @@ impl BitTorrent {
                         .await;
                 }
             }
+
+            panic!();
 
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
@@ -165,18 +184,20 @@ impl BitTorrent {
         loop {
             let (mut socket, addr) = listener.accept().await?;
             let info_hash = &self.piece_store.lock().await.meta_file.get_info_hash();
+            let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
 
             self.peer_manager
                 .find_or_create(
                     addr,
                     self.piece_store.clone(),
                     info_hash,
+                    num_pieces,
                     self.unchoke_tx.clone(),
                 )
                 .await;
 
-            let peer: &RemotePeer = self.peer_manager.swarm.last().unwrap();
-            info!("New connection from {:?}", peer.peer);
+            let peer = self.peer_manager.peers.last().unwrap();
+            info!("New connection from {:?}", peer.lock().await.peer);
 
             tokio::spawn(async move {
                 let mut buf = [0; 2028];

@@ -17,11 +17,3 @@ pub fn hash_obj<B: AsRef<[u8]>>(buf: B) -> [u8; 20] {
 
     computed_hash
 }
-
-pub fn gen_peer_id() -> String {
-    thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(20)
-        .map(char::from)
-        .collect()
-}

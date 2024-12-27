@@ -1,4 +1,4 @@
-use crate::peer::Peer;
+use crate::peer::ConnectionInfo;
 use crate::peer::DREAM_ID;
 use crate::PORT;
 use anyhow::Result;
@@ -62,7 +62,7 @@ pub fn parse_torrent_file(file_path: &str) -> Result<Metafile> {
     file.read_to_end(&mut buffer)?;
 
     let meta_file = serde_bencoded::from_bytes::<Metafile>(&buffer[..])?;
-    
+
     Ok(meta_file)
 }
 
@@ -119,7 +119,7 @@ pub struct TrackerRequest {
 impl TrackerRequest {
     pub fn new(torrent_file: &Metafile) -> Self {
         let left = torrent_file.info.length.unwrap_or_default() as usize;
-        
+
         Self {
             info_hash: form_urlencoded::byte_serialize(&torrent_file.get_info_hash()).collect(),
             uploaded: 0,
@@ -170,7 +170,7 @@ impl TrackerRequest {
 pub struct TrackerResponse {
     pub interval: u64,
     #[serde(deserialize_with = "deserialize_peers")]
-    pub peers: Vec<Peer>,
+    pub peers: Vec<ConnectionInfo>,
 }
 
 pub fn get_peers_from_tracker(tracker_url: &str, body: TrackerRequest) -> Result<TrackerResponse> {
