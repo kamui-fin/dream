@@ -244,8 +244,8 @@ impl RemotePeer {
                 // only sent right after handshake, and before any other msg (so optional)
                 self.piece_lookup = BitField(bt_msg.payload.clone());
                 info!(
-                    "Peer {:#?} has given us its bitfield: {:#?}",
-                    self.peer, self.piece_lookup
+                    "Peer {:#?} has informed us that is has pieces {}",
+                    self.peer, self.piece_lookup.return_piece_indexes()
                 );
             }
             MessageType::Request => {
