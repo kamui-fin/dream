@@ -33,6 +33,20 @@ impl BitField {
 
         self.0[byte_idx as usize] |= 1 << (8 - offset);
     }
+
+    pub fn return_piece_indexes(&self) -> String{
+        if self.0.len() > 0 {
+            self.0.iter()
+                .enumerate()
+                .filter(|(_, &value) | value & 1 == 1)
+                .map(|(index, _)| index.to_string())
+                .collect::<Vec<String>>()
+                .join(",")
+        } else {
+            return "".to_string();
+        }
+        
+    }
 }
 
 #[derive(PartialEq)]

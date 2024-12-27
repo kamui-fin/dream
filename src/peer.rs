@@ -472,8 +472,9 @@ impl PeerManager {
                 // only sent right after handshake, and before any other msg (so optional)
                 peer.piece_lookup = BitField(bt_msg.payload.clone());
                 info!(
-                    "Peer {:#?} has given us its bitfield: {:?}",
-                    peer.conn_info, peer.piece_lookup
+                    "Peer {:#?} has informed us that is has pieces {}",
+                    self.peer,
+                    self.piece_lookup.return_piece_indexes()
                 );
             }
             MessageType::Request => {
