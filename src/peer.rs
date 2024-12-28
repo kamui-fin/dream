@@ -1,7 +1,7 @@
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
-use futures::future;
+use futures::future::{self, Remote};
 use futures::StreamExt;
 use lazy_static::lazy_static;
 use log::trace;
@@ -399,9 +399,36 @@ impl PeerManager {
         self.send_channels[&peer.conn_info].send(msg);
     }
 
-    pub async fn flush_pipeline(&mut self) {
-        // wait for every peer's pipeline to become empty, as well as queue
-        // easiest way is to just use mpsc and have each peer communicate when no work left
+    pub async fn flush_pipeline(&mut self, peer: &mut RemotePeer) {
+        trace!("Begginning flush of peer {:#?}'s pipeline", peer.conn_info);
+        while !peer.pipeline.is_empty() || !peer.buffer.is_empty() {
+            let msg = self.msg_rx.recv().await;
+            if let Some(msg) = msg {
+                if let MessageType::Piece = msg.msg_type {
+                    // get piece_id, block_id from payload
+                    // find it in pipeline and delete
+                    // pop from queue and add to pipeline
+                    let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
+                    let block_id = slice_to_u32_msb(&msg.payload[4..8]);
+                    let block_size = slice_to_u32_msb(&msg.payload[8..12]);
+                    peer.pipeline.retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
+
+                    info!(
+                        "Block {} from Piece {} removed from peer {:#?}'s pipeline",
+                        block_id, piece_idx, peer.conn_info
+                    );
+                    if let Some(entry) = peer.buffer.pop_front() {
+                        self.pipeline_enqueue(entry, peer);
+                    }
+                }
+            }
+        }
+        info!("Pipeline of peer {:#?} flushed", peer.conn_info);
+    }
+
+    async fn pipeline_enqueue(&mut self, entry: PipelineEntry, peer: &mut RemotePeer) {
+        peer.pipeline.push(entry.clone());
+        self.request_block(entry, peer).await;
     }
 
     async fn request_block(&mut self, entry: PipelineEntry, peer: &mut RemotePeer) {
@@ -473,8 +500,8 @@ impl PeerManager {
                 peer.piece_lookup = BitField(bt_msg.payload.clone());
                 info!(
                     "Peer {:#?} has informed us that is has pieces {}",
-                    self.peer,
-                    self.piece_lookup.return_piece_indexes()
+                    peer.conn_info,
+                    peer.piece_lookup.return_piece_indexes()
                 );
             }
             MessageType::Request => {
@@ -556,7 +583,7 @@ impl PeerManager {
                     block_id, piece_idx, peer.conn_info
                 );
                 if let Some(entry) = peer.buffer.pop_front() {
-                    peer.pipeline_enqueue(entry).await;
+                    self.pipeline_enqueue(entry, peer).await;
                 }
             }
             MessageType::Cancel => {
