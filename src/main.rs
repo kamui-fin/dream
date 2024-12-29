@@ -22,12 +22,12 @@ async fn main() -> Result<()> {
 
     let client = Arc::new(Mutex::new(BitTorrent::from_torrent_file(input_file).await?));
 
-    let client_clone = client.clone();
-    tokio::spawn(async move {
-        client_clone.lock().await.start_server().await.unwrap();
-    });
+    // let client_clone = client.clone();
+    // tokio::spawn(async move {
+    //     client_clone.lock().await.start_server().await.unwrap();
+    // });
 
-    client.lock().await.begin_download(output_dir).await?;
+    // client.lock().await.begin_download(output_dir).await?;
 
     Ok(())
 }

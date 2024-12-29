@@ -1,3 +1,5 @@
+use crate::peer::ConnectionInfo;
+use crate::peer::RemotePeer;
 use crate::utils::slice_to_u32_msb;
 
 #[derive(Debug)]
@@ -94,3 +96,6 @@ impl Message {
         msg_buf
     }
 }
+
+#[derive(Debug)]
+pub struct InternalMessage(pub Message, pub ConnectionInfo);

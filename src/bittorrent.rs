@@ -8,6 +8,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 
+use crate::msg::InternalMessage;
 use crate::peer::{self, UnchokeMessage};
 use crate::tracker::{self, parse_torrent_file};
 use crate::{
@@ -22,9 +23,8 @@ use crate::{piece, PORT};
 pub struct BitTorrent {
     meta_file: Metafile,
     piece_store: Arc<Mutex<PieceStore>>, // references meta_file
-    peer_manager: PeerManager,
+    peer_manager: Arc<Mutex<PeerManager>>,
 
-    pub unchoke_tx: Sender<UnchokeMessage>,
     pub unchoke_rx: Receiver<UnchokeMessage>,
 }
 
@@ -48,29 +48,46 @@ impl BitTorrent {
         let num_pieces = piece_store.meta_file.get_num_pieces();
         let piece_store = Arc::new(Mutex::new(piece_store));
 
-        let mut peer_manager = PeerManager::connect_peers(
+        let (peer_manager, msg_rx) = PeerManager::connect_peers(
             peers,
             piece_store.clone(),
             &info_hash,
             num_pieces,
-            &unchoke_tx,
+            unchoke_tx,
         )
         .await;
 
+        let peer_manager = Arc::new(Mutex::new(peer_manager));
+        let pm_clone = peer_manager.clone();
+
+        tokio::spawn(async move { Self::listen(msg_rx, pm_clone) });
+        peer_manager.lock().await.wait_for_peers_ready().await;
+
         info!(
             "Connected successfully to {:#?} peers.",
-            peer_manager.peers.len()
+            peer_manager.lock().await.peers.len()
         );
-
-        peer_manager.spawn_listen_tasks();
 
         Ok(Self {
             meta_file,
             piece_store,
             peer_manager,
             unchoke_rx,
-            unchoke_tx,
         })
+    }
+
+    pub async fn listen(
+        mut msg_rx: Receiver<InternalMessage>,
+        peer_manager: Arc<Mutex<PeerManager>>,
+    ) {
+        info!("Beginning to listen for peer msgs");
+        loop {
+            let mut msg = msg_rx.recv().await;
+            if let Some(InternalMessage(msg, peer)) = &mut msg {
+                info!("Received msg {:#?} from peer {:#?}", msg, peer);
+                peer_manager.lock().await.handle_msg(&msg, peer).await;
+            }
+        }
     }
 
     pub async fn begin_download(&mut self, output_dir: &str) -> anyhow::Result<()> {
@@ -94,18 +111,28 @@ impl BitTorrent {
             let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
-            let mut candidates = self.peer_manager.with_piece(piece_idx as u32).await;
+            let mut candidates = self
+                .peer_manager
+                .lock()
+                .await
+                .with_piece(piece_idx as u32)
+                .await;
             info!("Found {} peers with piece {piece_idx}", candidates.len());
             // send "interested" to all all of them
             for candidate in candidates.iter_mut() {
-                (*candidate).lock().await.show_interest().await;
+                self.peer_manager
+                    .lock()
+                    .await
+                    .show_interest_in_peer(candidate)
+                    .await;
             }
             // check if any have us unchoked
             let mut candidates_unchoked = Vec::new();
             for candidate in &candidates {
-                let candidate_guard = candidate.lock().await;
-                if !candidate_guard.peer_choking {
-                    candidates_unchoked.push(candidate_guard.peer.clone());
+                let guard = self.peer_manager.lock().await;
+                let peer = guard.find_peer(candidate);
+                if !peer.peer_choking {
+                    candidates_unchoked.push(candidate);
                 }
             }
             info!(
@@ -120,13 +147,17 @@ impl BitTorrent {
                     if let Some(UnchokeMessage { peer }) = unchoke_msg {
                         if self
                             .peer_manager
+                            .lock()
+                            .await
                             .peer_has_piece(&peer, piece_idx as u32)
                             .await
                         {
                             info!("Received unchoke msg from relevant peer {:#?}", peer);
                             // let this peer download the whole piece for now, TODO optimize
                             self.peer_manager
-                                .queue_blocks_for_peer(&peer, piece_idx as u32, 0..num_blocks)
+                                .lock()
+                                .await
+                                .queue_blocks(&peer, piece_idx as u32, 0..num_blocks)
                                 .await;
                             break;
                         } else {
@@ -146,7 +177,9 @@ impl BitTorrent {
                         (i as u32 + 1) * blocks_per_peer
                     };
                     self.peer_manager
-                        .queue_blocks_for_peer(peer, piece_idx as u32, start..end)
+                        .lock()
+                        .await
+                        .queue_blocks(peer, piece_idx as u32, start..end)
                         .await;
                 }
             }
@@ -155,7 +188,12 @@ impl BitTorrent {
 
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
-            self.peer_manager.flush_pipeline().await;
+            self.peer_manager
+                .lock()
+                .await
+                .notify_pipelines_empty
+                .notified()
+                .await;
 
             // verify hash & persist
             let mut store = self.piece_store.lock().await;
@@ -183,21 +221,13 @@ impl BitTorrent {
 
         loop {
             let (mut socket, addr) = listener.accept().await?;
-            let info_hash = &self.piece_store.lock().await.meta_file.get_info_hash();
+            let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
             let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
 
-            self.peer_manager
-                .find_or_create(
-                    addr,
-                    self.piece_store.clone(),
-                    info_hash,
-                    num_pieces,
-                    self.unchoke_tx.clone(),
-                )
-                .await;
+            let mut pm_guard = self.peer_manager.lock().await;
+            let peer = pm_guard.find_or_create(addr, num_pieces, info_hash).await;
 
-            let peer = self.peer_manager.peers.last().unwrap();
-            info!("New connection from {:?}", peer.lock().await.peer);
+            info!("New connection from {:?}", peer.conn_info);
 
             tokio::spawn(async move {
                 let mut buf = [0; 2028];
