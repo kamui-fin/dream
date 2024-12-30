@@ -2,11 +2,12 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
-use log::{error, info, trace, warn};
+use futures::future::join_all;
+use log::{debug, error, info, trace, warn};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{Mutex, Notify};
 
 use crate::msg::InternalMessage;
 use crate::peer::{self, UnchokeMessage};
@@ -48,25 +49,32 @@ impl BitTorrent {
         let num_pieces = piece_store.meta_file.get_num_pieces();
         let piece_store = Arc::new(Mutex::new(piece_store));
 
-        let (peer_manager, msg_rx) = PeerManager::connect_peers(
+        // the channel for receiving messages from peer sessions
+        let (msg_tx, msg_rx) = mpsc::channel(500);
+
+        let peer_ready_notify = Arc::new(Notify::new());
+        let peer_manager = PeerManager::connect_peers(
             peers,
             piece_store.clone(),
             &info_hash,
             num_pieces,
             unchoke_tx,
+            msg_tx,
+            peer_ready_notify.clone(),
         )
         .await;
+
+        info!(
+            "Connected successfully to {:#?} peers.",
+            peer_manager.peers.len()
+        );
 
         let peer_manager = Arc::new(Mutex::new(peer_manager));
         let pm_clone = peer_manager.clone();
 
-        tokio::spawn(async move { Self::listen(msg_rx, pm_clone) });
-        peer_manager.lock().await.wait_for_peers_ready().await;
+        tokio::spawn(async move { Self::listen(msg_rx, pm_clone).await });
 
-        info!(
-            "Connected successfully to {:#?} peers.",
-            peer_manager.lock().await.peers.len()
-        );
+        peer_ready_notify.notified().await;
 
         Ok(Self {
             meta_file,
@@ -82,10 +90,19 @@ impl BitTorrent {
     ) {
         info!("Beginning to listen for peer msgs");
         loop {
-            let mut msg = msg_rx.recv().await;
-            if let Some(InternalMessage(msg, peer)) = &mut msg {
-                info!("Received msg {:#?} from peer {:#?}", msg, peer);
-                peer_manager.lock().await.handle_msg(&msg, peer).await;
+            let msg = msg_rx.recv().await;
+            if let Some(InternalMessage {
+                msg,
+                conn_info,
+                should_close,
+            }) = &msg
+            {
+                if *should_close {
+                    peer_manager.lock().await.remove_peer(conn_info);
+                } else {
+                    info!("Received msg {:#?} from peer {:#?}", msg, conn_info);
+                    peer_manager.lock().await.handle_msg(&msg, conn_info).await;
+                }
             }
         }
     }

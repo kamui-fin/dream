@@ -9,7 +9,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bittorrent::BitTorrent;
-use tokio::sync::Mutex;
+use log::info;
+use msg::InternalMessage;
+use tokio::sync::{
+    mpsc::{self, Receiver},
+    Mutex,
+};
 
 const PORT: u16 = 6881;
 
@@ -27,7 +32,7 @@ async fn main() -> Result<()> {
     //     client_clone.lock().await.start_server().await.unwrap();
     // });
 
-    // client.lock().await.begin_download(output_dir).await?;
+    client.lock().await.begin_download(output_dir).await?;
 
     Ok(())
 }
