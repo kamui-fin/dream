@@ -1,3 +1,9 @@
+use std::fmt;
+
+use http_req::tls::Conn;
+
+use crate::peer::ConnectionInfo;
+use crate::peer::RemotePeer;
 use crate::utils::slice_to_u32_msb;
 
 #[derive(Debug)]
@@ -60,10 +66,17 @@ impl MessageType {
     }
 }
 
-#[derive(Debug)]
 pub struct Message {
     pub msg_type: MessageType,
     pub payload: Vec<u8>,
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("msg_type", &self.msg_type)
+            .finish()
+    }
 }
 
 impl Message {
@@ -93,4 +106,11 @@ impl Message {
 
         msg_buf
     }
+}
+
+#[derive(Debug)]
+pub struct InternalMessage {
+    pub msg: Message,
+    pub conn_info: ConnectionInfo,
+    pub should_close: bool,
 }
