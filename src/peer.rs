@@ -98,27 +98,20 @@ where
 
 struct PeerSession {
     // pertaining to connection
-    conn: Arc<Mutex<TcpStream>>,
+    // conn: Arc<Mutex<TcpStream>>,
+    conn: TcpStream,
     sender: mpsc::Sender<InternalMessage>,
-    recv_msg: Arc<Mutex<mpsc::Receiver<Message>>>,
     peer: ConnectionInfo,
 }
 
 impl PeerSession {
     async fn new_session(
         sender: mpsc::Sender<InternalMessage>,
-        recv_msg: mpsc::Receiver<Message>,
         peer: ConnectionInfo,
         info_hash: &[u8; 20],
     ) -> anyhow::Result<Self> {
         let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
-        let conn = Arc::new(Mutex::new(conn));
-        Ok(Self {
-            conn,
-            sender,
-            peer,
-            recv_msg: Arc::new(Mutex::new(recv_msg)),
-        })
+        Ok(Self { conn, sender, peer })
     }
 
     pub async fn peer_handshake(peer: ConnectionInfo, info_hash: &[u8; 20]) -> Result<TcpStream> {
@@ -161,30 +154,47 @@ impl PeerSession {
         }
     }
 
-    pub async fn start_listening(&mut self) {
+    pub async fn start_listening(&mut self, mut recv_msg: mpsc::Receiver<Message>) {
         loop {
-            let mut recv_msg_lock = self.recv_msg.lock().await;
             tokio::select! {
                 msg = self.receive_message() => {
                     match msg {
-                        Some(msg)=> {
-                            let msg = InternalMessage { msg, conn_info: self.peer.clone(), should_close: false};
-                            self.sender.try_send(msg).unwrap();
+                        Ok(msg) => {
+                            if msg.msg_type == MessageType::KeepAlive {
+                                // handle keep alives
+                            } else {
+                                let msg = InternalMessage {
+                                    msg,
+                                    conn_info: self.peer.clone(),
+                                    should_close: false,
+                                };
+                                self.sender.send(msg).await.unwrap();
+                            }
                         }
-                        None => {
+                        Err(e) => {
                             // doesn't matter what msg
-                            let close_msg = InternalMessage { msg: MessageType::KeepAlive.build_msg(vec![]), conn_info: self.peer.clone(), should_close: true };
+                            error!(
+                                "Failure to receive msg from peer {:#?}. Closing connection...",
+                                self.peer
+                            );
+                            error!("Details: {:#?}", e);
+                            let close_msg = InternalMessage {
+                                msg: MessageType::KeepAlive.build_msg(vec![]),
+                                conn_info: self.peer.clone(),
+                                should_close: true,
+                            };
                             self.sender.send(close_msg).await.unwrap();
                             return;
                         }
                     }
                 }
-                Some(msg) = recv_msg_lock.recv() => {
-                    if let None = self.send_message(msg).await {
+                Some(msg) = recv_msg.recv() => {
+                    if let Err(_) = self.send_message(msg.clone()).await {
                         let close_msg = InternalMessage { msg: MessageType::KeepAlive.build_msg(vec![]), conn_info: self.peer.clone(), should_close: true };
                         self.sender.send(close_msg).await.unwrap();
                         return;
                     }
+                    info!("PeerSession sent {:?} successfully", msg);
                 }
                 else => {
                     break;
@@ -193,41 +203,48 @@ impl PeerSession {
         }
     }
 
-    pub async fn send_message(&self, msg: Message) -> Option<()> {
-        let result = self.conn.lock().await.write_all(&msg.serialize()).await;
+    pub async fn send_message(&mut self, msg: Message) -> anyhow::Result<()> {
+        let result = self.conn.write_all(&msg.serialize()).await;
 
         match result {
-            Ok(_) => Some(()),
+            Ok(_) => Ok(()),
             Err(e) => {
                 error!("Message send resulted in error: {:#?}", e);
                 info!("Closing connection to peer: {:#?}", self.peer);
-                self.conn.lock().await.shutdown().await.unwrap();
-                None
+                self.conn.shutdown().await.unwrap();
+                Err(anyhow!(e))
             }
-            _ => None,
         }
     }
 
-    pub async fn receive_message(&self) -> Option<Message> {
+    pub async fn receive_message(&mut self) -> anyhow::Result<Message> {
         let mut len_buf = [0u8; 4];
-        let mut conn = self.conn.lock().await;
+        let conn = &mut self.conn;
 
-        conn.read_exact(&mut len_buf).await.ok();
+        conn.read_exact(&mut len_buf)
+            .await
+            .context("fetching msg_len")?;
 
         let msg_length = slice_to_u32_msb(&len_buf);
 
         if msg_length > 0 {
             let mut id_buf = [0u8; 1];
-            conn.read_exact(&mut id_buf).await.ok()?;
+            conn.read_exact(&mut id_buf).await.context("fetching id")?;
 
-            let mut payload_buf = vec![0u8; msg_length as usize];
-            conn.read_exact(&mut payload_buf).await.ok()?;
+            info!(
+                "Received packet of size {msg_length} and id {}, peer {:?}",
+                id_buf[0], self.peer
+            );
+            let mut payload_buf = vec![0u8; (msg_length - 1) as usize];
+            conn.read_exact(&mut payload_buf)
+                .await
+                .context(format!("fetching payload of size = {msg_length}"))?;
 
             let incoming_msg = MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf);
 
-            return Some(incoming_msg);
+            Ok(incoming_msg)
         } else {
-            Some(MessageType::KeepAlive.build_msg(vec![]))
+            Ok(MessageType::KeepAlive.build_msg(vec![]))
         }
     }
 }
@@ -296,10 +313,9 @@ pub struct PeerManager {
     msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
     unchoke_tx: Sender<UnchokeMessage>,
 
-    pub notify_pipelines_empty: Notify,
-
     num_not_ready_peers: Arc<AtomicUsize>,
     notify_all_ready: Arc<Notify>,
+    notify_pipelines_empty: Arc<Notify>,
 }
 
 impl PeerManager {
@@ -312,6 +328,7 @@ impl PeerManager {
         unchoke_tx: Sender<UnchokeMessage>,
         msg_tx: Sender<InternalMessage>,
         notify_all_ready: Arc<Notify>,
+        notify_pipelines_empty: Arc<Notify>,
     ) -> PeerManager {
         info!(
             "Attempting to connect to {} peers",
@@ -344,10 +361,9 @@ impl PeerManager {
             send_channels.insert(conn_info.clone(), send_msg);
 
             tokio::spawn(async move {
-                let session =
-                    PeerSession::new_session(tx_clone, recv_msg, conn_info, &info_hash_clone).await;
+                let session = PeerSession::new_session(tx_clone, conn_info, &info_hash_clone).await;
                 if let Ok(mut session) = session {
-                    session.start_listening().await;
+                    session.start_listening(recv_msg).await;
                 } else {
                     let old = not_ready_peers_clone.fetch_sub(1, Ordering::SeqCst);
                     info!("Counter: {}", old - 1);
@@ -364,7 +380,7 @@ impl PeerManager {
             msg_tx,
             unchoke_tx,
             piece_store,
-            notify_pipelines_empty: Notify::new(),
+            notify_pipelines_empty,
             notify_all_ready,
             num_not_ready_peers: not_ready_peers,
         }
@@ -383,8 +399,6 @@ impl PeerManager {
     pub async fn with_piece(&self, piece_idx: u32) -> Vec<ConnectionInfo> {
         let mut result = Vec::new();
         for peer in &self.peers {
-            info!("Trying to lock peer");
-            info!("Successfully locked peer");
             if peer.piece_lookup.piece_exists(piece_idx) {
                 result.push(peer.conn_info.clone());
             }
@@ -412,10 +426,9 @@ impl PeerManager {
             let tx_clone = self.msg_tx.clone();
 
             tokio::spawn(async move {
-                let session =
-                    PeerSession::new_session(tx_clone, recv_msg, conn_info, &info_hash).await;
+                let session = PeerSession::new_session(tx_clone, conn_info, &info_hash).await;
                 if let Ok(mut session) = session {
-                    session.start_listening().await;
+                    session.start_listening(recv_msg).await;
                 }
             });
 
@@ -448,9 +461,15 @@ impl PeerManager {
         blocks: Range<u32>,
     ) {
         info!("Queuing blocks {:#?} for {piece_id}", blocks);
-        let peer = self.find_peer_mut(conn_info);
         for block_id in blocks {
-            peer.buffer.push_back(PipelineEntry { piece_id, block_id });
+            let entry = PipelineEntry { piece_id, block_id };
+            let peer = self.find_peer_mut(conn_info);
+            if peer.pipeline.len() < MAX_PIPELINE_SIZE {
+                peer.pipeline.push(entry.clone());
+                self.request_block(entry, conn_info).await;
+            } else {
+                peer.buffer.push_back(entry);
+            }
         }
     }
 
@@ -460,15 +479,17 @@ impl PeerManager {
     }
 
     pub async fn show_interest_in_peer(&mut self, conn_info: &ConnectionInfo) {
+        info!("Showing interest in peer {:#?}", conn_info);
         {
             let peer = self.find_peer_mut(conn_info);
             peer.am_interested = true;
         }
-        self.send_message(conn_info, MessageType::Interested.build_msg(vec![]));
+        self.send_message(conn_info, MessageType::Interested.build_msg(vec![]))
+            .await;
     }
 
-    pub fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-        self.send_channels[conn_info].send(msg);
+    pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
+        self.send_channels[conn_info].send(msg).await.unwrap();
     }
 
     async fn pipeline_enqueue(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
@@ -480,12 +501,12 @@ impl PeerManager {
     async fn request_block(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
         let PipelineEntry { piece_id, block_id } = entry;
         let piece_id_bytes = piece_id.to_be_bytes();
-        let block_id_bytes = block_id.to_be_bytes();
+        let block_offset_bytes = (block_id * BLOCK_SIZE).to_be_bytes();
         let block_size = BLOCK_SIZE.to_be_bytes();
 
         let mut payload = Vec::with_capacity(12);
         payload.extend_from_slice(&piece_id_bytes);
-        payload.extend_from_slice(&block_id_bytes);
+        payload.extend_from_slice(&block_offset_bytes);
         payload.extend_from_slice(&block_size);
 
         info!(
@@ -644,14 +665,17 @@ impl PeerManager {
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
+                let block_id =
+                    ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
 
                 info!(
-                    "Peer {:#?} has sent us piece {} starting at offset {}",
-                    conn_info, piece_idx, block_offset
+                    "Peer {:#?} has sent us piece {} starting at offset {} with length {}. Determined block id = {}",
+                    conn_info,
+                    piece_idx,
+                    block_offset,
+                    block_data.len(),
+                    block_id
                 );
-
-                let block_id =
-                    ((block_offset as usize / &bt_msg.payload.len() - 8) as f32).floor() as u32;
 
                 peer.pipeline
                     .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
@@ -678,12 +702,10 @@ impl PeerManager {
             MessageType::Cancel => {
                 // informing us that block <index><begin><length> is not needed anymore
                 // for endgame algo
-                todo!();
             }
             MessageType::Port => {
                 // port that their dht node is listening on
                 // only for DHT extension
-                todo!();
             }
             _ => {
                 // let mut peer = self.find_peer_mut(conn_info);

@@ -21,31 +21,99 @@ impl BitField {
 
     pub fn piece_exists(&self, index: u32) -> bool {
         let byte_idx = index / 8;
-        let byte = self.0[byte_idx as usize];
         let offset = index % 8;
 
-        ((byte >> (8 - offset - 1)) & 1) == 1
+        (self.0[byte_idx as usize] & (1 << (8 - offset - 1))) > 0
     }
 
     pub fn mark_piece(&mut self, index: u32) {
         let byte_idx = index / 8;
         let offset = index % 8;
 
-        self.0[byte_idx as usize] |= 1 << (8 - offset);
+        self.0[byte_idx as usize] |= 1 << (8 - offset - 1);
     }
 
-    pub fn return_piece_indexes(&self) -> String{
-        if self.0.len() > 0 {
-            self.0.iter()
-                .enumerate()
-                .filter(|(_, &value) | value & 1 == 1)
-                .map(|(index, _)| index.to_string())
-                .collect::<Vec<String>>()
-                .join(",")
-        } else {
-            return "".to_string();
+    pub fn return_piece_indexes(&self) -> String {
+        (0..(self.0.len() * 8))
+            .filter(|i| self.piece_exists(*i as u32))
+            .count()
+            .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new() {
+        let bitfield = BitField::new(16);
+        assert_eq!(bitfield.0.len(), 2);
+        assert!(bitfield.0.iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn test_real_world() {
+        let mut bitfield = BitField::new(316 * 8);
+        bitfield.mark_piece(0x9c8);
+        assert!(bitfield.piece_exists(0x9c8));
+        bitfield.mark_piece(0x810);
+        assert!(bitfield.piece_exists(0x810));
+        assert!(!bitfield.piece_exists(4));
+    }
+
+    #[test]
+    fn test_piece_exists() {
+        let mut bitfield = BitField::new(16);
+
+        for i in 0..16 {
+            assert!(!bitfield.piece_exists(i));
         }
-        
+
+        bitfield.mark_piece(3);
+        assert!(bitfield.piece_exists(3));
+        assert!(!bitfield.piece_exists(4));
+    }
+
+    #[test]
+    fn test_mark_piece() {
+        let mut bitfield = BitField::new(16);
+
+        bitfield.mark_piece(7);
+        assert!(bitfield.piece_exists(7));
+
+        bitfield.mark_piece(0);
+        assert!(bitfield.piece_exists(0));
+    }
+
+    #[test]
+    fn test_return_piece_indexes() {
+        let mut bitfield = BitField::new(16);
+
+        assert_eq!(bitfield.return_piece_indexes(), "0");
+
+        bitfield.mark_piece(3);
+        bitfield.mark_piece(7);
+        bitfield.mark_piece(12);
+
+        assert_eq!(bitfield.return_piece_indexes(), "3");
+
+        bitfield.mark_piece(15);
+        assert_eq!(bitfield.return_piece_indexes(), "4");
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn test_out_of_bounds_piece_exists() {
+        let bitfield = BitField::new(8);
+        bitfield.piece_exists(10);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn test_out_of_bounds_mark_piece() {
+        let mut bitfield = BitField::new(8);
+        bitfield.mark_piece(10);
     }
 }
 

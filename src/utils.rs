@@ -1,3 +1,4 @@
+use log::{error, info};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use sha1::{Digest, Sha1};
 

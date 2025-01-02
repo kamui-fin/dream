@@ -6,7 +6,7 @@ use crate::peer::ConnectionInfo;
 use crate::peer::RemotePeer;
 use crate::utils::slice_to_u32_msb;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum MessageType {
     KeepAlive,
     Choke,
@@ -66,6 +66,7 @@ impl MessageType {
     }
 }
 
+#[derive(Clone)]
 pub struct Message {
     pub msg_type: MessageType,
     pub payload: Vec<u8>,

@@ -27,6 +27,7 @@ pub struct BitTorrent {
     peer_manager: Arc<Mutex<PeerManager>>,
 
     pub unchoke_rx: Receiver<UnchokeMessage>,
+    notify_pipelines_empty: Arc<Notify>,
 }
 
 impl BitTorrent {
@@ -52,6 +53,7 @@ impl BitTorrent {
         // the channel for receiving messages from peer sessions
         let (msg_tx, msg_rx) = mpsc::channel(500);
 
+        let notify_pipelines_empty = Arc::new(Notify::new());
         let peer_ready_notify = Arc::new(Notify::new());
         let peer_manager = PeerManager::connect_peers(
             peers,
@@ -61,6 +63,7 @@ impl BitTorrent {
             unchoke_tx,
             msg_tx,
             peer_ready_notify.clone(),
+            notify_pipelines_empty.clone(),
         )
         .await;
 
@@ -81,6 +84,7 @@ impl BitTorrent {
             piece_store,
             peer_manager,
             unchoke_rx,
+            notify_pipelines_empty,
         })
     }
 
@@ -201,16 +205,9 @@ impl BitTorrent {
                 }
             }
 
-            panic!();
-
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
-            self.peer_manager
-                .lock()
-                .await
-                .notify_pipelines_empty
-                .notified()
-                .await;
+            self.notify_pipelines_empty.notified().await;
 
             // verify hash & persist
             let mut store = self.piece_store.lock().await;
