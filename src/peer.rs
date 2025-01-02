@@ -1,16 +1,17 @@
 use anyhow::Context;
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
-use futures::future::{self, join_all, Remote};
+use futures::future::{self, join_all, Join, Remote};
 use futures::StreamExt;
 use http_req::tls::Conn;
 use lazy_static::lazy_static;
-use log::trace;
+use log::{debug, trace};
 use log::warn;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use sha1::digest::typenum::Bit;
+use tokio::time::{self, sleep};
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
@@ -19,7 +20,8 @@ use std::ptr::read;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use tokio::task::JoinHandle;
 
 use log::{error, info};
 use tokio::{
@@ -102,6 +104,7 @@ struct PeerSession {
     conn: TcpStream,
     sender: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
+    keep_alive_timer: Option<JoinHandle<()>>,
 }
 
 impl PeerSession {
@@ -111,7 +114,15 @@ impl PeerSession {
         info_hash: &[u8; 20],
     ) -> anyhow::Result<Self> {
         let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
-        Ok(Self { conn, sender, peer })
+        let sender_clone = sender.clone();
+        let conn_clone = peer.clone();
+
+        Ok(Self { 
+            conn, 
+            sender, 
+            peer, 
+            keep_alive_timer: None,
+        })
     }
 
     pub async fn peer_handshake(peer: ConnectionInfo, info_hash: &[u8; 20]) -> Result<TcpStream> {
@@ -168,6 +179,7 @@ impl PeerSession {
                                     conn_info: self.peer.clone(),
                                     should_close: false,
                                 };
+                                
                                 self.sender.send(msg).await.unwrap();
                             }
                         }
@@ -246,7 +258,7 @@ impl PeerSession {
         } else {
             Ok(MessageType::KeepAlive.build_msg(vec![]))
         }
-    }
+    }   
 }
 
 pub struct RemotePeer {
@@ -290,6 +302,7 @@ pub struct UnchokeMessage {
 
 impl RemotePeer {
     fn from_peer(peer: ConnectionInfo, num_pieces: u32) -> Self {
+
         Self {
             conn_info: peer,
             piece_lookup: BitField::new(num_pieces),
@@ -316,6 +329,9 @@ pub struct PeerManager {
     num_not_ready_peers: Arc<AtomicUsize>,
     notify_all_ready: Arc<Notify>,
     notify_pipelines_empty: Arc<Notify>,
+    keep_alive_senders: Arc<Mutex<HashMap<ConnectionInfo, JoinHandle<()>>>>,
+    keep_alive_receivers: Arc<Mutex<HashMap<ConnectionInfo, JoinHandle<()>>>>
+
 }
 
 impl PeerManager {
@@ -348,6 +364,12 @@ impl PeerManager {
         let num_peers = peers.len();
         let not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
 
+        let mut keep_alive_receivers: Arc<Mutex<HashMap<ConnectionInfo, JoinHandle<()>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
+        let mut keep_alive_senders: HashMap<ConnectionInfo, JoinHandle<()>> =
+        HashMap::new();
+
         for remote_peer in &peers {
             let info_hash_clone = info_hash.clone();
             let conn_info = remote_peer.conn_info.clone();
@@ -358,7 +380,18 @@ impl PeerManager {
 
             // the channel for sending messages to this peer session
             let (send_msg, recv_msg) = mpsc::channel(500);
+
+            let sender_clone = send_msg.clone();
             send_channels.insert(conn_info.clone(), send_msg);
+            
+
+            keep_alive_senders.insert(
+                conn_info.clone(),
+                tokio::spawn(async move{
+                    sleep(Duration::from_secs(60*2)).await;
+                    sender_clone.send(MessageType::KeepAlive.build_msg(Vec::new())).await.unwrap();
+                })
+            );
 
             tokio::spawn(async move {
                 let session = PeerSession::new_session(tx_clone, conn_info, &info_hash_clone).await;
@@ -383,7 +416,55 @@ impl PeerManager {
             notify_pipelines_empty,
             notify_all_ready,
             num_not_ready_peers: not_ready_peers,
+            keep_alive_receivers,
+            keep_alive_senders: Arc::new(Mutex::new(keep_alive_senders))
         }
+    }
+
+    pub async fn reset_keep_alive(&self, conn_info: ConnectionInfo){
+        let mut timers = self.keep_alive_senders.lock().await;
+        let mut sender = self.send_channels[&conn_info].clone();
+        let conn_clone = conn_info.clone();
+
+        if timers.contains_key(&conn_info){
+            timers[&conn_info].abort();
+        }
+
+        timers.insert(
+            conn_info,
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(60*2)).await;
+                debug!("TIMER RAN OUT! Sending Keepalive to peer: {:#?}", conn_clone);
+                let _ = sender.send(MessageType::KeepAlive.build_msg(Vec::new())).await;
+            })
+        );
+
+    }
+
+    pub async fn reset_timer(&self, conn_info: ConnectionInfo){
+        let mut timers = self.keep_alive_receivers.lock().await;
+        let mut sender = self.msg_tx.clone();
+        let conn_clone = conn_info.clone();
+
+        if timers.contains_key(&conn_info){
+            timers[&conn_info].abort();
+        }
+
+        timers.insert(
+            conn_info,
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(60*2)).await;
+                println!("TIMER RAN OUT!");
+
+                let close_msg = InternalMessage {
+                    msg: MessageType::KeepAlive.build_msg(vec![]),
+                    conn_info: conn_clone,
+                    should_close: true,
+                };
+                sender.send(close_msg).await.unwrap();
+            })
+        );
+
     }
 
     pub fn check_empty_pipelines(&self) {
@@ -489,6 +570,7 @@ impl PeerManager {
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
+        self.reset_keep_alive(conn_info.clone()).await;
         self.send_channels[conn_info].send(msg).await.unwrap();
     }
 
@@ -544,6 +626,10 @@ impl PeerManager {
     }
 
     pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
+        // reset the timers for that particular peer
+        self.reset_timer(conn_info.clone()).await;
+        self.reset_keep_alive(conn_info.clone()).await;
+
         let peer = self.find_peer_mut(conn_info);
         let was_ready = peer.is_ready;
         if !was_ready {
@@ -554,6 +640,7 @@ impl PeerManager {
                 // close connection after 2 min of inactivity (no commands)
                 // keepalive is just a dummy msg to reset that timer
                 // info!("Received keep alive")
+                info!("Received keep alive from peer: {:#?}", peer);
             }
             MessageType::Choke => {
                 // peer has choked us
@@ -718,3 +805,4 @@ impl PeerManager {
         }
     }
 }
+ 
