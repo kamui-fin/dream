@@ -188,14 +188,17 @@ impl BitTorrent {
                 }
             } else {
                 let blocks_per_peer = num_blocks / candidates_unchoked.len() as u32;
-                info!("Distributed {} blocks per peer", blocks_per_peer);
+                info!(
+                    "Distributed {} blocks per peer. Total # of blocks: {}",
+                    blocks_per_peer, num_blocks
+                );
 
                 for (i, peer) in candidates_unchoked.iter().enumerate() {
                     let start = i as u32 * blocks_per_peer;
-                    let end = if i == candidates.len() - 1 {
+                    let end = if i == candidates_unchoked.len() - 1 {
                         num_blocks
                     } else {
-                        (i as u32 + 1) * blocks_per_peer
+                        start + blocks_per_peer
                     };
                     self.peer_manager
                         .lock()
@@ -208,6 +211,7 @@ impl BitTorrent {
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
             self.notify_pipelines_empty.notified().await;
+            info!("Done waiting for piece DL");
 
             // verify hash & persist
             let mut store = self.piece_store.lock().await;
@@ -219,6 +223,7 @@ impl BitTorrent {
             } else {
                 // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
                 error!("Piece {piece_idx} hash mismatch!!");
+                panic!();
                 main_piece_queue.push_front(piece_idx);
             }
         }
@@ -230,41 +235,41 @@ impl BitTorrent {
         Ok(())
     }
 
-    pub async fn start_server(&mut self) -> anyhow::Result<()> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
+    // pub async fn start_server(&mut self) -> anyhow::Result<()> {
+    //     let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
-        loop {
-            let (mut socket, addr) = listener.accept().await?;
-            let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
-            let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
+    //     loop {
+    //         let (mut socket, addr) = listener.accept().await?;
+    //         let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
+    //         let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
 
-            let mut pm_guard = self.peer_manager.lock().await;
-            let peer = pm_guard.find_or_create(addr, num_pieces, info_hash).await;
+    //         let mut pm_guard = self.peer_manager.lock().await;
+    //         let peer = pm_guard.find_or_create(addr, num_pieces, info_hash).await;
 
-            info!("New connection from {:?}", peer.conn_info);
+    //         info!("New connection from {:?}", peer.conn_info);
 
-            tokio::spawn(async move {
-                let mut buf = [0; 2028];
+    //         tokio::spawn(async move {
+    //             let mut buf = [0; 2028];
 
-                loop {
-                    match socket.read(&mut buf).await {
-                        Ok(0) => {
-                            warn!("Connection closed by {:?}", addr);
-                            break;
-                        }
-                        Ok(_) => {
-                            let bt_msg = Message::parse(&buf);
-                            info!("Received msg: {:#?}", bt_msg);
+    //             loop {
+    //                 match socket.read(&mut buf).await {
+    //                     Ok(0) => {
+    //                         warn!("Connection closed by {:?}", addr);
+    //                         break;
+    //                     }
+    //                     Ok(_) => {
+    //                         let bt_msg = Message::parse(&buf);
+    //                         info!("Received msg: {:#?}", bt_msg);
 
-                            // self.handle_msg(bt_msg, &mut peer).await;
-                        }
-                        Err(e) => {
-                            println!("Failed to read from socket; err = {:?}", e);
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-    }
+    //                         // self.handle_msg(bt_msg, &mut peer).await;
+    //                     }
+    //                     Err(e) => {
+    //                         println!("Failed to read from socket; err = {:?}", e);
+    //                         break;
+    //                     }
+    //                 }
+    //             }
+    //         });
+    //     }
+    // }
 }

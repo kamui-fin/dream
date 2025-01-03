@@ -6,7 +6,8 @@ use crate::piece::Piece;
 use crate::utils::slice_to_u32_msb;
 use std::fmt::{Display, Formatter};
 
-use bytes::BytesMut;
+use anyhow::anyhow;
+use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
@@ -23,21 +24,6 @@ pub struct PiecePayload<'a> {
     block_id: u32,
     offset: u32,
     data: &'a [u8],
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum MessageType {
-    KeepAlive,
-    Choke,
-    UnChoke,
-    Interested,
-    NotInterested,
-    Have,
-    Bitfield,
-    Request,
-    Piece,
-    Cancel,
-    Port,
 }
 
 impl RequestPayload {
@@ -87,21 +73,88 @@ impl<'a> PiecePayload<'a> {
 
 pub struct BitTorrentCodec;
 
-impl Encoder for BitTorrentCodec {
-    fn encode(&mut self, msg: Message, buffer: &mut BytesMut) {
-        if msg.len > MAX_FRAME_SIZE - 4 {}
+impl Encoder<Message> for BitTorrentCodec {
+    type Error = anyhow::Error;
+
+    fn encode(&mut self, msg: Message, buffer: &mut BytesMut) -> Result<(), anyhow::Error> {
+        if msg.len > (MAX_FRAME_SIZE - 4).try_into().unwrap() {
+            return Err(anyhow!("Message isn't long enough".to_string()));
+        }
+
+        buffer.reserve((4 + msg.len).try_into().unwrap());
+
+        let len_bytes = u32::to_be_bytes(msg.len);
+        buffer.extend_from_slice(&len_bytes);
+
+        buffer.put_u8(msg.msg_type.to_id());
+        if msg.payload.len() > 0 {
+            buffer.extend_from_slice(&msg.payload);
+        }
+
+        Ok(())
     }
 }
 
 impl Decoder for BitTorrentCodec {
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+    type Item = Message;
+    type Error = anyhow::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, anyhow::Error> {
         if src.len() < 4 {
             return Ok(None);
         }
 
-        let len_bytes = [0u8; 4];
+        let mut len_bytes = [0u8; 4];
         len_bytes.copy_from_slice(&src[0..4]);
+        let length = u32::from_be_bytes(len_bytes) as usize;
+
+        if length == 0 {
+            // keep alive
+            src.advance(4);
+            return Ok(Some(Message::new(None, vec![])));
+        }
+
+        if src.len() < 5 {
+            return Ok(None);
+        }
+
+        if length > MAX_FRAME_SIZE - 4 {
+            return Err(anyhow!("Length is way too large"));
+        }
+
+        // Note: we're doing length + 4 because length is only the length of msg payload + 1 byte for id
+        if src.len() < length + 4 {
+            // need to wait for more packets before we get full payload
+            src.reserve(length + 4 - src.len());
+            return Ok(None);
+        }
+
+        let id = src[4].try_into()?;
+        let payload = if length > 1 {
+            src[5..4 + length].to_vec()
+        } else {
+            vec![]
+        };
+
+        src.advance(4 + length);
+        let msg = Message::new(id, payload);
+        Ok(Some(msg))
     }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum MessageType {
+    KeepAlive,
+    Choke,
+    UnChoke,
+    Interested,
+    NotInterested,
+    Have,
+    Bitfield,
+    Request,
+    Piece,
+    Cancel,
+    Port,
 }
 
 impl MessageType {
@@ -142,9 +195,11 @@ impl MessageType {
     }
 
     pub fn build_msg(self, payload: Vec<u8>) -> Message {
+        let len = (payload.len() as u32) + 1;
         Message {
             msg_type: self,
             payload,
+            len,
         }
     }
 }
@@ -165,31 +220,12 @@ impl fmt::Debug for Message {
 }
 
 impl Message {
-    pub fn parse(buf: &[u8]) -> Self {
-        let msg_length = slice_to_u32_msb(&buf[0..4]);
-        let msg_id = if msg_length == 0 { None } else { Some(buf[4]) };
-        let msg_type = MessageType::from_id(msg_id);
-
-        let payload_size = msg_length - 1;
-        let payload = buf
-            .get(5..(5 + payload_size as usize))
-            .map(|b| b.to_owned())
-            .unwrap_or_default();
-
-        Message { msg_type, payload }
-    }
-
-    pub fn serialize(self) -> Vec<u8> {
-        let msg_length = (self.payload.len() + 1) as u32;
-        let msg_length = msg_length.to_be_bytes();
-        let msg_id = self.msg_type.to_id();
-
-        let mut msg_buf: Vec<u8> = vec![];
-        msg_buf.extend(msg_length);
-        msg_buf.push(msg_id);
-        msg_buf.extend(self.payload);
-
-        msg_buf
+    pub fn new(id: Option<u8>, payload: Vec<u8>) -> Self {
+        Self {
+            msg_type: MessageType::from_id(id),
+            len: 1 + payload.len() as u32,
+            payload,
+        }
     }
 }
 
