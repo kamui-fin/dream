@@ -156,7 +156,7 @@ impl Piece {
     // can we really assume serial downloads?
     // also we need a mapping between block_idx <---> (begin, len)
     pub fn store_block(&mut self, begin: usize, len: usize, data: &[u8]) {
-        if begin + len < self.buffer.len() {
+        if begin + len <= self.buffer.len() {
             let block_id = ((begin / len) as f32).floor() as u32;
             self.block_set.insert(block_id);
 
@@ -164,7 +164,7 @@ impl Piece {
             self.downloaded_bytes += len as u32;
 
             info!(
-                "Block stored, currently recieved {} out of {} bytes",
+                "Block {block_id} stored, currently recieved {} out of {} bytes",
                 self.downloaded_bytes,
                 self.buffer.len()
             );

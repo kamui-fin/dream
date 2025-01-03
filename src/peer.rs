@@ -2,7 +2,7 @@ use anyhow::Context;
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ByteOrder};
 use futures::future::{self, join_all, Join, Remote};
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
 use http_req::tls::Conn;
 use lazy_static::lazy_static;
 use log::{debug, trace};
@@ -22,6 +22,8 @@ use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::D
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
+// use tokio::sync::{mpsc, Mutex, Notify};
+use tokio_util::codec::Framed;
 
 use log::{error, info};
 use tokio::{
@@ -32,7 +34,7 @@ use tokio::{
 };
 
 use crate::bittorrent::BitTorrent;
-use crate::msg::InternalMessage;
+use crate::msg::{BitTorrentCodec, InternalMessage};
 use crate::piece;
 use crate::piece::PieceStore;
 use crate::tracker::TrackerResponse;
@@ -101,10 +103,10 @@ where
 struct PeerSession {
     // pertaining to connection
     // conn: Arc<Mutex<TcpStream>>,
-    conn: TcpStream,
+    // conn: TcpStream,
+    framed: Framed<TcpStream, BitTorrentCodec>,
     sender: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
-    keep_alive_timer: Option<JoinHandle<()>>,
 }
 
 impl PeerSession {
@@ -114,14 +116,11 @@ impl PeerSession {
         info_hash: &[u8; 20],
     ) -> anyhow::Result<Self> {
         let conn = Self::peer_handshake(peer.clone(), info_hash).await?;
-        let sender_clone = sender.clone();
-        let conn_clone = peer.clone();
-
-        Ok(Self { 
-            conn, 
-            sender, 
-            peer, 
-            keep_alive_timer: None,
+        let framed = Framed::new(conn, BitTorrentCodec);
+        Ok(Self {
+            framed,
+            sender,
+            peer,
         })
     }
 
@@ -168,28 +167,41 @@ impl PeerSession {
     pub async fn start_listening(&mut self, mut recv_msg: mpsc::Receiver<Message>) {
         loop {
             tokio::select! {
-                msg = self.receive_message() => {
+                msg = self.framed.next() => {
                     match msg {
-                        Ok(msg) => {
-                            if msg.msg_type == MessageType::KeepAlive {
-                                // handle keep alives
-                            } else {
-                                let msg = InternalMessage {
-                                    msg,
+                        Some(msg) => match msg {
+                            Ok(msg) => {
+                                if msg.msg_type == MessageType::KeepAlive {
+                                    // handle keep alives
+                                } else {
+                                    let msg = InternalMessage {
+                                        msg,
+                                        conn_info: self.peer.clone(),
+                                        should_close: false,
+                                    };
+                                    self.sender.send(msg).await.unwrap();
+                                }
+                            }
+                            Err(e) => {
+                                // doesn't matter what msg
+                                error!(
+                                    "Encountered malformed data from peer {:#?}: {:#?}",
+                                    self.peer,
+                                    e
+                                );
+                                self.framed.close().await.unwrap();
+                                let close_msg = InternalMessage {
+                                    msg: MessageType::KeepAlive.build_msg(vec![]),
                                     conn_info: self.peer.clone(),
-                                    should_close: false,
+                                    should_close: true,
                                 };
-                                
-                                self.sender.send(msg).await.unwrap();
+                                self.sender.send(close_msg).await.unwrap();
+                                return;
                             }
                         }
-                        Err(e) => {
-                            // doesn't matter what msg
-                            error!(
-                                "Failure to receive msg from peer {:#?}. Closing connection...",
-                                self.peer
-                            );
-                            error!("Details: {:#?}", e);
+                        None => {
+                            error!("Stream has been exhausted (EOF) for peer {:?} ! Unrecoverable...", self.peer);
+                            self.framed.close().await.unwrap();
                             let close_msg = InternalMessage {
                                 msg: MessageType::KeepAlive.build_msg(vec![]),
                                 conn_info: self.peer.clone(),
@@ -203,6 +215,7 @@ impl PeerSession {
                 Some(msg) = recv_msg.recv() => {
                     if let Err(_) = self.send_message(msg.clone()).await {
                         let close_msg = InternalMessage { msg: MessageType::KeepAlive.build_msg(vec![]), conn_info: self.peer.clone(), should_close: true };
+                        self.framed.close().await.unwrap();
                         self.sender.send(close_msg).await.unwrap();
                         return;
                     }
@@ -216,49 +229,18 @@ impl PeerSession {
     }
 
     pub async fn send_message(&mut self, msg: Message) -> anyhow::Result<()> {
-        let result = self.conn.write_all(&msg.serialize()).await;
+        let result = self.framed.send(msg).await;
 
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
                 error!("Message send resulted in error: {:#?}", e);
                 info!("Closing connection to peer: {:#?}", self.peer);
-                self.conn.shutdown().await.unwrap();
+                self.framed.close().await.unwrap();
                 Err(anyhow!(e))
             }
         }
     }
-
-    pub async fn receive_message(&mut self) -> anyhow::Result<Message> {
-        let mut len_buf = [0u8; 4];
-        let conn = &mut self.conn;
-
-        conn.read_exact(&mut len_buf)
-            .await
-            .context("fetching msg_len")?;
-
-        let msg_length = slice_to_u32_msb(&len_buf);
-
-        if msg_length > 0 {
-            let mut id_buf = [0u8; 1];
-            conn.read_exact(&mut id_buf).await.context("fetching id")?;
-
-            info!(
-                "Received packet of size {msg_length} and id {}, peer {:?}",
-                id_buf[0], self.peer
-            );
-            let mut payload_buf = vec![0u8; (msg_length - 1) as usize];
-            conn.read_exact(&mut payload_buf)
-                .await
-                .context(format!("fetching payload of size = {msg_length}"))?;
-
-            let incoming_msg = MessageType::from_id(Some(id_buf[0])).build_msg(payload_buf);
-
-            Ok(incoming_msg)
-        } else {
-            Ok(MessageType::KeepAlive.build_msg(vec![]))
-        }
-    }   
 }
 
 pub struct RemotePeer {
@@ -289,8 +271,7 @@ impl fmt::Debug for RemotePeer {
     }
 }
 
-#[derive(Clone)]
-
+#[derive(Clone, Debug)]
 pub struct PipelineEntry {
     piece_id: u32,
     block_id: u32,
@@ -423,9 +404,10 @@ impl PeerManager {
 
     pub async fn reset_keep_alive(&self, conn_info: ConnectionInfo){
         let mut timers = self.keep_alive_senders.lock().await;
-        let mut sender = self.send_channels[&conn_info].clone();
+        let sender = self.send_channels[&conn_info].clone();
         let conn_clone = conn_info.clone();
 
+        trace!("Resetting keepalive sender for peer {:#?}", conn_clone);
         if timers.contains_key(&conn_info){
             timers[&conn_info].abort();
         }
@@ -434,7 +416,7 @@ impl PeerManager {
             conn_info,
             tokio::spawn(async move {
                 sleep(Duration::from_secs(60*2)).await;
-                debug!("TIMER RAN OUT! Sending Keepalive to peer: {:#?}", conn_clone);
+                warn!("Inactivity detected, sending keepalive to peer: {:#?}", conn_clone);
                 let _ = sender.send(MessageType::KeepAlive.build_msg(Vec::new())).await;
             })
         );
@@ -443,9 +425,10 @@ impl PeerManager {
 
     pub async fn reset_timer(&self, conn_info: ConnectionInfo){
         let mut timers = self.keep_alive_receivers.lock().await;
-        let mut sender = self.msg_tx.clone();
+        let sender = self.msg_tx.clone();
         let conn_clone = conn_info.clone();
 
+        trace!("Resetting keepalive receiver for peer {:#?}", conn_clone);
         if timers.contains_key(&conn_info){
             timers[&conn_info].abort();
         }
@@ -454,7 +437,7 @@ impl PeerManager {
             conn_info,
             tokio::spawn(async move {
                 sleep(Duration::from_secs(60*2)).await;
-                println!("TIMER RAN OUT!");
+                warn!("Detected inactivity for too long, closing conneciton with peer {:#?}", conn_clone);
 
                 let close_msg = InternalMessage {
                     msg: MessageType::KeepAlive.build_msg(vec![]),
@@ -473,6 +456,7 @@ impl PeerManager {
             .iter()
             .all(|p| p.buffer.is_empty() && p.pipeline.is_empty())
         {
+            info!("About to notify that we're done??");
             self.notify_pipelines_empty.notify_one();
         }
     }
@@ -541,7 +525,7 @@ impl PeerManager {
         piece_id: u32,
         blocks: Range<u32>,
     ) {
-        info!("Queuing blocks {:#?} for {piece_id}", blocks);
+        // info!("Queuing blocks {:#?} for {piece_id}", blocks);
         for block_id in blocks {
             let entry = PipelineEntry { piece_id, block_id };
             let peer = self.find_peer_mut(conn_info);
@@ -552,6 +536,12 @@ impl PeerManager {
                 peer.buffer.push_back(entry);
             }
         }
+        info!(
+            "Peer {:?} pipeline: {:?} and buffer: {:?}",
+            conn_info,
+            self.find_peer(conn_info).pipeline,
+            self.find_peer(conn_info).buffer
+        )
     }
 
     pub async fn peer_has_piece(&self, peer: &ConnectionInfo, piece_idx: u32) -> bool {
@@ -618,6 +608,13 @@ impl PeerManager {
     }
 
     pub fn remove_peer(&mut self, conn_info: &ConnectionInfo) {
+        // TODO: handle pipeline & buffer merging
+        error!(
+            "Removing peer {:#?} with pipeline: {:#?} and buffer: {:#?}",
+            conn_info,
+            self.find_peer(conn_info).pipeline,
+            self.find_peer(conn_info).buffer
+        );
         if !self.find_peer(conn_info).is_ready {
             self.mark_peer_ready();
         }
@@ -764,8 +761,17 @@ impl PeerManager {
                     block_id
                 );
 
-                peer.pipeline
-                    .retain(|p| p.block_id != block_id && p.piece_id != piece_idx);
+                info!(
+                    "BEFORE: Peer {:?} has pipeline: {:?} and buffer: {:?}",
+                    peer, peer.pipeline, peer.buffer
+                );
+
+                peer.pipeline.retain(|p| p.block_id != block_id);
+
+                info!(
+                    "AFTER: Peer {:?} has pipeline: {:?} and buffer: {:?}",
+                    peer, peer.pipeline, peer.buffer
+                );
 
                 info!(
                     "Block {} from Piece {} removed from peer {:#?}'s pipeline",
@@ -776,8 +782,6 @@ impl PeerManager {
 
                 if let Some(entry) = entry {
                     self.pipeline_enqueue(entry, conn_info).await;
-                } else {
-                    self.check_empty_pipelines();
                 }
 
                 self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
@@ -785,6 +789,8 @@ impl PeerManager {
                     block_data.len(),
                     block_data,
                 );
+
+                self.check_empty_pipelines();
             }
             MessageType::Cancel => {
                 // informing us that block <index><begin><length> is not needed anymore
