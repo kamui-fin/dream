@@ -1,10 +1,29 @@
+use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
+
 use std::fmt;
 
-use http_req::tls::Conn;
-
-use crate::peer::ConnectionInfo;
-use crate::peer::RemotePeer;
+use crate::piece::Piece;
 use crate::utils::slice_to_u32_msb;
+use std::fmt::{Display, Formatter};
+
+use bytes::BytesMut;
+use tokio_util::codec::{Decoder, Encoder};
+
+const MAX_FRAME_SIZE: usize = 1 << 16;
+
+pub struct RequestPayload {
+    piece_id: u32,
+    block_id: u32,
+    offset: u32,
+    length: u32,
+}
+
+pub struct PiecePayload<'a> {
+    piece_id: u32,
+    block_id: u32,
+    offset: u32,
+    data: &'a [u8],
+}
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum MessageType {
@@ -19,6 +38,70 @@ pub enum MessageType {
     Piece,
     Cancel,
     Port,
+}
+
+impl RequestPayload {
+    pub fn new(index: u32, offset: u32, length: u32) -> Self {
+        let block_id = ((offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+        Self {
+            piece_id: index,
+            offset,
+            length,
+            block_id,
+        }
+    }
+}
+
+impl fmt::Display for RequestPayload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "request_payload: piece index: {:3}, offset: {:6}, length: {:5}",
+            self.piece_id, self.offset, self.length
+        )
+    }
+}
+
+impl fmt::Display for PiecePayload<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "piece_payload: piece_index = {}, block_index = {} (offset =  {})",
+            self.piece_id, self.block_id, self.offset
+        )
+    }
+}
+
+impl<'a> PiecePayload<'a> {
+    fn new(index: u32, offset: u32, data: &'a [u8]) -> Self {
+        let block_id = offset / BLOCK_SIZE;
+
+        Self {
+            piece_id: index,
+            offset,
+            data,
+            block_id,
+        }
+    }
+}
+
+pub struct BitTorrentCodec;
+
+impl Encoder for BitTorrentCodec {
+    fn encode(&mut self, msg: Message, buffer: &mut BytesMut) {
+        if msg.len > MAX_FRAME_SIZE - 4 {}
+    }
+}
+
+impl Decoder for BitTorrentCodec {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if src.len() < 4 {
+            return Ok(None);
+        }
+
+        let len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&src[0..4]);
+    }
 }
 
 impl MessageType {
@@ -68,6 +151,7 @@ impl MessageType {
 
 #[derive(Clone)]
 pub struct Message {
+    pub len: u32,
     pub msg_type: MessageType,
     pub payload: Vec<u8>,
 }

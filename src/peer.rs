@@ -662,6 +662,7 @@ impl PeerManager {
             MessageType::Piece => {
                 // in response to Request, returns piece data
                 // index, begin, block data
+                warn!("Payload len = {}", &bt_msg.payload.len());
                 let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
                 let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
                 let block_data = &bt_msg.payload[8..];
