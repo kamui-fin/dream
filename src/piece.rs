@@ -155,7 +155,7 @@ impl Piece {
 
     // can we really assume serial downloads?
     // also we need a mapping between block_idx <---> (begin, len)
-    pub fn store_block(&mut self, begin: usize, len: usize, data: &[u8]) {
+    pub fn store_block(&mut self, begin: usize, len: usize, data: &[u8]) -> bool {
         if begin + len <= self.buffer.len() {
             let block_id = ((begin / len) as f32).floor() as u32;
             self.block_set.insert(block_id);
@@ -172,8 +172,11 @@ impl Piece {
             if self.downloaded_bytes as usize == self.buffer.len() {
                 self.status = RequestStatus::Received;
                 info!("The whole piece has been recieved");
+                // return something to indicate we need to notify bittorrent.rs about finished piece
+                return true;
             }
         }
+        false
     }
 
     pub fn verify_hash(&self) -> bool {

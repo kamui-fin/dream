@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::msg::InternalMessage;
 use crate::peer::{self, UnchokeMessage};
 use crate::tracker::{self, parse_torrent_file};
+use crate::utils::Notifier;
 use crate::{
     msg::{Message, MessageType},
     peer::{PeerManager, RemotePeer},
@@ -27,7 +28,7 @@ pub struct BitTorrent {
     peer_manager: Arc<Mutex<PeerManager>>,
 
     pub unchoke_rx: Receiver<UnchokeMessage>,
-    notify_pipelines_empty: Arc<Notify>,
+    notify_pipelines_empty: Arc<Notifier>,
 }
 
 impl BitTorrent {
@@ -43,7 +44,6 @@ impl BitTorrent {
         )?;
 
         info!("Tracker has found {} peers", peers.peers.len());
-        info!("Get Peers: {:#?}", peers);
 
         let piece_store = PieceStore::new(meta_file.clone());
         let info_hash = piece_store.meta_file.get_info_hash();
@@ -53,7 +53,7 @@ impl BitTorrent {
         // the channel for receiving messages from peer sessions
         let (msg_tx, msg_rx) = mpsc::channel(500);
 
-        let notify_pipelines_empty = Arc::new(Notify::new());
+        let notify_pipelines_empty = Arc::new(Notifier::new());
         let peer_ready_notify = Arc::new(Notify::new());
         let peer_manager = PeerManager::connect_peers(
             peers,
@@ -75,7 +75,10 @@ impl BitTorrent {
         let peer_manager = Arc::new(Mutex::new(peer_manager));
         let pm_clone = peer_manager.clone();
 
-        tokio::spawn(async move { Self::listen(msg_rx, pm_clone).await });
+        tokio::spawn(async move {
+            Self::listen(msg_rx, pm_clone).await;
+            warn!("DONE LISTENING??")
+        });
 
         peer_ready_notify.notified().await;
 
@@ -92,7 +95,6 @@ impl BitTorrent {
         mut msg_rx: Receiver<InternalMessage>,
         peer_manager: Arc<Mutex<PeerManager>>,
     ) {
-        info!("Beginning to listen for peer msgs");
         loop {
             let msg = msg_rx.recv().await;
             if let Some(InternalMessage {
@@ -102,9 +104,13 @@ impl BitTorrent {
             }) = &msg
             {
                 if *should_close {
-                    peer_manager.lock().await.remove_peer(conn_info);
+                    peer_manager.lock().await.remove_peer(conn_info).await;
                 } else {
-                    info!("Received msg {:#?} from peer {:#?}", msg, conn_info);
+                    info!(
+                        "Received msg {:?} from peer {:?}",
+                        msg.msg_type,
+                        conn_info.addr().ip()
+                    );
                     peer_manager.lock().await.handle_msg(&msg, conn_info).await;
                 }
             }
@@ -114,12 +120,11 @@ impl BitTorrent {
     pub async fn begin_download(&mut self, output_dir: &str) -> anyhow::Result<()> {
         let output_path = Path::new(output_dir);
         if !output_path.exists() {
-            info!("Creating output directory as it doesn't exist..");
             std::fs::create_dir(output_path)?;
         }
 
         let mut main_piece_queue = VecDeque::from(
-            (0usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
+            (800usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
         );
 
         info!(
@@ -152,8 +157,10 @@ impl BitTorrent {
             for candidate in &candidates {
                 let guard = self.peer_manager.lock().await;
                 let peer = guard.find_peer(candidate);
-                if !peer.peer_choking {
-                    candidates_unchoked.push(candidate);
+                if let Some(peer) = peer {
+                    if !peer.peer_choking {
+                        candidates_unchoked.push(candidate);
+                    }
                 }
             }
             info!(
@@ -187,7 +194,8 @@ impl BitTorrent {
                     }
                 }
             } else {
-                let blocks_per_peer = num_blocks / candidates_unchoked.len() as u32;
+                let blocks_per_peer =
+                    std::cmp::max(num_blocks / candidates_unchoked.len() as u32, 1);
                 info!(
                     "Distributed {} blocks per peer. Total # of blocks: {}",
                     blocks_per_peer, num_blocks
@@ -210,7 +218,7 @@ impl BitTorrent {
 
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
-            self.notify_pipelines_empty.notified().await;
+            self.notify_pipelines_empty.wait_for_notification().await;
             info!("Done waiting for piece DL");
 
             // verify hash & persist

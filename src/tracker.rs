@@ -178,11 +178,6 @@ pub fn get_peers_from_tracker(tracker_url: &str, body: TrackerRequest) -> Result
 
     let mut body = Vec::new();
     let res = request::get(get_url, &mut body)?;
-
-    info!("Status: {} {}", res.status_code(), res.reason());
-    info!("Headers: {}", res.headers());
-    info!("Body: {:?}", body);
-
     let res: TrackerResponse = serde_bencoded::from_bytes(&body)?;
     Ok(res)
 }
