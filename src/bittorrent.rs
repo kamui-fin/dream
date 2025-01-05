@@ -134,82 +134,82 @@ impl BitTorrent {
         while let Some(piece_idx) = main_piece_queue.pop_front() {
             let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
-            // check how many peers have this piece
-            let mut candidates = self
-                .peer_manager
-                .lock()
-                .await
-                .with_piece(piece_idx as u32)
-                .await;
-            info!("Found {} peers with piece {piece_idx}", candidates.len());
-            // send "interested" to all all of them
-            for candidate in candidates.iter_mut() {
-                self.peer_manager
-                    .lock()
-                    .await
-                    .show_interest_in_peer(candidate)
-                    .await;
-            }
-            // check if any have us unchoked
-            let mut candidates_unchoked = Vec::new();
-            for candidate in &candidates {
-                let guard = self.peer_manager.lock().await;
-                let peer = guard.find_peer(candidate);
-                if !peer.peer_choking {
-                    candidates_unchoked.push(candidate);
-                }
-            }
-            info!(
-                "{} matched candidates that haven't choked us",
-                candidates_unchoked.len()
-            );
-            if candidates_unchoked.is_empty() {
-                // if none, then wait on mpsc channel for them to unchoke us
-                info!("Waiting for peer to unchoke us");
-                loop {
-                    let unchoke_msg = self.unchoke_rx.recv().await;
-                    if let Some(UnchokeMessage { peer }) = unchoke_msg {
-                        if self
-                            .peer_manager
-                            .lock()
-                            .await
-                            .peer_has_piece(&peer, piece_idx as u32)
-                            .await
-                        {
-                            info!("Received unchoke msg from relevant peer {:#?}", peer);
-                            // let this peer download the whole piece for now, TODO optimize
-                            self.peer_manager
-                                .lock()
-                                .await
-                                .queue_blocks(&peer, piece_idx as u32, 0..num_blocks)
-                                .await;
-                            break;
-                        } else {
-                            info!("Received unchoke msg but peer does not have piece");
-                        }
-                    }
-                }
-            } else {
-                let blocks_per_peer = num_blocks / candidates_unchoked.len() as u32;
-                info!(
-                    "Distributed {} blocks per peer. Total # of blocks: {}",
-                    blocks_per_peer, num_blocks
-                );
+            // // check how many peers have this piece
+            // let mut candidates = self
+            //     .peer_manager
+            //     .lock()
+            //     .await
+            //     .with_piece(piece_idx as u32)
+            //     .await;
+            // info!("Found {} peers with piece {piece_idx}", candidates.len());
+            // // send "interested" to all all of them
+            // for candidate in candidates.iter_mut() {
+            //     self.peer_manager
+            //         .lock()
+            //         .await
+            //         .show_interest_in_peer(candidate)
+            //         .await;
+            // }
+            // // check if any have us unchoked
+            // let mut candidates_unchoked = Vec::new();
+            // for candidate in &candidates {
+            //     let guard = self.peer_manager.lock().await;
+            //     let peer = guard.find_peer(candidate);
+            //     if !peer.peer_choking {
+            //         candidates_unchoked.push(candidate);
+            //     }
+            // }
+            // info!(
+            //     "{} matched candidates that haven't choked us",
+            //     candidates_unchoked.len()
+            // );
+            // if candidates_unchoked.is_empty() {
+            //     // if none, then wait on mpsc channel for them to unchoke us
+            //     info!("Waiting for peer to unchoke us");
+            //     loop {
+            //         let unchoke_msg = self.unchoke_rx.recv().await;
+            //         if let Some(UnchokeMessage { peer }) = unchoke_msg {
+            //             if self
+            //                 .peer_manager
+            //                 .lock()
+            //                 .await
+            //                 .peer_has_piece(&peer, piece_idx as u32)
+            //                 .await
+            //             {
+            //                 info!("Received unchoke msg from relevant peer {:#?}", peer);
+            //                 // let this peer download the whole piece for now, TODO optimize
+            //                 self.peer_manager
+            //                     .lock()
+            //                     .await
+            //                     .queue_blocks(&peer, piece_idx as u32, 0..num_blocks)
+            //                     .await;
+            //                 break;
+            //             } else {
+            //                 info!("Received unchoke msg but peer does not have piece");
+            //             }
+            //         }
+            //     }
+            // } else {
+            //     let blocks_per_peer = num_blocks / candidates_unchoked.len() as u32;
+            //     info!(
+            //         "Distributed {} blocks per peer. Total # of blocks: {}",
+            //         blocks_per_peer, num_blocks
+            //     );
 
-                for (i, peer) in candidates_unchoked.iter().enumerate() {
-                    let start = i as u32 * blocks_per_peer;
-                    let end = if i == candidates_unchoked.len() - 1 {
-                        num_blocks
-                    } else {
-                        start + blocks_per_peer
-                    };
-                    self.peer_manager
-                        .lock()
-                        .await
-                        .queue_blocks(peer, piece_idx as u32, start..end)
-                        .await;
-                }
-            }
+            //     for (i, peer) in candidates_unchoked.iter().enumerate() {
+            //         let start = i as u32 * blocks_per_peer;
+            //         let end = if i == candidates_unchoked.len() - 1 {
+            //             num_blocks
+            //         } else {
+            //             start + blocks_per_peer
+            //         };
+            //         self.peer_manager
+            //             .lock()
+            //             .await
+            //             .queue_blocks(peer, piece_idx as u32, start..end)
+            //             .await;
+            //     }
+            // }
 
             // listen for responses here UNTIL we assemble the whole piece
             info!("Waiting for all peers to finish work");
@@ -237,9 +237,6 @@ impl BitTorrent {
 
         Ok(())
     }
-
-    
-    
 
     // pub async fn start_server(&mut self) -> anyhow::Result<()> {
     //     let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;

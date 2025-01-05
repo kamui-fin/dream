@@ -5,8 +5,8 @@ use futures::future::{self, join_all, Join, Remote};
 use futures::{SinkExt, StreamExt};
 use http_req::tls::Conn;
 use lazy_static::lazy_static;
-use log::{debug, trace};
 use log::warn;
+use log::{debug, trace};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
@@ -22,6 +22,7 @@ use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::D
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
+use tokio::time::{self, sleep};
 // use tokio::sync::{mpsc, Mutex, Notify};
 use tokio_util::codec::Framed;
 
@@ -322,7 +323,6 @@ pub struct UnchokeMessage {
 
 impl RemotePeer {
     fn from_peer(peer: ConnectionInfo, num_pieces: u32) -> Self {
-
         Self {
             conn_info: peer,
             piece_lookup: BitField::new(num_pieces),
@@ -777,4 +777,3 @@ impl PeerManager {
         }
     }
 }
- 
