@@ -1,6 +1,6 @@
 use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
 
-use std::fmt;
+use std::{fmt, io::Cursor};
 
 use crate::piece::Piece;
 use crate::utils::slice_to_u32_msb;
@@ -8,6 +8,7 @@ use std::fmt::{Display, Formatter};
 
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, BytesMut};
+use log::{error, info, trace};
 use tokio_util::codec::{Decoder, Encoder};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
@@ -100,44 +101,35 @@ impl Decoder for BitTorrentCodec {
     type Error = anyhow::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, anyhow::Error> {
-        if src.len() < 4 {
+        trace!("Decoder has {} byte(s) remaining", src.remaining());
+        if src.remaining() < 4 {
             return Ok(None);
         }
 
-        let mut len_bytes = [0u8; 4];
-        len_bytes.copy_from_slice(&src[0..4]);
-        let length = u32::from_be_bytes(len_bytes) as usize;
+        let mut tmp_buf = Cursor::new(&src);
+        let length = tmp_buf.get_u32() as usize;
 
-        if length == 0 {
-            // keep alive
+        tmp_buf.set_position(0);
+
+        if src.remaining() >= 4 + length {
             src.advance(4);
-            return Ok(Some(Message::new(None, vec![])));
-        }
 
-        if src.len() < 5 {
+            if length == 0 {
+                return Ok(Some(Message::new(None, vec![])));
+            }
+        } else {
             return Ok(None);
         }
 
-        if length > MAX_FRAME_SIZE - 4 {
-            return Err(anyhow!("Length is way too large"));
-        }
-
-        // Note: we're doing length + 4 because length is only the length of msg payload + 1 byte for id
-        if src.len() < length + 4 {
-            // need to wait for more packets before we get full payload
-            src.reserve(length + 4 - src.len());
-            return Ok(None);
-        }
-
-        let id = src[4].try_into()?;
+        let id = src.get_u8();
         let payload = if length > 1 {
-            src[5..4 + length].to_vec()
+            let mut data = vec![0u8; length - 1];
+            src.copy_to_slice(&mut data);
+            data
         } else {
             vec![]
         };
-
-        src.advance(4 + length);
-        let msg = Message::new(id, payload);
+        let msg = Message::new(Some(id), payload);
         Ok(Some(msg))
     }
 }
@@ -155,6 +147,8 @@ pub enum MessageType {
     Piece,
     Cancel,
     Port,
+    CloseConnection,
+    MigrateWork,
 }
 
 impl MessageType {
@@ -191,6 +185,8 @@ impl MessageType {
             Self::Cancel => 8,
             Self::Port => 9,
             Self::KeepAlive => 10,
+            Self::CloseConnection => 11,
+            Self::MigrateWork => 12,
         }
     }
 
@@ -201,6 +197,10 @@ impl MessageType {
             payload,
             len,
         }
+    }
+
+    pub fn build_empty(self) -> Message {
+        self.build_msg(vec![])
     }
 }
 
@@ -233,5 +233,4 @@ impl Message {
 pub struct InternalMessage {
     pub msg: Message,
     pub conn_info: ConnectionInfo,
-    pub should_close: bool,
 }

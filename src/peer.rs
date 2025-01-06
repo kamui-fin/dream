@@ -101,7 +101,7 @@ where
 
 struct RequestInfo;
 
-struct RequestTracker {
+pub struct RequestTracker {
     timeout_sender: mpsc::Sender<InternalMessage>,
     requests: Arc<std::sync::Mutex<HashMap<u32, RequestInfo>>>,
 }
@@ -116,6 +116,10 @@ impl RequestTracker {
 
     pub fn register_request(&self, block_id: u32, conn_info: ConnectionInfo) {
         self.requests.lock().unwrap().insert(block_id, RequestInfo);
+        info!(
+            "Registering request for block = {block_id} ({:x})",
+            block_id * BLOCK_SIZE
+        );
 
         let sender_clone = self.timeout_sender.clone();
 
@@ -130,12 +134,11 @@ impl RequestTracker {
                 .remove(&block_id)
                 .is_some()
             {
-                info!("Request timed out from peer: {:?}", conn_info);
+                info!("Request {} timed out from peer: {:?}", block_id, conn_info);
                 if sender_clone
                     .send(InternalMessage {
-                        msg: MessageType::KeepAlive.build_msg(vec![]),
+                        msg: MessageType::MigrateWork.build_empty(),
                         conn_info,
-                        should_close: true,
                     })
                     .await
                     .is_err()
@@ -153,6 +156,10 @@ impl RequestTracker {
         } else {
             warn!("Request not found: {}", block_id);
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.requests.lock().unwrap().clear();
     }
 }
 
@@ -218,51 +225,31 @@ impl PeerSession {
     pub async fn start_listening(&mut self, mut send_jobs: mpsc::Receiver<Message>) {
         loop {
             tokio::select! {
-                msg = self.framed.next() => {
+                Some(msg) = self.framed.next() => {
                     match msg {
-                        Some(msg) => match msg {
-                            Ok(msg) => {
-                                if msg.msg_type == MessageType::KeepAlive {
-                                    // handle keep alives
-                                } else {
-                                    let msg = InternalMessage {
-                                        msg,
-                                        conn_info: self.peer.clone(),
-                                        should_close: false,
-                                    };
-                                    let start = Instant::now();
-                                    self.forwarder.send(msg).await.unwrap();
-                                    let elapsed = start.elapsed();
-                                }
-                            }
-                            Err(e) => {
-                                // doesn't matter what msg
-                                error!(
-                                    "Encountered malformed data from peer {:#?}: {:#?}",
-                                    self.peer,
-                                    e
-                                );
-                                self.framed.close().await.unwrap();
-                                let close_msg = InternalMessage {
-                                    msg: MessageType::KeepAlive.build_msg(vec![]),
+                        Ok(msg) => {
+                            if msg.msg_type == MessageType::KeepAlive {
+                                continue;
+                            } else {
+                                let msg = InternalMessage {
+                                    msg,
                                     conn_info: self.peer.clone(),
-                                    should_close: true,
                                 };
-                                self.forwarder.send(close_msg).await.unwrap();
-                                return;
+                                self.forwarder.send(msg).await.unwrap();
                             }
                         }
-                        None => {
-                            error!("Stream has been exhausted (EOF) for peer {:?} ! Unrecoverable...", self.peer);
-                            self.framed.close().await.unwrap();
+                        Err(e) => {
+                            // doesn't matter what msg
+                            error!(
+                                "Encountered malformed data from peer {:#?}: {:#?}",
+                                self.peer,
+                                e
+                            );
+                            self.framed.close().await;
                             let close_msg = InternalMessage {
-                                msg: MessageType::KeepAlive.build_msg(vec![]),
+                                msg: MessageType::CloseConnection.build_empty(),
                                 conn_info: self.peer.clone(),
-                                should_close: true,
                             };
-                            if self.forwarder.is_closed() {
-                                error!("Forwarder channel is closed");
-                            }
                             self.forwarder.send(close_msg).await.unwrap();
                             return;
                         }
@@ -270,15 +257,17 @@ impl PeerSession {
                 }
                 Some(msg) = send_jobs.recv() => {
                     if let Err(_) = self.send_message(msg.clone()).await {
-                        let close_msg = InternalMessage { msg: MessageType::KeepAlive.build_msg(vec![]), conn_info: self.peer.clone(), should_close: true };
-                        self.framed.close().await.unwrap();
+                        let close_msg = InternalMessage {
+                            msg: MessageType::CloseConnection.build_empty(),
+                            conn_info: self.peer.clone(),
+                        };
                         self.forwarder.send(close_msg).await.unwrap();
                         return;
                     }
                 }
-                else => {
-                    break;
-                }
+                // else => {
+                //     break;
+                // }
             }
         }
     }
@@ -291,7 +280,7 @@ impl PeerSession {
             Err(e) => {
                 error!("Message send resulted in error: {:#?}", e);
                 info!("Closing connection to peer: {:#?}", self.peer);
-                self.framed.close().await.unwrap();
+                self.framed.close().await?;
                 Err(anyhow!(e))
             }
         }
@@ -308,8 +297,8 @@ pub struct RemotePeer {
 
     pub is_ready: bool,
 
-    pipeline: Vec<PipelineEntry>,
-    buffer: VecDeque<PipelineEntry>,
+    pub pipeline: Vec<PipelineEntry>,
+    pub buffer: VecDeque<PipelineEntry>,
 }
 
 impl fmt::Debug for RemotePeer {
@@ -365,7 +354,7 @@ pub struct PeerManager {
     notify_all_ready: Arc<Notify>,
     notify_pipelines_empty: Arc<Notifier>,
 
-    request_tracker: RequestTracker,
+    pub request_tracker: RequestTracker,
 }
 
 impl PeerManager {
@@ -575,8 +564,8 @@ impl PeerManager {
         payload.extend_from_slice(&block_size);
 
         info!(
-            "Sent a request for block {} of piece {}",
-            block_id, piece_id
+            "Sent a request for block {} of piece {} to peer {:?}",
+            block_id, piece_id, conn_info
         );
         let msg = MessageType::Request.build_msg(payload);
         self.send_channels[&conn_info.clone()]
@@ -603,38 +592,17 @@ impl PeerManager {
         }
     }
 
-    pub async fn remove_peer(&mut self, conn_info: &ConnectionInfo) {
-        let peer = self.find_peer(conn_info);
-        if let Some(peer) = peer {
-            error!(
-                "Removing peer {:#?} with pipeline: {:#?} and buffer: {:#?}",
-                conn_info, peer.pipeline, peer.buffer
-            );
-            if !peer.is_ready {
-                self.mark_peer_ready();
-            }
-        } else {
-            warn!("Peer {:#?} not found", conn_info);
-            return;
-        }
-
-        self.send_channels.remove(conn_info);
-
-        let index = self
-            .peers
-            .iter()
-            .position(|p| &p.conn_info == conn_info)
-            .unwrap();
-
-        let removed_peer = self.peers.swap_remove(index);
-        let mut work = removed_peer.buffer;
-        work.extend(removed_peer.pipeline);
-
+    pub async fn redistribute_work(
+        &mut self,
+        conn_info: &ConnectionInfo,
+        mut work: Vec<PipelineEntry>,
+    ) {
         if !work.is_empty() {
             let peers_with_piece: Vec<&mut RemotePeer> = self
                 .peers
                 .iter_mut()
                 .filter(|p| p.piece_lookup.piece_exists(work[0].piece_id))
+                .filter(|p| p.conn_info != *conn_info && !p.peer_choking)
                 .collect();
 
             if peers_with_piece.is_empty() {
@@ -671,6 +639,36 @@ impl PeerManager {
                 self.request_block(entry, &conn).await;
             }
         }
+    }
+
+    pub async fn remove_peer(&mut self, conn_info: &ConnectionInfo) {
+        let peer = self.find_peer(conn_info);
+        if let Some(peer) = peer {
+            error!(
+                "Removing peer {:#?} with pipeline: {:#?} and buffer: {:#?}",
+                conn_info, peer.pipeline, peer.buffer
+            );
+            if !peer.is_ready {
+                self.mark_peer_ready();
+            }
+        } else {
+            warn!("Peer {:#?} not found", conn_info);
+            return;
+        }
+
+        self.send_channels.remove(conn_info);
+
+        let index = self
+            .peers
+            .iter()
+            .position(|p| &p.conn_info == conn_info)
+            .unwrap();
+
+        let removed_peer = self.peers.swap_remove(index);
+        let mut work = removed_peer.pipeline;
+        work.extend(removed_peer.buffer);
+
+        self.redistribute_work(conn_info, work).await;
     }
 
     pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
@@ -844,6 +842,20 @@ impl PeerManager {
             MessageType::Port => {
                 // port that their dht node is listening on
                 // only for DHT extension
+            }
+            MessageType::CloseConnection => {
+                self.remove_peer(conn_info).await;
+            }
+            MessageType::MigrateWork => {
+                // pop all items from peer's pipeline and buffer
+                let work: Vec<PipelineEntry> = {
+                    let peer = self.find_peer_mut(conn_info).unwrap();
+                    let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
+                    work.extend(peer.buffer.drain(..));
+                    work
+                };
+                info!("Migrating work {:?}", work);
+                self.redistribute_work(conn_info, work).await;
             }
             _ => {
                 // let mut peer = self.find_peer_mut(conn_info);

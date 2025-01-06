@@ -20,7 +20,7 @@ const PORT: u16 = 6881;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
 
     let input_file = "debian.torrent";
     let output_dir = "output";

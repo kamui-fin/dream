@@ -10,7 +10,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, Notify};
 
 use crate::msg::InternalMessage;
-use crate::peer::{self, UnchokeMessage};
+use crate::peer::{self, PipelineEntry, UnchokeMessage};
 use crate::tracker::{self, parse_torrent_file};
 use crate::utils::Notifier;
 use crate::{
@@ -97,22 +97,13 @@ impl BitTorrent {
     ) {
         loop {
             let msg = msg_rx.recv().await;
-            if let Some(InternalMessage {
-                msg,
-                conn_info,
-                should_close,
-            }) = &msg
-            {
-                if *should_close {
-                    peer_manager.lock().await.remove_peer(conn_info).await;
-                } else {
-                    info!(
-                        "Received msg {:?} from peer {:?}",
-                        msg.msg_type,
-                        conn_info.addr().ip()
-                    );
-                    peer_manager.lock().await.handle_msg(&msg, conn_info).await;
-                }
+            if let Some(InternalMessage { msg, conn_info }) = &msg {
+                info!(
+                    "Received msg {:?} from peer {:?}",
+                    msg.msg_type,
+                    conn_info.addr().ip()
+                );
+                peer_manager.lock().await.handle_msg(&msg, conn_info).await;
             }
         }
     }
@@ -234,6 +225,8 @@ impl BitTorrent {
                 panic!();
                 main_piece_queue.push_front(piece_idx);
             }
+
+            self.peer_manager.lock().await.request_tracker.reset();
         }
 
         // collected all pieces, now simply concat files
