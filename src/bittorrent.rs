@@ -37,7 +37,6 @@ impl BitTorrent {
 
         let meta_file = parse_torrent_file(torrent_file)?;
         info!("Parsed metafile: {:#?}", meta_file);
-
         let peers = tracker::get_peers_from_tracker(
             &meta_file.announce,
             tracker::TrackerRequest::new(&meta_file),
@@ -51,7 +50,7 @@ impl BitTorrent {
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         // the channel for receiving messages from peer sessions
-        let (msg_tx, msg_rx) = mpsc::channel(500);
+        let (msg_tx, msg_rx) = mpsc::channel(2000);
 
         let notify_pipelines_empty = Arc::new(Notifier::new());
         let peer_ready_notify = Arc::new(Notify::new());
@@ -115,7 +114,7 @@ impl BitTorrent {
         }
 
         let mut main_piece_queue = VecDeque::from(
-            (800usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
+            (820usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
         );
 
         info!(
@@ -168,7 +167,7 @@ impl BitTorrent {
                             .peer_manager
                             .lock()
                             .await
-                            .peer_has_piece(&peer, piece_idx as u32)
+                            .peer_ready_for_piece(&peer, piece_idx as u32)
                             .await
                         {
                             info!("Received unchoke msg from relevant peer {:#?}", peer);
@@ -199,6 +198,10 @@ impl BitTorrent {
                     } else {
                         start + blocks_per_peer
                     };
+
+                    if end > num_blocks {
+                        break;
+                    }
                     self.peer_manager
                         .lock()
                         .await
