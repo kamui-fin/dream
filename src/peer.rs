@@ -129,7 +129,6 @@ impl RequestTracker {
 
         let requests_clone = self.requests.clone();
         tokio::spawn(async move {
-            let start_time = Instant::now();
             tokio::time::sleep(Duration::from_secs(15)).await;
 
             if requests_clone.lock().unwrap().remove(&entry).is_some() {
@@ -351,7 +350,6 @@ pub struct PeerManager {
     // channels
     send_channels: HashMap<ConnectionInfo, Sender<Message>>,
     msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
-    unchoke_tx: Sender<UnchokeMessage>,
 
     num_not_ready_peers: Arc<AtomicUsize>,
     notify_all_ready: Arc<Notify>,
@@ -367,7 +365,6 @@ impl PeerManager {
         piece_store: Arc<Mutex<PieceStore>>,
         info_hash: &[u8; 20],
         num_pieces: u32,
-        unchoke_tx: Sender<UnchokeMessage>,
         msg_tx: Sender<InternalMessage>,
         notify_all_ready: Arc<Notify>,
         notify_pipelines_empty: Arc<Notifier>,
@@ -414,7 +411,6 @@ impl PeerManager {
             peers,
             send_channels,
             msg_tx,
-            unchoke_tx,
             piece_store,
             notify_pipelines_empty,
             notify_all_ready,
@@ -713,13 +709,6 @@ impl PeerManager {
             MessageType::UnChoke => {
                 // peer has unchoked us
                 peer.peer_choking = false;
-
-                self.unchoke_tx
-                    .send(UnchokeMessage {
-                        peer: conn_info.clone(),
-                    })
-                    .await
-                    .unwrap();
 
                 info!("Peer {:?} has unchoked us", conn_info);
             }

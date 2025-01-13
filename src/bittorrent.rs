@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::join_all;
 use log::{debug, error, info, trace, warn};
@@ -8,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, Notify};
+use tokio::time::Instant;
 
 use crate::msg::InternalMessage;
 use crate::peer::{self, PipelineEntry, UnchokeMessage};
@@ -26,15 +28,11 @@ pub struct BitTorrent {
     meta_file: Metafile,
     piece_store: Arc<Mutex<PieceStore>>, // references meta_file
     peer_manager: Arc<Mutex<PeerManager>>,
-
-    pub unchoke_rx: Receiver<UnchokeMessage>,
     notify_pipelines_empty: Arc<Notifier>,
 }
 
 impl BitTorrent {
     pub async fn from_torrent_file(torrent_file: &str) -> anyhow::Result<Self> {
-        let (unchoke_tx, unchoke_rx) = tokio::sync::mpsc::channel(100);
-
         let meta_file = parse_torrent_file(torrent_file)?;
         info!("Parsed metafile: {:#?}", meta_file);
         let peers = tracker::get_peers_from_tracker(
@@ -59,7 +57,6 @@ impl BitTorrent {
             piece_store.clone(),
             &info_hash,
             num_pieces,
-            unchoke_tx,
             msg_tx,
             peer_ready_notify.clone(),
             notify_pipelines_empty.clone(),
@@ -85,7 +82,6 @@ impl BitTorrent {
             meta_file,
             piece_store,
             peer_manager,
-            unchoke_rx,
             notify_pipelines_empty,
         })
     }
@@ -102,7 +98,11 @@ impl BitTorrent {
                     msg.msg_type,
                     conn_info.addr().ip()
                 );
-                peer_manager.lock().await.handle_msg(&msg, conn_info).await;
+                let start = Instant::now();
+                trace!("Acquiring peer lock...");
+                let mut peer_guard = peer_manager.lock().await;
+                trace!("Got the lock in {:?}", start.elapsed());
+                peer_guard.handle_msg(&msg, conn_info).await;
             }
         }
     }
@@ -114,7 +114,7 @@ impl BitTorrent {
         }
 
         let mut main_piece_queue = VecDeque::from(
-            (820usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
+            (0usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
         );
 
         info!(
@@ -124,6 +124,7 @@ impl BitTorrent {
 
         // request each piece sequentially for now (sensible for streaming but could use optimization)
         while let Some(piece_idx) = main_piece_queue.pop_front() {
+            let start = Instant::now();
             let piece_size = self.meta_file.get_piece_len(piece_idx);
             let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
             // check how many peers have this piece
@@ -157,57 +158,34 @@ impl BitTorrent {
                 "{} matched candidates that haven't choked us",
                 candidates_unchoked.len()
             );
-            if candidates_unchoked.is_empty() {
+            while candidates_unchoked.is_empty() {
                 // if none, then wait on mpsc channel for them to unchoke us
                 info!("Waiting for peer to unchoke us");
-                loop {
-                    let unchoke_msg = self.unchoke_rx.recv().await;
-                    if let Some(UnchokeMessage { peer }) = unchoke_msg {
-                        if self
-                            .peer_manager
-                            .lock()
-                            .await
-                            .peer_ready_for_piece(&peer, piece_idx as u32)
-                            .await
-                        {
-                            info!("Received unchoke msg from relevant peer {:#?}", peer);
-                            // let this peer download the whole piece for now, TODO optimize
-                            self.peer_manager
-                                .lock()
-                                .await
-                                .queue_blocks(&peer, piece_idx as u32, 0..num_blocks)
-                                .await;
-                            break;
-                        } else {
-                            info!("Received unchoke msg but peer does not have piece");
-                        }
-                    }
-                }
-            } else {
-                let blocks_per_peer =
-                    std::cmp::max(num_blocks / candidates_unchoked.len() as u32, 1);
-                info!(
-                    "Distributed {} blocks per peer. Total # of blocks: {}",
-                    blocks_per_peer, num_blocks
-                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
 
-                for (i, peer) in candidates_unchoked.iter().enumerate() {
-                    let start = i as u32 * blocks_per_peer;
-                    let end = if i == candidates_unchoked.len() - 1 {
-                        num_blocks
-                    } else {
-                        start + blocks_per_peer
-                    };
+            let blocks_per_peer = std::cmp::max(num_blocks / candidates_unchoked.len() as u32, 1);
+            info!(
+                "Distributed {} blocks per peer. Total # of blocks: {}",
+                blocks_per_peer, num_blocks
+            );
 
-                    if end > num_blocks {
-                        break;
-                    }
-                    self.peer_manager
-                        .lock()
-                        .await
-                        .queue_blocks(peer, piece_idx as u32, start..end)
-                        .await;
+            for (i, peer) in candidates_unchoked.iter().enumerate() {
+                let start = i as u32 * blocks_per_peer;
+                let end = if i == candidates_unchoked.len() - 1 {
+                    num_blocks
+                } else {
+                    start + blocks_per_peer
+                };
+
+                if end > num_blocks {
+                    break;
                 }
+                self.peer_manager
+                    .lock()
+                    .await
+                    .queue_blocks(peer, piece_idx as u32, start..end)
+                    .await;
             }
 
             // listen for responses here UNTIL we assemble the whole piece
@@ -226,10 +204,15 @@ impl BitTorrent {
                 // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
                 error!("Piece {piece_idx} hash mismatch!!");
                 panic!();
-                main_piece_queue.push_front(piece_idx);
+                // main_piece_queue.push_front(piece_idx);
             }
 
             self.peer_manager.lock().await.request_tracker.reset();
+
+            println!(
+                "Piece {piece_idx} successfully downloaded in {:?}",
+                start.elapsed()
+            );
         }
 
         // collected all pieces, now simply concat files
