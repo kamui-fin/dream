@@ -222,41 +222,19 @@ impl BitTorrent {
         Ok(())
     }
 
-    // pub async fn start_server(&mut self) -> anyhow::Result<()> {
-    //     let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
+    pub async fn start_server(&mut self) -> anyhow::Result<()> {
+        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
-    //     loop {
-    //         let (mut socket, addr) = listener.accept().await?;
-    //         let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
-    //         let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
+        loop {
+            let (mut socket, addr) = listener.accept().await?;
+            let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
+            let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
 
-    //         let mut pm_guard = self.peer_manager.lock().await;
-    //         let peer = pm_guard.find_or_create(addr, num_pieces, info_hash).await;
+            let mut pm_guard = self.peer_manager.lock().await;
+            let peer = pm_guard.find_or_create(addr, num_pieces).await;
 
-    //         info!("New connection from {:?}", peer.conn_info);
-
-    //         tokio::spawn(async move {
-    //             let mut buf = [0; 2028];
-
-    //             loop {
-    //                 match socket.read(&mut buf).await {
-    //                     Ok(0) => {
-    //                         warn!("Connection closed by {:?}", addr);
-    //                         break;
-    //                     }
-    //                     Ok(_) => {
-    //                         let bt_msg = Message::parse(&buf);
-    //                         info!("Received msg: {:#?}", bt_msg);
-
-    //                         // self.handle_msg(bt_msg, &mut peer).await;
-    //                     }
-    //                     Err(e) => {
-    //                         println!("Failed to read from socket; err = {:?}", e);
-    //                         break;
-    //                     }
-    //                 }
-    //             }
-    //         });
-    //     }
-    // }
+            info!("New connection from {:?}", peer.conn_info);
+            pm_guard.init_session(socket, peer.conn_info, info_hash);
+        }
+    }
 }
