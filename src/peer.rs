@@ -11,6 +11,7 @@ use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use sha1::digest::typenum::Bit;
+use std::alloc::System;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex, Notify};
-use tokio::time::Instant;
+use tokio::time::{self, Instant};
 use tokio_util::codec::Framed;
 
 use log::{error, info};
@@ -163,6 +164,33 @@ impl RequestTracker {
     }
 }
 
+pub struct PeerStats{
+    pub curr_avg_download_speed: f32,
+    pub curr_num_downloaded: f32,
+
+    pub avg_download_speed: f32,
+}
+
+impl PeerStats{
+    pub fn init_stats() -> Self {
+        return Self { 
+            curr_avg_download_speed: 0.0, 
+            curr_num_downloaded: 0.0, 
+            avg_download_speed: 0.0 
+        }
+    }
+
+    pub fn add_new_speed(&mut self, new_speed: f32){
+        self.curr_avg_download_speed = ((self.curr_avg_download_speed * self.curr_num_downloaded) + new_speed) / self.curr_num_downloaded;
+        self.curr_num_downloaded += 1.0;
+    }
+
+    pub fn update_overalls(&mut self){
+        self.avg_download_speed = (0.125 * self.avg_download_speed) + self.curr_avg_download_speed;
+        self.curr_avg_download_speed = 0.0;
+    }
+}
+
 struct PeerSession {
     // pertaining to connection
     // conn: Arc<Mutex<TcpStream>>,
@@ -170,6 +198,8 @@ struct PeerSession {
     framed: Framed<TcpStream, BitTorrentCodec>,
     forwarder: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
+    stats: PeerStats,
+    request_tracker: HashMap<PipelineEntry, Instant>
 }
 
 impl PeerSession {
@@ -184,6 +214,8 @@ impl PeerSession {
             framed,
             forwarder,
             peer,
+            stats: PeerStats::init_stats(),
+            request_tracker: HashMap::new()
         })
     }
 
@@ -222,14 +254,42 @@ impl PeerSession {
         }
     }
 
-    pub async fn start_listening(&mut self, mut send_jobs: mpsc::Receiver<Message>) {
+    pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry{
+        let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+        let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+        let block_id =
+            ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+
+        return PipelineEntry{
+            piece_id: piece_idx, 
+            block_id: block_id
+        };
+    }
+
+    pub async fn start_listening(&mut self, mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>) {
+        let stats_update_timer = time::sleep(Duration::from_secs(5));
+        tokio::pin!(stats_update_timer);
+
         loop {
             tokio::select! {
+                _ = &mut stats_update_timer => {
+                    info!("Updating stats for peer: {:#?}", self.peer);
+                    self.stats.update_overalls();
+
+                    stats_update_timer.as_mut().reset(Instant::now() + Duration::from_secs(5));
+                }
                 Some(msg) = self.framed.next() => {
                     match msg {
                         Ok(msg) => {
                             if msg.msg_type == MessageType::KeepAlive {
                                 continue;
+                            } else if msg.msg_type == MessageType::Piece {
+                                let corresponding_entry = Self::get_pipeline_entry(msg);
+                                let new_speed = Instant::now() - self.request_tracker[&corresponding_entry];
+
+                                self.stats.add_new_speed(new_speed.as_secs_f32());
+                                self.request_tracker.remove(&corresponding_entry);
+                                info!("Block came in with speed {:#?}", new_speed);
                             } else {
                                 let msg = InternalMessage {
                                     msg,
@@ -256,7 +316,7 @@ impl PeerSession {
                     }
                 }
                 Some(msg) = send_jobs.recv() => {
-                    if let Err(_) = self.send_message(msg.clone()).await {
+                    if let Err(_) = self.send_message(msg.0.clone(), msg.1).await {
                         let close_msg = InternalMessage {
                             msg: MessageType::CloseConnection.build_empty(),
                             conn_info: self.peer.clone(),
@@ -272,7 +332,12 @@ impl PeerSession {
         }
     }
 
-    pub async fn send_message(&mut self, msg: Message) -> anyhow::Result<()> {
+    pub async fn send_message(&mut self, msg: Message, request_entry: Option<PipelineEntry>) -> anyhow::Result<()> {
+
+        if let Some(entry) = request_entry {
+            self.request_tracker.insert(entry, Instant::now());
+        }
+
         let result = self.framed.send(msg).await;
 
         match result {
@@ -315,7 +380,7 @@ impl fmt::Debug for RemotePeer {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct PipelineEntry {
     piece_id: u32,
     block_id: u32,
@@ -337,7 +402,7 @@ impl RemotePeer {
             pipeline: Vec::new(),
             buffer: VecDeque::new(),
             is_ready: false,
-        }
+        } 
     }
 }
 
@@ -346,7 +411,7 @@ pub struct PeerManager {
     piece_store: Arc<Mutex<PieceStore>>,
 
     // channels
-    send_channels: HashMap<ConnectionInfo, Sender<Message>>,
+    send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
     msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
     unchoke_tx: Sender<UnchokeMessage>,
 
@@ -370,7 +435,7 @@ impl PeerManager {
         notify_pipelines_empty: Arc<Notifier>,
     ) -> PeerManager {
         let request_tracker = RequestTracker::new(msg_tx.clone());
-        let mut send_channels: HashMap<ConnectionInfo, Sender<Message>> = HashMap::new();
+        let mut send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>> = HashMap::new();
 
         let peers: Vec<_> = peers_response
             .peers
@@ -536,7 +601,7 @@ impl PeerManager {
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-        if let Err(_) = self.send_channels[conn_info].send(msg).await {
+        if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
             error!("Lost connection to peer {:#?}", conn_info);
             self.remove_peer(conn_info).await;
         }
@@ -569,7 +634,7 @@ impl PeerManager {
         );
         let msg = MessageType::Request.build_msg(payload);
         self.send_channels[&conn_info.clone()]
-            .send(msg)
+            .send((msg, Some(entry)))
             .await
             .unwrap();
 
@@ -781,7 +846,7 @@ impl PeerManager {
                     info!("Payload in response to request ready to send");
 
                     self.send_channels[&conn_info.clone()]
-                        .send(MessageType::Piece.build_msg(pay_load))
+                        .send((MessageType::Piece.build_msg(pay_load), None))
                         .await
                         .unwrap();
                 } else if peer.am_choking {
