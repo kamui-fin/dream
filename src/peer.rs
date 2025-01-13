@@ -255,14 +255,14 @@ impl PeerSession {
     }
 
     pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry{
-        let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
+        let piece_id = slice_to_u32_msb(&bt_msg.payload[0..4]);
         let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
         let block_id =
             ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
 
         return PipelineEntry{
-            piece_id: piece_idx, 
-            block_id: block_id
+            piece_id,
+            block_id
         };
     }
 
@@ -283,14 +283,15 @@ impl PeerSession {
                         Ok(msg) => {
                             if msg.msg_type == MessageType::KeepAlive {
                                 continue;
-                            } else if msg.msg_type == MessageType::Piece {
-                                let corresponding_entry = Self::get_pipeline_entry(msg);
-                                let new_speed = Instant::now() - self.request_tracker[&corresponding_entry];
-
-                                self.stats.add_new_speed(new_speed.as_secs_f32());
-                                self.request_tracker.remove(&corresponding_entry);
-                                info!("Block came in with speed {:#?}", new_speed);
                             } else {
+                                if msg.msg_type == MessageType::Piece {
+                                    let corresponding_entry = Self::get_pipeline_entry(msg.clone());
+                                    let new_speed = Instant::now() - self.request_tracker[&corresponding_entry];
+    
+                                    self.stats.add_new_speed(new_speed.as_secs_f32());
+                                    self.request_tracker.remove(&corresponding_entry);
+                                    info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
+                                }
                                 let msg = InternalMessage {
                                     msg,
                                     conn_info: self.peer.clone(),
