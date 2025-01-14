@@ -190,19 +190,21 @@ impl PeerSession {
         forwarder: mpsc::Sender<InternalMessage>,
         peer: ConnectionInfo,
         info_hash: &[u8; 20],
+        bitfield: BitField,
     ) -> anyhow::Result<Self> {
-        // wait for handshake here
-        let mut res = [0u8; 68];
-        // add timeout on this
-        conn.read_exact(&mut res).await?;
-
-        assert_eq!(res[0], 19);
-        assert_eq!(&res[1..20], b"BitTorrent protocol");
-        assert_eq!(&res[28..48], info_hash);
-
         // respond back with handshake
+        let mut handshake = [0u8; 68];
+        handshake[0] = 19;
+        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
+        handshake[28..48].copy_from_slice(info_hash);
+        handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
+        conn.write_all(&handshake).await?;
 
-        let framed = Framed::new(conn, BitTorrentCodec);
+        let mut framed = Framed::new(conn, BitTorrentCodec);
+        // send bitfield
+        let bitfield_msg = MessageType::Bitfield.build_msg(bitfield.0);
+        framed.send(bitfield_msg).await;
+
         Ok(Self {
             framed,
             forwarder,
@@ -471,30 +473,24 @@ impl PeerManager {
         conn_info: ConnectionInfo,
         info_hash: [u8; 20],
     ) {
+        let bitfield = self.piece_store.lock().await.get_status_bitfield().clone();
+
         let tx_clone = self.msg_tx.clone();
-
-        let not_ready_peers_clone = Arc::clone(&self.num_not_ready_peers);
-        let notify_all_ready_clone = self.notify_all_ready.clone();
-
         // the channel for sending messages to this peer session
         let (send_msg, recv_msg) = mpsc::channel(2000);
         self.send_channels.insert(conn_info.clone(), send_msg);
 
         tokio::spawn(async move {
-            let session = PeerSession::from_session(stream, tx_clone, conn_info, info_hash).await;
+            let session =
+                PeerSession::from_session(stream, tx_clone, conn_info, &info_hash, bitfield).await;
             if let Ok(mut session) = session {
                 session.start_listening(recv_msg).await;
-            } else {
-                let old = not_ready_peers_clone.fetch_sub(1, Ordering::SeqCst);
-                info!("Counter: {}", old - 1);
-                if not_ready_peers_clone.load(Ordering::SeqCst) <= 5 {
-                    notify_all_ready_clone.notify_one();
-                }
             }
         });
     }
 
-    pub async fn find_or_create(&mut self, addr: SocketAddr, num_pieces: u32) -> &RemotePeer {
+    pub async fn find_or_create(&mut self, addr: SocketAddr) -> &RemotePeer {
+        let num_pieces = self.piece_store.lock().await.num_pieces;
         if !self.peers.iter().any(|p| p.conn_info.addr() == addr) {
             let new_peer = RemotePeer::from_peer(ConnectionInfo::from_addr(addr), num_pieces);
             self.peers.push(new_peer);

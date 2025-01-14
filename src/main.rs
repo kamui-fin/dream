@@ -8,7 +8,7 @@ mod utils;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bittorrent::BitTorrent;
+use bittorrent::{BitTorrent, Engine};
 use log::info;
 use msg::InternalMessage;
 use tokio::sync::{
@@ -25,14 +25,11 @@ async fn main() -> Result<()> {
     let input_file = "debian.torrent";
     let output_dir = "output";
 
-    let client = Arc::new(Mutex::new(BitTorrent::from_torrent_file(input_file).await?));
+    let mut engine = Engine::new();
 
-    // let client_clone = client.clone();
-    // tokio::spawn(async move {
-    //     client_clone.lock().await.start_server().await.unwrap();
-    // });
+    engine.add_torrent(input_file).await?;
 
-    client.lock().await.begin_download(output_dir).await?;
+    engine.start_server().await?;
 
     Ok(())
 }

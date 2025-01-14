@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +32,7 @@ pub struct BitTorrent {
 }
 
 impl BitTorrent {
-    pub async fn from_torrent_file(torrent_file: &str) -> anyhow::Result<Self> {
-        let meta_file = parse_torrent_file(torrent_file)?;
+    pub async fn from_torrent_file(meta_file: Metafile) -> anyhow::Result<Self> {
         info!("Parsed metafile: {:#?}", meta_file);
         let peers = tracker::get_peers_from_tracker(
             &meta_file.announce,
@@ -52,6 +51,7 @@ impl BitTorrent {
 
         let notify_pipelines_empty = Arc::new(Notifier::new());
         let peer_ready_notify = Arc::new(Notify::new());
+
         let peer_manager = PeerManager::connect_peers(
             peers,
             piece_store.clone(),
@@ -73,7 +73,6 @@ impl BitTorrent {
 
         tokio::spawn(async move {
             Self::listen(msg_rx, pm_clone).await;
-            warn!("DONE LISTENING??")
         });
 
         peer_ready_notify.notified().await;
@@ -221,20 +220,60 @@ impl BitTorrent {
 
         Ok(())
     }
+}
+
+pub struct Engine {
+    // map info hash to bittorrent struct
+    torrents: HashMap<[u8; 20], Arc<Mutex<BitTorrent>>>,
+}
+
+// TODO: be able to create a torrent from video file
+
+impl Engine {
+    pub fn new() -> Self {
+        Self {
+            torrents: HashMap::new(),
+        }
+    }
+
+    pub async fn add_torrent(&mut self, input_path: &str) -> anyhow::Result<()> {
+        let meta_file = parse_torrent_file(input_path)?;
+        let info_hash = meta_file.get_info_hash();
+        let bt = BitTorrent::from_torrent_file(meta_file).await?;
+        let bt = Arc::new(Mutex::new(bt));
+
+        self.torrents.insert(info_hash, bt);
+
+        Ok(())
+    }
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
+        info!("Listening on inbound server...");
         let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
         loop {
             let (mut socket, addr) = listener.accept().await?;
-            let info_hash = self.piece_store.lock().await.meta_file.get_info_hash();
-            let num_pieces = self.piece_store.lock().await.meta_file.get_num_pieces();
+            // figure out which info hash they want
+            // wait for handshake here
+            let mut res = [0u8; 68];
+            // add timeout on this
+            socket.read_exact(&mut res).await?;
 
-            let mut pm_guard = self.peer_manager.lock().await;
-            let peer = pm_guard.find_or_create(addr, num_pieces).await;
+            assert_eq!(res[0], 19);
+            assert_eq!(&res[1..20], b"BitTorrent protocol");
 
-            info!("New connection from {:?}", peer.conn_info);
-            pm_guard.init_session(socket, peer.conn_info, info_hash);
+            let info_hash: [u8; 20] = res[28..48].try_into().unwrap();
+            let bittorrent = self.torrents.get(&info_hash);
+
+            if let Some(bittorrent) = bittorrent {
+                let bittorrent = bittorrent.lock().await;
+                let mut pm_guard = bittorrent.peer_manager.lock().await;
+                let peer = pm_guard.find_or_create(addr).await.conn_info.clone();
+                info!("New connection from {:?}", peer);
+                pm_guard.init_session(socket, peer, info_hash).await;
+            } else {
+                // if not serving, connection reset
+            }
         }
     }
 }

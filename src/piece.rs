@@ -11,7 +11,7 @@ use crate::{tracker::Metafile, utils::hash_obj};
 
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BitField(pub Vec<u8>);
 
 impl BitField {
