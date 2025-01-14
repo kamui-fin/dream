@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, Notify};
-use tokio::time::Instant;
+use tokio::time::{sleep, Instant};
 
 use crate::msg::{InternalMessage, ServerCommand};
 use crate::peer::{self, ConnectionInfo, PipelineEntry, UnchokeMessage};
@@ -24,7 +24,7 @@ use crate::{
 };
 use crate::{piece, PORT};
 
-enum TorrentState {
+pub enum TorrentState {
     Seeder,
     Leecher,
 }
@@ -75,25 +75,48 @@ impl BitTorrent {
 
         let peer_manager = Arc::new(Mutex::new(peer_manager));
 
-        let pm_clone = peer_manager.clone();
-        let pt_clone = piece_store.clone();
-
+        let pm_clone_10s = peer_manager.clone();
+        let pt_clone_10s = piece_store.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(60 * 30)).await; // sleep 30 minutes
+            loop {
+                pm_clone_10s
+                    .lock()
+                    .await
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
 
-            let pt_lock = pt_clone.lock().await;
-            let peers = tracker::get_peers_from_tracker(
-                &pt_lock.meta_file.announce,
-                tracker::TrackerRequest::new(&pt_lock.meta_file),
-            );
+                sleep(Duration::from_secs(10)).await;
+            }
+        });
 
-            if let Ok(peers) = peers {
-                pm_clone.lock().await.sync_peers(peers);
+        let pm_clone_30s = peer_manager.clone();
+        tokio::spawn(async move {
+            loop {
+                pm_clone_30s.lock().await.optimistic_unchoke();
+
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+
+        let pm_clone_30m = peer_manager.clone();
+        let pt_clone_30m = piece_store.clone();
+        tokio::spawn(async move {
+            loop {
+                let pt_lock = pt_clone_30m.lock().await;
+                let peers = tracker::get_peers_from_tracker(
+                    &pt_lock.meta_file.announce,
+                    tracker::TrackerRequest::new(&pt_lock.meta_file),
+                );
+
+                if let Ok(peers) = peers {
+                    pm_clone_30m.lock().await.sync_peers(peers);
+                }
+
+                // Sleep for 30 minutes
+                sleep(Duration::from_secs(30 * 60)).await;
             }
         });
 
         let pm_clone = peer_manager.clone();
-
         tokio::spawn(async move {
             Self::listen(msg_rx, pm_clone).await;
         });
@@ -108,14 +131,8 @@ impl BitTorrent {
         })
     }
 
-    pub async fn get_torrent_state(&self) -> TorrentState {
-        if self
-            .piece_store
-            .lock()
-            .await
-            .get_status_bitfield()
-            .has_all()
-        {
+    pub async fn get_torrent_state(piece_store: Arc<Mutex<PieceStore>>) -> TorrentState {
+        if piece_store.lock().await.get_status_bitfield().has_all() {
             TorrentState::Seeder
         } else {
             TorrentState::Leecher

@@ -31,7 +31,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::bittorrent::BitTorrent;
+use crate::bittorrent::{BitTorrent, TorrentState};
 use crate::msg::{BitTorrentCodec, InternalMessage};
 use crate::piece::PieceStore;
 use crate::tracker::TrackerResponse;
@@ -323,6 +323,7 @@ pub struct RemotePeer {
     pub am_interested: bool,   // = 0
     pub peer_choking: bool,    // has this peer choked us? = 1
     pub peer_interested: bool, // is this peer interested in us? = 0
+    pub optimistic_unchoke: bool,
 
     pub is_ready: bool,
 
@@ -366,6 +367,7 @@ impl RemotePeer {
             pipeline: Vec::new(),
             buffer: VecDeque::new(),
             is_ready: false,
+            optimistic_unchoke: false,
         }
     }
 }
@@ -737,17 +739,35 @@ impl PeerManager {
         self.redistribute_work(conn_info, work).await;
     }
 
-    pub async fn setup_choke_algorithm(&mut self) {
-        // - create timer for choke algorithm:
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-            //     - every 10s determine new unchoke list
-            //         - sort peers by DL speed avg of last 20 seconds and pick best 4
-            //         - choke everyone else
-
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            //     - every 30s evaluate current optimistic unchoke and perform new one
+    pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
+        //     - every 10s determine new unchoke list
+        //         - sort peers by DL speed avg of last 20 seconds and pick best 4
+        //         - choke everyone else
+        self.peers.sort_by_key(|p| match torrent_state {
+            TorrentState::Seeder => p.stats.avg_download_speed,
+            TorrentState::Leecher => p.stats.avg_upload_speed,
         });
+        self.peers.reverse();
+
+        // make sure to not include optimistic unchoked peer
+
+        let top_four = &self.peers[0..4];
+        for peer in top_four {
+            self.unchoke_peer(peer.conn_info);
+        }
+
+        for peer in &self.peers[4..(self.peers.len())] {
+            self.choke(peer.conn_info);
+        }
+    }
+
+    pub async fn optimistic_unchoke(&mut self) {
+        let mut rng = rand::thread_rng();
+        let random_index = rng.gen_range(4..(self.peers.len()));
+        let random_peer = &self.peers[random_index];
+        self.unchoke_peer(random_peer.conn_info);
+
+        random_peer.optimistic_unchoke = true;
     }
 
     pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
