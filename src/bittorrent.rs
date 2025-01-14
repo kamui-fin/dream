@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
 
-use crate::msg::InternalMessage;
-use crate::peer::{self, PipelineEntry, UnchokeMessage};
+use crate::msg::{InternalMessage, ServerCommand};
+use crate::peer::{self, ConnectionInfo, PipelineEntry, UnchokeMessage};
 use crate::tracker::{self, parse_torrent_file};
 use crate::utils::Notifier;
 use crate::{
@@ -24,6 +24,11 @@ use crate::{
 };
 use crate::{piece, PORT};
 
+enum TorrentState {
+    Seeder,
+    Leecher,
+}
+
 pub struct BitTorrent {
     meta_file: Metafile,
     piece_store: Arc<Mutex<PieceStore>>, // references meta_file
@@ -32,7 +37,7 @@ pub struct BitTorrent {
 }
 
 impl BitTorrent {
-    pub async fn from_torrent_file(meta_file: Metafile) -> anyhow::Result<Self> {
+    pub async fn from_torrent_file(meta_file: Metafile, output_dir: &str) -> anyhow::Result<Self> {
         info!("Parsed metafile: {:#?}", meta_file);
         let peers = tracker::get_peers_from_tracker(
             &meta_file.announce,
@@ -41,7 +46,7 @@ impl BitTorrent {
 
         info!("Tracker has found {} peers", peers.peers.len());
 
-        let piece_store = PieceStore::new(meta_file.clone());
+        let piece_store = PieceStore::new(meta_file.clone(), PathBuf::from(output_dir));
         let info_hash = piece_store.meta_file.get_info_hash();
         let num_pieces = piece_store.meta_file.get_num_pieces();
         let piece_store = Arc::new(Mutex::new(piece_store));
@@ -69,6 +74,24 @@ impl BitTorrent {
         );
 
         let peer_manager = Arc::new(Mutex::new(peer_manager));
+
+        let pm_clone = peer_manager.clone();
+        let pt_clone = piece_store.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60 * 30)).await; // sleep 30 minutes
+
+            let pt_lock = pt_clone.lock().await;
+            let peers = tracker::get_peers_from_tracker(
+                &pt_lock.meta_file.announce,
+                tracker::TrackerRequest::new(&pt_lock.meta_file),
+            );
+
+            if let Ok(peers) = peers {
+                pm_clone.lock().await.sync_peers(peers);
+            }
+        });
+
         let pm_clone = peer_manager.clone();
 
         tokio::spawn(async move {
@@ -83,6 +106,20 @@ impl BitTorrent {
             peer_manager,
             notify_pipelines_empty,
         })
+    }
+
+    pub async fn get_torrent_state(&self) -> TorrentState {
+        if self
+            .piece_store
+            .lock()
+            .await
+            .get_status_bitfield()
+            .has_all()
+        {
+            TorrentState::Seeder
+        } else {
+            TorrentState::Leecher
+        }
     }
 
     pub async fn listen(
@@ -106,15 +143,9 @@ impl BitTorrent {
         }
     }
 
-    pub async fn begin_download(&mut self, output_dir: &str) -> anyhow::Result<()> {
-        let output_path = Path::new(output_dir);
-        if !output_path.exists() {
-            std::fs::create_dir(output_path)?;
-        }
-
-        let mut main_piece_queue = VecDeque::from(
-            (0usize..(self.piece_store.lock().await.num_pieces as usize)).collect::<Vec<usize>>(),
-        );
+    pub async fn begin_download(&mut self) -> anyhow::Result<()> {
+        let mut main_piece_queue =
+            VecDeque::from(self.piece_store.lock().await.get_missing_pieces());
 
         info!(
             "Started downloaded queue for {} pieces",
@@ -197,7 +228,7 @@ impl BitTorrent {
             let piece = &store.pieces[piece_idx as usize];
             if piece.verify_hash() {
                 info!("Hash verified");
-                store.persist(piece_idx, output_path)?;
+                store.persist(piece_idx)?;
                 store.reset_piece(piece_idx);
             } else {
                 // if invalid hash, then put entry back on pipeline and flush again, if failed twice, then panic??
@@ -207,6 +238,11 @@ impl BitTorrent {
             }
 
             self.peer_manager.lock().await.request_tracker.reset();
+            self.peer_manager
+                .lock()
+                .await
+                .broadcast_have(piece_idx as u32)
+                .await;
 
             println!(
                 "Piece {piece_idx} successfully downloaded in {:?}",
@@ -216,7 +252,7 @@ impl BitTorrent {
 
         // collected all pieces, now simply concat files
         info!("Concatenating all pieces");
-        self.piece_store.lock().await.concat(output_path)?;
+        self.piece_store.lock().await.concat()?;
 
         Ok(())
     }
@@ -225,21 +261,24 @@ impl BitTorrent {
 pub struct Engine {
     // map info hash to bittorrent struct
     torrents: HashMap<[u8; 20], Arc<Mutex<BitTorrent>>>,
+    // listen for commands like AddTorrent
+    command_rx: mpsc::Receiver<ServerCommand>,
 }
 
 // TODO: be able to create a torrent from video file
 
 impl Engine {
-    pub fn new() -> Self {
+    pub fn new(command_rx: mpsc::Receiver<ServerCommand>) -> Self {
         Self {
             torrents: HashMap::new(),
+            command_rx,
         }
     }
 
-    pub async fn add_torrent(&mut self, input_path: &str) -> anyhow::Result<()> {
+    pub async fn add_torrent(&mut self, input_path: &str, output_dir: &str) -> anyhow::Result<()> {
         let meta_file = parse_torrent_file(input_path)?;
         let info_hash = meta_file.get_info_hash();
-        let bt = BitTorrent::from_torrent_file(meta_file).await?;
+        let bt = BitTorrent::from_torrent_file(meta_file, output_dir).await?;
         let bt = Arc::new(Mutex::new(bt));
 
         self.torrents.insert(info_hash, bt);
@@ -252,27 +291,44 @@ impl Engine {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
 
         loop {
-            let (mut socket, addr) = listener.accept().await?;
-            // figure out which info hash they want
-            // wait for handshake here
-            let mut res = [0u8; 68];
-            // add timeout on this
-            socket.read_exact(&mut res).await?;
+            tokio::select! {
+                // Handle new TCP connections
+                Ok((mut socket, addr)) = listener.accept() => {
+                    let peer = ConnectionInfo::from_addr(addr);
 
-            assert_eq!(res[0], 19);
-            assert_eq!(&res[1..20], b"BitTorrent protocol");
+                    // Handle handshake
+                    let mut res = [0u8; 68];
+                    // Add timeout on this
+                    socket.read_exact(&mut res).await?;
 
-            let info_hash: [u8; 20] = res[28..48].try_into().unwrap();
-            let bittorrent = self.torrents.get(&info_hash);
+                    assert_eq!(res[0], 19);
+                    assert_eq!(&res[1..20], b"BitTorrent protocol");
 
-            if let Some(bittorrent) = bittorrent {
-                let bittorrent = bittorrent.lock().await;
-                let mut pm_guard = bittorrent.peer_manager.lock().await;
-                let peer = pm_guard.find_or_create(addr).await.conn_info.clone();
-                info!("New connection from {:?}", peer);
-                pm_guard.init_session(socket, peer, info_hash).await;
-            } else {
-                // if not serving, connection reset
+                    let info_hash: [u8; 20] = res[28..48].try_into().unwrap();
+                    if let Some(bittorrent) = self.torrents.get(&info_hash) {
+                        let bittorrent = bittorrent.lock().await;
+
+                        let mut pm_guard = bittorrent.peer_manager.lock().await;
+                        if pm_guard.find_peer(&peer).is_none() {
+                            pm_guard.create_peer(peer.clone()).await;
+                            info!("New connection from {:?}", peer);
+                            pm_guard.init_session(socket, peer, info_hash).await;
+                        }
+                    } else {
+                        // If not serving, connection reset
+                    }
+                }
+
+                // Handle AddTorrent commands
+                Some(command) = self.command_rx.recv() => {
+                    match command {
+                        ServerCommand::AddTorrent { input_path, output_dir } => {
+                            if let Err(e) = self.add_torrent(&input_path, &output_dir).await {
+                                error!("Failed to add torrent: {:?}", e);
+                            }
+                        }
+                    }
+                }
             }
         }
     }

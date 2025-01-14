@@ -22,14 +22,20 @@ const PORT: u16 = 6881;
 async fn main() -> Result<()> {
     pretty_env_logger::init_timed();
 
-    let input_file = "debian.torrent";
-    let output_dir = "output";
+    let input_path = "debian.torrent".to_string();
+    let output_dir = "output".to_string();
+    let (tx, rx) = mpsc::channel(32);
 
-    let mut engine = Engine::new();
+    let result = tokio::spawn(async move {
+        let mut engine = Engine::new(rx);
+        engine.start_server().await
+    });
 
-    engine.add_torrent(input_file).await?;
+    tx.send(msg::ServerCommand::AddTorrent {
+        input_path,
+        output_dir,
+    })
+    .await?;
 
-    engine.start_server().await?;
-
-    Ok(())
+    result.await?
 }

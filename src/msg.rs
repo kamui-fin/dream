@@ -234,3 +234,11 @@ pub struct InternalMessage {
     pub msg: Message,
     pub conn_info: ConnectionInfo,
 }
+
+#[derive(Debug)]
+pub enum ServerCommand {
+    AddTorrent {
+        input_path: String,
+        output_dir: String,
+    },
+}

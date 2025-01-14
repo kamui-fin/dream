@@ -446,6 +446,34 @@ impl PeerManager {
         }
     }
 
+    pub async fn sync_peers(&mut self, peers: TrackerResponse) {
+        for peer in peers.peers {
+            if self.find_peer(&peer).is_none() {
+                self.create_peer(peer.clone()).await;
+
+                let tx_clone = self.msg_tx.clone();
+                // the channel for sending messages to this peer session
+                let (send_msg, recv_msg) = mpsc::channel(2000);
+                self.send_channels.insert(peer.clone(), send_msg);
+
+                let info_hash_clone = self
+                    .piece_store
+                    .lock()
+                    .await
+                    .meta_file
+                    .get_info_hash()
+                    .clone();
+
+                tokio::spawn(async move {
+                    let session = PeerSession::new_session(tx_clone, peer, &info_hash_clone).await;
+                    if let Ok(mut session) = session {
+                        session.start_listening(recv_msg).await;
+                    }
+                });
+            }
+        }
+    }
+
     pub fn check_empty_pipelines(&self) {
         if self
             .peers
@@ -489,14 +517,11 @@ impl PeerManager {
         });
     }
 
-    pub async fn find_or_create(&mut self, addr: SocketAddr) -> &RemotePeer {
+    pub async fn create_peer(&mut self, addr: ConnectionInfo) {
         let num_pieces = self.piece_store.lock().await.num_pieces;
-        if !self.peers.iter().any(|p| p.conn_info.addr() == addr) {
-            let new_peer = RemotePeer::from_peer(ConnectionInfo::from_addr(addr), num_pieces);
+        if !self.peers.iter().any(|p| p.conn_info == addr) {
+            let new_peer = RemotePeer::from_peer(addr, num_pieces);
             self.peers.push(new_peer);
-            self.peers.last().unwrap()
-        } else {
-            self.find_peer(&ConnectionInfo::from_addr(addr)).unwrap()
         }
     }
 
@@ -550,6 +575,17 @@ impl PeerManager {
         } else {
             warn!("[HAS_PIECE] Peer {:#?} not found", peer);
             false
+        }
+    }
+
+    pub async fn broadcast_have(&mut self, piece_idx: u32) {
+        let conns: Vec<_> = self.send_channels.keys().cloned().collect();
+        for connection in conns {
+            self.send_message(
+                &connection,
+                MessageType::Have.build_msg(piece_idx.to_be_bytes().to_vec()),
+            )
+            .await;
         }
     }
 
@@ -699,6 +735,19 @@ impl PeerManager {
         work.extend(removed_peer.buffer);
 
         self.redistribute_work(conn_info, work).await;
+    }
+
+    pub async fn setup_choke_algorithm(&mut self) {
+        // - create timer for choke algorithm:
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            //     - every 10s determine new unchoke list
+            //         - sort peers by DL speed avg of last 20 seconds and pick best 4
+            //         - choke everyone else
+
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            //     - every 30s evaluate current optimistic unchoke and perform new one
+        });
     }
 
     pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
