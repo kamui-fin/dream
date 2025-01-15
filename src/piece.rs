@@ -159,6 +159,9 @@ impl Piece {
     pub fn store_block(&mut self, begin: usize, len: usize, data: &[u8]) -> bool {
         if begin + len <= self.buffer.len() {
             let block_id = ((begin / len) as f32).floor() as u32;
+            if self.block_set.contains(&block_id) {
+                return false;
+            }
             self.block_set.insert(block_id);
 
             self.buffer[begin..(begin + len)].copy_from_slice(data);
@@ -169,6 +172,13 @@ impl Piece {
                 self.downloaded_bytes,
                 self.buffer.len()
             );
+            let mut missing_pieces = vec![];
+            for i in 0..16 {
+                if !self.block_set.contains(&i) {
+                    missing_pieces.push(i);
+                }
+            }
+            info!("Missing pieces: {:?}", missing_pieces);
 
             if self.downloaded_bytes as usize == self.buffer.len() {
                 self.status = RequestStatus::Received;

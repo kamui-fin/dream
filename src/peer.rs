@@ -54,7 +54,7 @@ lazy_static! {
 }
 
 const MAX_PIPELINE_SIZE: usize = 4;
-const STATS_WINDOW:usize = 5;
+const STATS_WINDOW: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -106,7 +106,7 @@ struct RequestInfo;
 
 pub struct RequestTracker {
     timeout_sender: mpsc::Sender<InternalMessage>,
-    requests: Arc<std::sync::Mutex<HashMap<u32, RequestInfo>>>,
+    requests: Arc<std::sync::Mutex<HashMap<PipelineEntry, RequestInfo>>>,
 }
 
 impl RequestTracker {
@@ -117,27 +117,25 @@ impl RequestTracker {
         }
     }
 
-    pub fn register_request(&self, block_id: u32, conn_info: ConnectionInfo) {
-        self.requests.lock().unwrap().insert(block_id, RequestInfo);
+    pub fn register_request(&self, entry: PipelineEntry, conn_info: ConnectionInfo) {
+        self.requests
+            .lock()
+            .unwrap()
+            .insert(entry.clone(), RequestInfo);
         info!(
-            "Registering request for block = {block_id} ({:x})",
-            block_id * BLOCK_SIZE
+            "Registering request for {:?} ({:x})",
+            entry,
+            entry.block_id * BLOCK_SIZE
         );
 
         let sender_clone = self.timeout_sender.clone();
 
         let requests_clone = self.requests.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(15)).await;
 
-            if requests_clone
-                .clone()
-                .lock()
-                .unwrap()
-                .remove(&block_id)
-                .is_some()
-            {
-                info!("Request {} timed out from peer: {:?}", block_id, conn_info);
+            if requests_clone.lock().unwrap().remove(&entry).is_some() {
+                info!("Request {:?} timed out from peer: {:#?}", entry, conn_info);
                 if sender_clone
                     .send(InternalMessage::MigrateWork)
                     .await
@@ -149,12 +147,12 @@ impl RequestTracker {
         });
     }
 
-    pub fn resolve_request(&self, block_id: u32) {
+    pub fn resolve_request(&self, entry: PipelineEntry) {
         let mut requests_guard = self.requests.lock().unwrap();
-        if requests_guard.remove(&block_id).is_some() {
-            info!("Request resolved: {}", block_id);
+        if requests_guard.remove(&entry).is_some() {
+            info!("Request resolved: {:#?}", entry);
         } else {
-            warn!("Request not found: {}", block_id);
+            error!("[RESOLVE] Request not found: {:#?}", entry);
         }
     }
 
@@ -163,8 +161,7 @@ impl RequestTracker {
     }
 }
 
-pub struct PeerStats{
-
+pub struct PeerStats {
     // track the sum of the speeds to calculate kbps every n-seconds
     pub current_speeds_sum: f32,
     // track kb downloaded in current window
@@ -173,30 +170,30 @@ pub struct PeerStats{
     // tracks the overall download speed across ALL previous windows (to be used for choking algo)
     pub total_avg_kbps: f32,
     // tracks the total number downloaded across ALL previous windows
-    pub total_kb: u32
+    pub total_kb: u32,
 }
 
-impl PeerStats{
+impl PeerStats {
     pub fn init_stats() -> Self {
-        return Self { 
-            current_speeds_sum: 0.0, 
+        return Self {
+            current_speeds_sum: 0.0,
             current_blocks_downloaded: 0,
             total_avg_kbps: 0.0,
             total_kb: 0,
-        }
+        };
     }
 
-    pub fn add_new_speed(&mut self, new_speed: &f32){
+    pub fn add_new_speed(&mut self, new_speed: &f32) {
         self.current_speeds_sum += new_speed;
         self.current_blocks_downloaded += 1;
     }
 
-    pub fn update_overalls(&mut self){
+    pub fn update_overalls(&mut self) {
         // get the average time it took for one kb (sec per kb)
         let average_time = self.current_speeds_sum / (self.current_blocks_downloaded as f32);
 
         // convert secs per block to kbps
-        let current_window_kbps =( KB_PER_BLOCK) as f32 / average_time;
+        let current_window_kbps = (KB_PER_BLOCK) as f32 / average_time;
 
         // take weighted moving average and weigh the current kbps more than the historical average
         self.total_avg_kbps = (0.125 * current_window_kbps) + (0.875 * self.total_avg_kbps);
@@ -208,7 +205,6 @@ impl PeerStats{
         // reset current window
         self.current_speeds_sum = 0.0;
         self.current_blocks_downloaded = 0;
-
     }
 }
 
@@ -219,7 +215,7 @@ struct PeerSession {
     framed: Framed<TcpStream, BitTorrentCodec>,
     forwarder: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
-    request_tracker: HashMap<PipelineEntry, Instant>
+    request_tracker: HashMap<PipelineEntry, Instant>,
 }
 
 impl PeerSession {
@@ -234,7 +230,7 @@ impl PeerSession {
             framed,
             forwarder,
             peer,
-            request_tracker: HashMap::new()
+            request_tracker: HashMap::new(),
         })
     }
 
@@ -273,20 +269,18 @@ impl PeerSession {
         }
     }
 
-    pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry{
+    pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry {
         let piece_id = slice_to_u32_msb(&bt_msg.payload[0..4]);
         let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
-        let block_id =
-            ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+        let block_id = ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
 
-        return PipelineEntry{
-            piece_id,
-            block_id
-        };
+        return PipelineEntry { piece_id, block_id };
     }
 
-    pub async fn start_listening(&mut self, mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>) {
-
+    pub async fn start_listening(
+        &mut self,
+        mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>,
+    ) {
         loop {
             tokio::select! {
                 Some(msg) = self.framed.next() => {
@@ -313,6 +307,7 @@ impl PeerSession {
                                     msg,
                                     conn_info: self.peer.clone(),
                                 };
+                                trace!("MPSC len: {}", self.forwarder.capacity());
                                 self.forwarder.send(msg).await.unwrap();
                             }
                         }
@@ -344,8 +339,11 @@ impl PeerSession {
         }
     }
 
-    pub async fn send_message(&mut self, msg: Message, request_entry: Option<PipelineEntry>) -> anyhow::Result<()> {
-
+    pub async fn send_message(
+        &mut self,
+        msg: Message,
+        request_entry: Option<PipelineEntry>,
+    ) -> anyhow::Result<()> {
         if let Some(entry) = request_entry {
             self.request_tracker.insert(entry, Instant::now());
         }
@@ -355,8 +353,10 @@ impl PeerSession {
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
-                error!("Message send resulted in error: {:#?}", e);
-                info!("Closing connection to peer: {:#?}", self.peer);
+                error!(
+                    "Unable to send msg {e}, Closing connection to peer: {:#?}",
+                    self.peer
+                );
                 self.framed.close().await?;
                 Err(anyhow!(e))
             }
@@ -414,7 +414,7 @@ impl RemotePeer {
             pipeline: Vec::new(),
             buffer: VecDeque::new(),
             is_ready: false,
-        } 
+        }
     }
 }
 
@@ -425,7 +425,6 @@ pub struct PeerManager {
     // channels
     send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
     msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
-    unchoke_tx: Sender<UnchokeMessage>,
 
     num_not_ready_peers: Arc<AtomicUsize>,
     notify_all_ready: Arc<Notify>,
@@ -442,13 +441,13 @@ impl PeerManager {
         piece_store: Arc<Mutex<PieceStore>>,
         info_hash: &[u8; 20],
         num_pieces: u32,
-        unchoke_tx: Sender<UnchokeMessage>,
         msg_tx: Sender<InternalMessage>,
         notify_all_ready: Arc<Notify>,
         notify_pipelines_empty: Arc<Notifier>,
     ) -> PeerManager {
         let request_tracker = RequestTracker::new(msg_tx.clone());
-        let mut send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>> = HashMap::new();
+        let mut send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>> =
+            HashMap::new();
 
         let peers: Vec<_> = peers_response
             .peers
@@ -469,20 +468,22 @@ impl PeerManager {
             let notify_all_ready_clone = notify_all_ready.clone();
 
             // initialize each peer's stats
-            stats_tracker.lock().await.insert(conn_info.clone(), PeerStats::init_stats());
+            stats_tracker
+                .lock()
+                .await
+                .insert(conn_info.clone(), PeerStats::init_stats());
             let stats_tracker_clone = stats_tracker.clone();
             let target_conn_info = conn_info.clone();
 
             // create a task per peer that waits 5 seconds then updates the historical average of that peer
-            tokio::spawn(async move{
-                loop{
+            tokio::spawn(async move {
+                loop {
                     sleep(Duration::from_secs(STATS_WINDOW as u64)).await;
                     let mut tracker_guard = stats_tracker_clone.lock().await;
-                    if tracker_guard.contains_key(&target_conn_info){
+                    if tracker_guard.contains_key(&target_conn_info) {
                         let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
                         curr_stats.update_overalls();
                         // info!("5 seconds up, peer {:#?} has new kbps of {:#?}", target_conn_info, curr_stats.total_avg_kbps);
-
                     } else {
                         break;
                     }
@@ -490,7 +491,7 @@ impl PeerManager {
             });
 
             // the channel for sending messages to this peer session
-            let (send_msg, recv_msg) = mpsc::channel(500);
+            let (send_msg, recv_msg) = mpsc::channel(2000);
             send_channels.insert(conn_info.clone(), send_msg);
 
             tokio::spawn(async move {
@@ -511,7 +512,6 @@ impl PeerManager {
             peers,
             send_channels,
             msg_tx,
-            unchoke_tx,
             piece_store,
             notify_pipelines_empty,
             notify_all_ready,
@@ -553,7 +553,7 @@ impl PeerManager {
             // launch new session
 
             // the channel for sending messages to this peer session
-            let (send_msg, recv_msg) = mpsc::channel(500);
+            let (send_msg, recv_msg) = mpsc::channel(2000);
 
             self.send_channels
                 .insert(new_peer.conn_info.clone(), send_msg);
@@ -606,17 +606,25 @@ impl PeerManager {
                     peer.buffer.push_back(entry);
                 }
             } else {
-                error!("Peer {:#?} not found", conn_info);
+                error!("[QUEUE_BLOCKS] Peer {:#?} not found", conn_info);
             }
+        }
+
+        let peer = self.find_peer(conn_info);
+        if let Some(peer) = peer {
+            info!(
+                "New pipeline: {:?} | New buffer: {:?}",
+                peer.pipeline, peer.buffer
+            );
         }
     }
 
-    pub async fn peer_has_piece(&self, peer: &ConnectionInfo, piece_idx: u32) -> bool {
+    pub async fn peer_ready_for_piece(&self, peer: &ConnectionInfo, piece_idx: u32) -> bool {
         let peer = self.find_peer(peer);
         if let Some(peer) = peer {
-            peer.piece_lookup.piece_exists(piece_idx)
+            peer.piece_lookup.piece_exists(piece_idx) && !peer.peer_choking
         } else {
-            warn!("Peer {:#?} not found", peer);
+            warn!("[HAS_PIECE] Peer {:#?} not found", peer);
             false
         }
     }
@@ -628,7 +636,7 @@ impl PeerManager {
             if let Some(peer) = peer {
                 peer.am_interested = true;
             } else {
-                warn!("Peer {:#?} not found", conn_info);
+                warn!("[INTEREST] Peer {:#?} not found", conn_info);
                 return;
             }
         }
@@ -649,7 +657,7 @@ impl PeerManager {
             peer.pipeline.push(entry.clone());
             self.request_block(entry, conn_info).await;
         } else {
-            warn!("Peer {:#?} not found", conn_info);
+            warn!("[PIPELINE_ADD] Peer {:#?} not found", conn_info);
         }
     }
 
@@ -670,16 +678,16 @@ impl PeerManager {
         );
         let msg = MessageType::Request.build_msg(payload);
         self.send_channels[&conn_info.clone()]
-            .send((msg, Some(entry)))
+            .send((msg, Some(entry.clone())))
             .await
             .unwrap();
 
         self.request_tracker
-            .register_request(block_id, conn_info.clone());
+            .register_request(entry, conn_info.clone());
     }
 
     fn mark_peer_ready(&self) {
-        info!(
+        trace!(
             "Counter: {}",
             self.num_not_ready_peers.load(Ordering::SeqCst)
         );
@@ -753,7 +761,7 @@ impl PeerManager {
                 self.mark_peer_ready();
             }
         } else {
-            warn!("Peer {:#?} not found", conn_info);
+            warn!("[DETETE_PEER] Peer {:#?} not found", conn_info);
             return;
         }
 
@@ -784,9 +792,8 @@ impl PeerManager {
         if !was_ready {
             peer.is_ready = true;
         }
-
-        match fw_msg{
-            InternalMessage::ForwardMessage{msg, conn_info} => {
+        match fw_msg {
+            InternalMessage::ForwardMessage { msg, conn_info } => {
                 match msg.msg_type {
                     MessageType::KeepAlive => {
                         // close connection after 2 min of inactivity (no commands)
@@ -801,14 +808,7 @@ impl PeerManager {
                     MessageType::UnChoke => {
                         // peer has unchoked us
                         peer.peer_choking = false;
-        
-                        self.unchoke_tx
-                            .send(UnchokeMessage {
-                                peer: conn_info.clone(),
-                            })
-                            .await
-                            .unwrap();
-        
+
                         info!("Peer {:#?} has unchoked us", conn_info);
                     }
                     MessageType::Interested => {
@@ -825,7 +825,7 @@ impl PeerManager {
                         // peer has piece <piece_index>
                         let piece_index = slice_to_u32_msb(&msg.payload[0..4]);
                         peer.piece_lookup.mark_piece(piece_index);
-        
+
                         info!(
                             "Peer {:#?} has confirmed that they have piece with piece-index {}",
                             peer.conn_info, piece_index
@@ -840,7 +840,7 @@ impl PeerManager {
                             peer.conn_info,
                             peer.piece_lookup.return_piece_indexes()
                         );
-        
+
                         if !peer.is_ready {
                             peer.is_ready = true;
                             self.mark_peer_ready();
@@ -853,11 +853,11 @@ impl PeerManager {
                             "Peer {:#?} has requested a piece with index {}",
                             peer.conn_info, piece_idx
                         );
-        
+
                         if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx) {
                             let byte_offset = slice_to_u32_msb(&msg.payload[4..8]);
                             let length = slice_to_u32_msb(&msg.payload[8..12]);
-        
+
                             let mut piece_store_guard = self.piece_store.lock().await;
                             let target_block = match piece_store_guard.pieces[piece_idx as usize]
                                 .retrieve_block(byte_offset as usize, length as usize)
@@ -871,19 +871,19 @@ impl PeerManager {
                                     return;
                                 }
                             };
-        
+
                             info!(
                                 "Piece {} with Block offset {} retrieved",
                                 piece_idx, byte_offset
                             );
                             let mut pay_load = Vec::with_capacity(target_block.len() + 8);
-        
+
                             pay_load.extend_from_slice(&piece_idx.to_be_bytes());
                             pay_load.extend_from_slice(&byte_offset.to_be_bytes());
                             pay_load.extend_from_slice(&target_block);
-        
+
                             info!("Payload in response to request ready to send");
-        
+
                             self.send_channels[&conn_info.clone()]
                                 .send((MessageType::Piece.build_msg(pay_load), None))
                                 .await
@@ -905,7 +905,7 @@ impl PeerManager {
                         let block_data = &msg.payload[8..];
                         let block_id =
                             ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
-        
+
                         info!(
                             "Peer {:#?} has sent us piece {} starting at offset {} with length {}. Determined block id = {}",
                             conn_info,
@@ -914,22 +914,25 @@ impl PeerManager {
                             block_data.len(),
                             block_id
                         );
-        
+
                         peer.pipeline.retain(|p| p.block_id != block_id);
-        
+
                         info!(
                             "AFTER: Peer {:?} has pipeline: {:?} and buffer: {:?}",
                             peer, peer.pipeline, peer.buffer
                         );
-        
+
                         let entry = peer.buffer.pop_front();
-        
-                        self.request_tracker.resolve_request(block_id);
-        
+
+                        self.request_tracker.resolve_request(PipelineEntry {
+                            piece_id: piece_idx,
+                            block_id,
+                        });
+
                         if let Some(entry) = entry {
                             self.pipeline_enqueue(entry, conn_info).await;
                         }
-        
+
                         if self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
                             block_offset as usize,
                             block_data.len(),
@@ -939,14 +942,8 @@ impl PeerManager {
                             self.notify_pipelines_empty.notify_one();
                         }
                     }
-                    MessageType::Cancel => {
-                        // informing us that block <index><begin><length> is not needed anymore
-                        // for endgame algo
-                    }
-                    MessageType::Port => {
-                        // port that their dht node is listening on
-                        // only for DHT extension
-                    }
+                    MessageType::Cancel => {}
+                    MessageType::Port => {}
                 }
             }
             InternalMessage::CloseConnection => {
@@ -967,10 +964,12 @@ impl PeerManager {
 
             InternalMessage::UpdateSpeed { conn_info, speed } => {
                 // update speed to the corresponding peer
-                if let Some(curr_stats)  = self.stats_tracker.lock().await.get_mut(&conn_info.clone()){
+                if let Some(curr_stats) =
+                    self.stats_tracker.lock().await.get_mut(&conn_info.clone())
+                {
                     curr_stats.add_new_speed(speed);
                     info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
-                } else {    
+                } else {
                     warn!("Invalid update message found");
                 }
             }
