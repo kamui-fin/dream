@@ -10,6 +10,7 @@ use std::{
 use crate::{tracker::Metafile, utils::hash_obj};
 
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
+pub const KB_PER_BLOCK: u32 = BLOCK_SIZE / 1000;
 
 #[derive(Debug)]
 pub struct BitField(pub Vec<u8>);
