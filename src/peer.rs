@@ -33,7 +33,7 @@ use tokio::{
     time::timeout,
 };
 
-use crate::bittorrent::BitTorrent;
+use crate::bittorrent::{BitTorrent, TorrentState};
 use crate::msg::{BitTorrentCodec, InternalMessage};
 use crate::piece::{PieceStore, KB_PER_BLOCK};
 use crate::tracker::TrackerResponse;
@@ -234,6 +234,33 @@ impl PeerSession {
         })
     }
 
+    async fn from_session(
+        mut conn: TcpStream,
+        forwarder: mpsc::Sender<InternalMessage>,
+        peer: ConnectionInfo,
+        info_hash: &[u8; 20],
+        bitfield: BitField,
+    ) -> anyhow::Result<Self> {
+        // respond back with handshake
+        let mut handshake = [0u8; 68];
+        handshake[0] = 19;
+        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
+        handshake[28..48].copy_from_slice(info_hash);
+        handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
+        conn.write_all(&handshake).await?;
+
+        let mut framed = Framed::new(conn, BitTorrentCodec);
+        // send bitfield
+        let bitfield_msg = MessageType::Bitfield.build_msg(bitfield.0);
+        framed.send(bitfield_msg).await;
+
+        Ok(Self {
+            framed,
+            forwarder,
+            peer,
+        })
+    }
+
     pub async fn peer_handshake(peer: ConnectionInfo, info_hash: &[u8; 20]) -> Result<TcpStream> {
         let mut handshake = [0u8; 68];
         handshake[0] = 19;
@@ -371,6 +398,7 @@ pub struct RemotePeer {
     pub am_interested: bool,   // = 0
     pub peer_choking: bool,    // has this peer choked us? = 1
     pub peer_interested: bool, // is this peer interested in us? = 0
+    pub optimistic_unchoke: bool,
 
     pub is_ready: bool,
 
@@ -414,6 +442,7 @@ impl RemotePeer {
             pipeline: Vec::new(),
             buffer: VecDeque::new(),
             is_ready: false,
+            optimistic_unchoke: false,
         }
     }
 }
@@ -456,15 +485,17 @@ impl PeerManager {
             .collect();
 
         let num_peers = peers.len();
+
         let not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
         let mut stats_tracker = Arc::new(Mutex::new(HashMap::new()));
+
 
         for remote_peer in &peers {
             let info_hash_clone = info_hash.clone();
             let conn_info = remote_peer.conn_info.clone();
             let tx_clone = msg_tx.clone();
 
-            let not_ready_peers_clone = Arc::clone(&not_ready_peers);
+            let not_ready_peers_clone = Arc::clone(&num_not_ready_peers);
             let notify_all_ready_clone = notify_all_ready.clone();
 
             // initialize each peer's stats
@@ -515,9 +546,37 @@ impl PeerManager {
             piece_store,
             notify_pipelines_empty,
             notify_all_ready,
-            num_not_ready_peers: not_ready_peers,
+            num_not_ready_peers,
             request_tracker,
             stats_tracker,
+        }
+    }
+
+    pub async fn sync_peers(&mut self, peers: TrackerResponse) {
+        for peer in peers.peers {
+            if self.find_peer(&peer).is_none() {
+                self.create_peer(peer.clone()).await;
+
+                let tx_clone = self.msg_tx.clone();
+                // the channel for sending messages to this peer session
+                let (send_msg, recv_msg) = mpsc::channel(2000);
+                self.send_channels.insert(peer.clone(), send_msg);
+
+                let info_hash_clone = self
+                    .piece_store
+                    .lock()
+                    .await
+                    .meta_file
+                    .get_info_hash()
+                    .clone();
+
+                tokio::spawn(async move {
+                    let session = PeerSession::new_session(tx_clone, peer, &info_hash_clone).await;
+                    if let Ok(mut session) = session {
+                        session.start_listening(recv_msg).await;
+                    }
+                });
+            }
         }
     }
 
@@ -542,37 +601,33 @@ impl PeerManager {
         result
     }
 
-    pub async fn find_or_create(
+    pub async fn init_session(
         &mut self,
-        addr: SocketAddr,
-        num_pieces: u32,
+        stream: TcpStream,
+        conn_info: ConnectionInfo,
         info_hash: [u8; 20],
-    ) -> &RemotePeer {
-        if !self.peers.iter().any(|p| p.conn_info.addr() == addr) {
-            let new_peer = RemotePeer::from_peer(ConnectionInfo::from_addr(addr), num_pieces);
-            // launch new session
+    ) {
+        let bitfield = self.piece_store.lock().await.get_status_bitfield().clone();
 
-            // the channel for sending messages to this peer session
-            let (send_msg, recv_msg) = mpsc::channel(2000);
+        let tx_clone = self.msg_tx.clone();
+        // the channel for sending messages to this peer session
+        let (send_msg, recv_msg) = mpsc::channel(2000);
+        self.send_channels.insert(conn_info.clone(), send_msg);
 
-            self.send_channels
-                .insert(new_peer.conn_info.clone(), send_msg);
+        tokio::spawn(async move {
+            let session =
+                PeerSession::from_session(stream, tx_clone, conn_info, &info_hash, bitfield).await;
+            if let Ok(mut session) = session {
+                session.start_listening(recv_msg).await;
+            }
+        });
+    }
 
-            let conn_info = new_peer.conn_info.clone();
-            let tx_clone = self.msg_tx.clone();
-
-            tokio::spawn(async move {
-                let session = PeerSession::new_session(tx_clone, conn_info, &info_hash).await;
-                if let Ok(mut session) = session {
-                    session.start_listening(recv_msg).await;
-                }
-            });
-
+    pub async fn create_peer(&mut self, addr: ConnectionInfo) {
+        let num_pieces = self.piece_store.lock().await.num_pieces;
+        if !self.peers.iter().any(|p| p.conn_info == addr) {
+            let new_peer = RemotePeer::from_peer(addr, num_pieces);
             self.peers.push(new_peer);
-
-            self.peers.last().unwrap()
-        } else {
-            self.find_peer(&ConnectionInfo::from_addr(addr)).unwrap()
         }
     }
 
@@ -627,6 +682,27 @@ impl PeerManager {
             warn!("[HAS_PIECE] Peer {:#?} not found", peer);
             false
         }
+    }
+
+    pub async fn broadcast_have(&mut self, piece_idx: u32) {
+        let conns: Vec<_> = self.send_channels.keys().cloned().collect();
+        for connection in conns {
+            self.send_message(
+                &connection,
+                MessageType::Have.build_msg(piece_idx.to_be_bytes().to_vec()),
+            )
+            .await;
+        }
+    }
+
+    pub async fn unchoke(&mut self, conn_info: &ConnectionInfo) {
+        self.send_message(conn_info, MessageType::UnChoke.build_msg(vec![]))
+            .await;
+    }
+
+    pub async fn choke(&mut self, conn_info: &ConnectionInfo) {
+        self.send_message(conn_info, MessageType::Choke.build_msg(vec![]))
+            .await;
     }
 
     pub async fn show_interest_in_peer(&mut self, conn_info: &ConnectionInfo) {
@@ -779,6 +855,54 @@ impl PeerManager {
 
         self.redistribute_work(conn_info, work).await;
     }
+
+
+    pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
+        // move optimistic unchoke peer to the end so we don't count it in our list of top peers
+        let optimistic_unchoke = self
+            .peers
+            .iter()
+            .position(|item| item.optimistic_unchoke)
+            .map(|pos| self.peers.remove(pos));
+
+        // sort peers by average speed depending on torrent state
+        self.peers.sort_by_key(|p| match torrent_state {
+            TorrentState::Seeder => p.stats.avg_download_speed,
+            TorrentState::Leecher => p.stats.avg_upload_speed,
+        });
+        self.peers.reverse();
+
+        // select top peers (up to 4)
+        let top_count = self.peers.len().min(4);
+        let top_peers = &self.peers[..top_count];
+
+        // unchoke top peers
+        for peer in top_peers {
+            self.unchoke(&peer.conn_info).await;
+        }
+
+        // choke the remaining peers
+        for peer in &self.peers[top_count..] {
+            self.choke(&peer.conn_info).await;
+        }
+
+        // restore the optimistic unchoke peer if it exists
+        if let Some(peer) = optimistic_unchoke {
+            self.peers.push(peer);
+        }
+    }
+
+    pub async fn optimistic_unchoke(&mut self) {
+        if self.peers.len() > 4 {
+            let mut rng = rand::thread_rng();
+            let random_index = rng.gen_range(4..self.peers.len());
+            let random_peer = &mut self.peers[random_index];
+            random_peer.optimistic_unchoke = true;
+            let random_peer_conn = random_peer.conn_info.clone();
+            self.unchoke(&random_peer_conn).await;
+        }
+    }
+
 
     pub async fn handle_msg(&mut self, fw_msg: &InternalMessage, conn_info: &ConnectionInfo) {
         let peer = self.find_peer_mut(conn_info);

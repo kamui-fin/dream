@@ -240,18 +240,11 @@ pub enum InternalMessage{
     },
 }
 
-// impl InternalMessageType {
-//     pub fn from_id(internal_msg_id: u8) -> Option<InternalMessageType>{
-//         match internal_msg_id{
-//             0 => Some(Self::CloseConnection),
-//             1 => Some(Self::ForwardMessage),
-//             2 => Some(Self::MigrateWork),
-//             3 => Some(Self::UpdateStats),
-//             _ => None
-//         }
-//     }
+#[derive(Debug)]
+pub enum ServerCommand {
+    AddTorrent {
+        input_path: String,
+        output_dir: String,
+    },
+}
 
-//     pub fn build_msg(self, msg: Message, conn_info: ConnectionInfo) -> InternalMessage{
-//         return InternalMessage{InternalMessageType: self, }
-//     }
-// }

@@ -12,7 +12,7 @@ use crate::{tracker::Metafile, utils::hash_obj};
 pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
 pub const KB_PER_BLOCK: u32 = BLOCK_SIZE / 1000;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BitField(pub Vec<u8>);
 
 impl BitField {
@@ -32,6 +32,10 @@ impl BitField {
         let offset = index % 8;
 
         self.0[byte_idx as usize] |= 1 << (8 - offset - 1);
+    }
+
+    pub fn has_all(&self) -> bool {
+        self.0.iter().all(|byte| *byte == 0xFF)
     }
 
     pub fn return_piece_indexes(&self) -> String {
@@ -131,20 +135,47 @@ pub struct Piece {
     pub status: RequestStatus,
     pub block_set: HashSet<u32>,
     pub downloaded_bytes: u32,
+    pub output_path: PathBuf,
 }
 
 impl Piece {
-    pub fn new(size: u64, hash: [u8; 20]) -> Self {
-        Self {
-            buffer: vec![0; size as usize],
-            status: RequestStatus::Pending,
-            block_set: HashSet::new(),
-            downloaded_bytes: 0,
-            hash,
+    pub fn new(size: u64, hash: [u8; 20], output_path: PathBuf) -> Self {
+        if !output_path.exists() {
+            Self {
+                buffer: vec![0; size as usize],
+                status: RequestStatus::Pending,
+                block_set: HashSet::new(),
+                downloaded_bytes: 0,
+                hash,
+                output_path,
+            }
+        } else {
+            let mut file = File::open(&output_path).expect("Failed to open the file");
+            let mut buffer = vec![0; size as usize];
+            let bytes_read = file.read(&mut buffer).expect("Failed to read the file");
+            let status = if bytes_read as u64 == size && hash_obj(&buffer) == hash {
+                RequestStatus::Received
+            } else {
+                RequestStatus::Pending
+            };
+
+            Self {
+                buffer: vec![0; size as usize],
+                block_set: HashSet::new(),
+                hash,
+                output_path,
+                status,
+                downloaded_bytes: bytes_read as u32,
+            }
         }
     }
 
-    // TODO: set requested status
+    pub fn reset_piece(&mut self) {
+        // NOTE: we only clear this data to save memory
+        // Other metadata remains like status == Received
+        self.buffer.clear();
+        self.block_set.clear();
+    }
 
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {
         if begin + len < self.buffer.len() {
@@ -196,6 +227,15 @@ impl Piece {
 
         orig_hash == piece_hash
     }
+
+    pub fn persist(&self) -> anyhow::Result<()> {
+        if self.status == RequestStatus::Received {
+            let mut file = File::create(&self.output_path)?;
+            file.write_all(&self.buffer)?;
+        }
+
+        Ok(())
+    }
 }
 
 // Note: Avg block size is 2 ^ 14
@@ -205,45 +245,47 @@ pub struct PieceStore {
     // TODO: kinda doesn't make sense to have a whole vector when operating on piece one at a time, but mainly just to allow future optimizations for downloading multiple pieces concurrently
     // not sure if it will ever make sense though even from a protocol standpoint, TBD..
     pub pieces: Vec<Piece>,
+    pub output_dir: PathBuf,
 }
 
 impl PieceStore {
-    pub fn new(meta_file: Metafile) -> Self {
+    pub fn new(meta_file: Metafile, output_dir: PathBuf) -> Self {
+        if !output_dir.exists() {
+            std::fs::create_dir(&output_dir).unwrap();
+        }
+
         let hashes = meta_file.get_piece_hashes();
         let num_pieces = meta_file.get_num_pieces();
 
         let mut pieces = vec![];
         for idx in 0..num_pieces {
-            pieces.push(Piece::new(
+            let output_path = output_dir.join(format!("{}-{idx}.part", meta_file.info.name));
+            let piece = Piece::new(
                 meta_file.get_piece_len(idx as usize),
                 hashes.0[idx as usize],
-            ));
+                output_path,
+            );
+
+            pieces.push(piece);
         }
 
         Self {
             num_pieces,
             pieces,
             meta_file,
+            output_dir,
         }
     }
 
-    pub fn persist(&self, idx: usize, output_dir: &Path) -> anyhow::Result<()> {
+    pub fn persist(&self, idx: usize) -> anyhow::Result<()> {
         let piece = &self.pieces[idx];
-
-        if piece.status == RequestStatus::Received {
-            let output_path = output_dir.join(format!("{}-{idx}.part", self.meta_file.info.name));
-            let mut file = File::create(output_path)?;
-            file.write_all(&piece.buffer)?;
-        }
-
-        Ok(())
+        piece.persist()
     }
 
-    pub fn concat(&self, output_dir: &Path) -> anyhow::Result<()> {
-        let piece_files = (0..(self.num_pieces))
-            .map(|idx| output_dir.join(format!("{}-{idx}.part", self.meta_file.info.name)));
+    pub fn concat(&self) -> anyhow::Result<()> {
+        let piece_files = (0..(self.num_pieces)).map(|idx| &self.pieces[idx as usize].output_path);
 
-        let dest_file_path = output_dir.join(&self.meta_file.info.name);
+        let dest_file_path = self.output_dir.join(&self.meta_file.info.name);
         let mut output = OpenOptions::new()
             .write(true)
             .create(true)
@@ -260,6 +302,12 @@ impl PieceStore {
         Ok(())
     }
 
+    pub fn get_missing_pieces(&self) -> Vec<usize> {
+        (0..self.num_pieces as usize)
+            .filter(|i| self.pieces[*i].status == RequestStatus::Received)
+            .collect::<Vec<usize>>()
+    }
+
     pub fn get_status_bitfield(&self) -> BitField {
         let mut bitfield = BitField::new(self.num_pieces);
 
@@ -273,9 +321,6 @@ impl PieceStore {
     }
 
     pub fn reset_piece(&mut self, idx: usize) {
-        self.pieces[idx] = Piece::new(
-            self.meta_file.get_piece_len(idx as usize),
-            self.meta_file.get_piece_hashes().0[idx as usize],
-        )
+        self.pieces[idx].reset_piece();
     }
 }
