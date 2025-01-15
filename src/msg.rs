@@ -1,4 +1,4 @@
-use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
+use crate::{peer::{ConnectionInfo, PipelineEntry, RemotePeer}, piece::BLOCK_SIZE};
 
 use std::{fmt, io::Cursor};
 
@@ -8,6 +8,8 @@ use std::fmt::{Display, Formatter};
 
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, BytesMut};
+use futures::stream::Forward;
+use http_req::tls::Conn;
 use log::{error, info, trace};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -147,8 +149,6 @@ pub enum MessageType {
     Piece,
     Cancel,
     Port,
-    CloseConnection,
-    MigrateWork,
 }
 
 impl MessageType {
@@ -185,8 +185,6 @@ impl MessageType {
             Self::Cancel => 8,
             Self::Port => 9,
             Self::KeepAlive => 10,
-            Self::CloseConnection => 11,
-            Self::MigrateWork => 12,
         }
     }
 
@@ -229,10 +227,17 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
-pub struct InternalMessage {
-    pub msg: Message,
-    pub conn_info: ConnectionInfo,
+pub enum InternalMessage{
+    CloseConnection,
+    ForwardMessage{
+        msg: Message,
+        conn_info: ConnectionInfo
+    },
+    MigrateWork,
+    UpdateSpeed{
+        conn_info: ConnectionInfo,
+        speed: f32,
+    },
 }
 
 #[derive(Debug)]
@@ -242,3 +247,4 @@ pub enum ServerCommand {
         output_dir: String,
     },
 }
+
