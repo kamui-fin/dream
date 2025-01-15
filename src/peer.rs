@@ -750,44 +750,49 @@ impl PeerManager {
     }
 
     pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
-        //     - every 10s determine new unchoke list
-        //         - sort peers by DL speed avg of last 20 seconds and pick best 4
-        //         - choke everyone else
-        // move optimistic unchoke peer to end so we don't count it in our list of 4 peers
-        let pos = self.peers.iter().position(|item| item.optimistic_unchoke);
-        let optimistic_unchoke = if let Some(pos) = pos {
-            Some(self.peers.remove(pos))
-        } else {
-            None
-        };
+        // move optimistic unchoke peer to the end so we don't count it in our list of top peers
+        let optimistic_unchoke = self
+            .peers
+            .iter()
+            .position(|item| item.optimistic_unchoke)
+            .map(|pos| self.peers.remove(pos));
 
+        // sort peers by average speed depending on torrent state
         self.peers.sort_by_key(|p| match torrent_state {
             TorrentState::Seeder => p.stats.avg_download_speed,
             TorrentState::Leecher => p.stats.avg_upload_speed,
         });
         self.peers.reverse();
 
-        let top_four = &self.peers[0..4];
-        for peer in top_four {
-            self.unchoke(&peer.conn_info);
+        // select top peers (up to 4)
+        let top_count = self.peers.len().min(4);
+        let top_peers = &self.peers[..top_count];
+
+        // unchoke top peers
+        for peer in top_peers {
+            self.unchoke(&peer.conn_info).await;
         }
 
-        for peer in &self.peers[4..(self.peers.len())] {
-            self.choke(&peer.conn_info);
+        // choke the remaining peers
+        for peer in &self.peers[top_count..] {
+            self.choke(&peer.conn_info).await;
         }
 
+        // restore the optimistic unchoke peer if it exists
         if let Some(peer) = optimistic_unchoke {
             self.peers.push(peer);
         }
     }
 
     pub async fn optimistic_unchoke(&mut self) {
-        let mut rng = rand::thread_rng();
-        let random_index = rng.gen_range(4..(self.peers.len()));
-        let random_peer = &mut self.peers[random_index];
-        random_peer.optimistic_unchoke = true;
-        let random_peer = random_peer.conn_info.clone();
-        self.unchoke(&random_peer);
+        if self.peers.len() > 4 {
+            let mut rng = rand::thread_rng();
+            let random_index = rng.gen_range(4..self.peers.len());
+            let random_peer = &mut self.peers[random_index];
+            random_peer.optimistic_unchoke = true;
+            let random_peer_conn = random_peer.conn_info.clone();
+            self.unchoke(&random_peer_conn).await;
+        }
     }
 
     pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
