@@ -11,16 +11,18 @@ use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use sha1::digest::typenum::Bit;
+use std::alloc::System;
 use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr};
 use std::ptr::read;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::current;
 use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::{mpsc, Mutex, Notify};
-use tokio::time::Instant;
+use tokio::time::{self, sleep, Instant};
 use tokio_util::codec::Framed;
 
 use log::{error, info};
@@ -33,7 +35,7 @@ use tokio::{
 
 use crate::bittorrent::BitTorrent;
 use crate::msg::{BitTorrentCodec, InternalMessage};
-use crate::piece::PieceStore;
+use crate::piece::{PieceStore, KB_PER_BLOCK};
 use crate::tracker::TrackerResponse;
 use crate::utils::Notifier;
 use crate::{
@@ -52,6 +54,7 @@ lazy_static! {
 }
 
 const MAX_PIPELINE_SIZE: usize = 4;
+const STATS_WINDOW: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -134,10 +137,7 @@ impl RequestTracker {
             if requests_clone.lock().unwrap().remove(&entry).is_some() {
                 info!("Request {:?} timed out from peer: {:#?}", entry, conn_info);
                 if sender_clone
-                    .send(InternalMessage {
-                        msg: MessageType::MigrateWork.build_empty(),
-                        conn_info,
-                    })
+                    .send(InternalMessage::MigrateWork)
                     .await
                     .is_err()
                 {
@@ -161,6 +161,53 @@ impl RequestTracker {
     }
 }
 
+pub struct PeerStats {
+    // track the sum of the speeds to calculate kbps every n-seconds
+    pub current_speeds_sum: f32,
+    // track kb downloaded in current window
+    pub current_blocks_downloaded: u32,
+
+    // tracks the overall download speed across ALL previous windows (to be used for choking algo)
+    pub total_avg_kbps: f32,
+    // tracks the total number downloaded across ALL previous windows
+    pub total_kb: u32,
+}
+
+impl PeerStats {
+    pub fn init_stats() -> Self {
+        return Self {
+            current_speeds_sum: 0.0,
+            current_blocks_downloaded: 0,
+            total_avg_kbps: 0.0,
+            total_kb: 0,
+        };
+    }
+
+    pub fn add_new_speed(&mut self, new_speed: &f32) {
+        self.current_speeds_sum += new_speed;
+        self.current_blocks_downloaded += 1;
+    }
+
+    pub fn update_overalls(&mut self) {
+        // get the average time it took for one kb (sec per kb)
+        let average_time = self.current_speeds_sum / (self.current_blocks_downloaded as f32);
+
+        // convert secs per block to kbps
+        let current_window_kbps = (KB_PER_BLOCK) as f32 / average_time;
+
+        // take weighted moving average and weigh the current kbps more than the historical average
+        self.total_avg_kbps = (0.125 * current_window_kbps) + (0.875 * self.total_avg_kbps);
+        info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
+
+        // track historical kb downloaded
+        self.total_kb += self.current_blocks_downloaded * KB_PER_BLOCK;
+
+        // reset current window
+        self.current_speeds_sum = 0.0;
+        self.current_blocks_downloaded = 0;
+    }
+}
+
 struct PeerSession {
     // pertaining to connection
     // conn: Arc<Mutex<TcpStream>>,
@@ -168,6 +215,7 @@ struct PeerSession {
     framed: Framed<TcpStream, BitTorrentCodec>,
     forwarder: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
+    request_tracker: HashMap<PipelineEntry, Instant>,
 }
 
 impl PeerSession {
@@ -182,6 +230,7 @@ impl PeerSession {
             framed,
             forwarder,
             peer,
+            request_tracker: HashMap::new(),
         })
     }
 
@@ -220,7 +269,18 @@ impl PeerSession {
         }
     }
 
-    pub async fn start_listening(&mut self, mut send_jobs: mpsc::Receiver<Message>) {
+    pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry {
+        let piece_id = slice_to_u32_msb(&bt_msg.payload[0..4]);
+        let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
+        let block_id = ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+
+        return PipelineEntry { piece_id, block_id };
+    }
+
+    pub async fn start_listening(
+        &mut self,
+        mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>,
+    ) {
         loop {
             tokio::select! {
                 Some(msg) = self.framed.next() => {
@@ -229,8 +289,21 @@ impl PeerSession {
                             if msg.msg_type == MessageType::KeepAlive {
                                 continue;
                             } else {
-                                trace!("[TCP] Decoded msg {:#?} from {:?}", msg.msg_type, self.peer.clone());
-                                let msg = InternalMessage {
+                                if msg.msg_type == MessageType::Piece {
+                                    // get the pipeline entry to track request
+                                    let corresponding_entry = Self::get_pipeline_entry(msg.clone());
+                                    let new_speed = Instant::now() - self.request_tracker[&corresponding_entry];
+
+                                    // remove the entry once the request has been fulfilled
+                                    self.request_tracker.remove(&corresponding_entry);
+
+                                    // send a speed update message to add the new speed to the peer's stats
+                                    let speed_updater = InternalMessage::UpdateSpeed{conn_info: self.peer.clone(), speed: new_speed.as_secs_f32()};
+                                    self.forwarder.send(speed_updater).await.unwrap();
+                                    info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
+                                }
+                                // send normal piece message
+                                let msg = InternalMessage::ForwardMessage {
                                     msg,
                                     conn_info: self.peer.clone(),
                                 };
@@ -246,21 +319,15 @@ impl PeerSession {
                                 e
                             );
                             self.framed.close().await;
-                            let close_msg = InternalMessage {
-                                msg: MessageType::CloseConnection.build_empty(),
-                                conn_info: self.peer.clone(),
-                            };
+                            let close_msg = InternalMessage::CloseConnection;
                             self.forwarder.send(close_msg).await.unwrap();
                             return;
                         }
                     }
                 }
                 Some(msg) = send_jobs.recv() => {
-                    if let Err(_) = self.send_message(msg.clone()).await {
-                        let close_msg = InternalMessage {
-                            msg: MessageType::CloseConnection.build_empty(),
-                            conn_info: self.peer.clone(),
-                        };
+                    if let Err(_) = self.send_message(msg.0.clone(), msg.1).await {
+                        let close_msg = InternalMessage::CloseConnection;
                         self.forwarder.send(close_msg).await.unwrap();
                         return;
                     }
@@ -272,7 +339,15 @@ impl PeerSession {
         }
     }
 
-    pub async fn send_message(&mut self, msg: Message) -> anyhow::Result<()> {
+    pub async fn send_message(
+        &mut self,
+        msg: Message,
+        request_entry: Option<PipelineEntry>,
+    ) -> anyhow::Result<()> {
+        if let Some(entry) = request_entry {
+            self.request_tracker.insert(entry, Instant::now());
+        }
+
         let result = self.framed.send(msg).await;
 
         match result {
@@ -317,7 +392,7 @@ impl fmt::Debug for RemotePeer {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct PipelineEntry {
     piece_id: u32,
     block_id: u32,
@@ -348,7 +423,7 @@ pub struct PeerManager {
     piece_store: Arc<Mutex<PieceStore>>,
 
     // channels
-    send_channels: HashMap<ConnectionInfo, Sender<Message>>,
+    send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
     msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
 
     num_not_ready_peers: Arc<AtomicUsize>,
@@ -356,6 +431,7 @@ pub struct PeerManager {
     notify_pipelines_empty: Arc<Notifier>,
 
     pub request_tracker: RequestTracker,
+    pub stats_tracker: Arc<Mutex<HashMap<ConnectionInfo, PeerStats>>>,
 }
 
 impl PeerManager {
@@ -370,7 +446,8 @@ impl PeerManager {
         notify_pipelines_empty: Arc<Notifier>,
     ) -> PeerManager {
         let request_tracker = RequestTracker::new(msg_tx.clone());
-        let mut send_channels: HashMap<ConnectionInfo, Sender<Message>> = HashMap::new();
+        let mut send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>> =
+            HashMap::new();
 
         let peers: Vec<_> = peers_response
             .peers
@@ -380,6 +457,7 @@ impl PeerManager {
 
         let num_peers = peers.len();
         let not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
+        let mut stats_tracker = Arc::new(Mutex::new(HashMap::new()));
 
         for remote_peer in &peers {
             let info_hash_clone = info_hash.clone();
@@ -388,6 +466,29 @@ impl PeerManager {
 
             let not_ready_peers_clone = Arc::clone(&not_ready_peers);
             let notify_all_ready_clone = notify_all_ready.clone();
+
+            // initialize each peer's stats
+            stats_tracker
+                .lock()
+                .await
+                .insert(conn_info.clone(), PeerStats::init_stats());
+            let stats_tracker_clone = stats_tracker.clone();
+            let target_conn_info = conn_info.clone();
+
+            // create a task per peer that waits 5 seconds then updates the historical average of that peer
+            tokio::spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(STATS_WINDOW as u64)).await;
+                    let mut tracker_guard = stats_tracker_clone.lock().await;
+                    if tracker_guard.contains_key(&target_conn_info) {
+                        let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
+                        curr_stats.update_overalls();
+                        // info!("5 seconds up, peer {:#?} has new kbps of {:#?}", target_conn_info, curr_stats.total_avg_kbps);
+                    } else {
+                        break;
+                    }
+                }
+            });
 
             // the channel for sending messages to this peer session
             let (send_msg, recv_msg) = mpsc::channel(2000);
@@ -416,6 +517,7 @@ impl PeerManager {
             notify_all_ready,
             num_not_ready_peers: not_ready_peers,
             request_tracker,
+            stats_tracker,
         }
     }
 
@@ -543,7 +645,7 @@ impl PeerManager {
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-        if let Err(_) = self.send_channels[conn_info].send(msg).await {
+        if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
             error!("Lost connection to peer {:#?}", conn_info);
             self.remove_peer(conn_info).await;
         }
@@ -575,7 +677,10 @@ impl PeerManager {
             block_id, piece_id, conn_info
         );
         let msg = MessageType::Request.build_msg(payload);
-        self.send_channels[&conn_info.clone()].send(msg).await;
+        self.send_channels[&conn_info.clone()]
+            .send((msg, Some(entry.clone())))
+            .await
+            .unwrap();
 
         self.request_tracker
             .register_request(entry, conn_info.clone());
@@ -675,7 +780,7 @@ impl PeerManager {
         self.redistribute_work(conn_info, work).await;
     }
 
-    pub async fn handle_msg(&mut self, bt_msg: &Message, conn_info: &ConnectionInfo) {
+    pub async fn handle_msg(&mut self, fw_msg: &InternalMessage, conn_info: &ConnectionInfo) {
         let peer = self.find_peer_mut(conn_info);
         if peer.is_none() {
             warn!("Peer {:#?} not found", conn_info);
@@ -687,179 +792,165 @@ impl PeerManager {
         if !was_ready {
             peer.is_ready = true;
         }
-        match bt_msg.msg_type {
-            MessageType::KeepAlive => {
-                // close connection after 2 min of inactivity (no commands)
-                // keepalive is just a dummy msg to reset that timer
-                // info!("Received keep alive")
-            }
-            MessageType::Choke => {
-                // peer has choked us
-                peer.peer_choking = true;
-                info!("Peer {:?} has choked us", peer.conn_info);
-                let work: Vec<PipelineEntry> = {
-                    let peer = self.find_peer_mut(conn_info).unwrap();
-                    let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
-                    work.extend(peer.buffer.drain(..));
-                    work
-                };
-                info!("Migrating work due to choke {:?}", work);
-                self.redistribute_work(conn_info, work).await;
-            }
-            MessageType::UnChoke => {
-                // peer has unchoked us
-                peer.peer_choking = false;
+        match fw_msg {
+            InternalMessage::ForwardMessage { msg, conn_info } => {
+                match msg.msg_type {
+                    MessageType::KeepAlive => {
+                        // close connection after 2 min of inactivity (no commands)
+                        // keepalive is just a dummy msg to reset that timer
+                        // info!("Received keep alive")
+                    }
+                    MessageType::Choke => {
+                        // peer has choked us
+                        peer.peer_choking = true;
+                        info!("Peer {:#?} has choked us", peer.conn_info);
+                    }
+                    MessageType::UnChoke => {
+                        // peer has unchoked us
+                        peer.peer_choking = false;
 
-                info!("Peer {:?} has unchoked us", conn_info);
-            }
-            MessageType::Interested => {
-                // peer is interested in us
-                peer.peer_interested = true;
-                info!("Peer {:#?} is interested in us", peer.conn_info);
-            }
-            MessageType::NotInterested => {
-                // peer is not interested in us
-                peer.peer_interested = false;
-                info!("Peer {:#?} is uninterested in us", peer.conn_info);
-            }
-            MessageType::Have => {
-                // peer has piece <piece_index>
-                let piece_index = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                peer.piece_lookup.mark_piece(piece_index);
+                        info!("Peer {:#?} has unchoked us", conn_info);
+                    }
+                    MessageType::Interested => {
+                        // peer is interested in us
+                        peer.peer_interested = true;
+                        info!("Peer {:#?} is interested in us", peer.conn_info);
+                    }
+                    MessageType::NotInterested => {
+                        // peer is not interested in us
+                        peer.peer_interested = false;
+                        info!("Peer {:#?} is uninterested in us", peer.conn_info);
+                    }
+                    MessageType::Have => {
+                        // peer has piece <piece_index>
+                        let piece_index = slice_to_u32_msb(&msg.payload[0..4]);
+                        peer.piece_lookup.mark_piece(piece_index);
 
-                info!(
-                    "Peer {:#?} has confirmed that they have piece with piece-index {}",
-                    peer.conn_info, piece_index
-                );
-            }
-            MessageType::Bitfield => {
-                // info about which pieces peer has
-                // only sent right after handshake, and before any other msg (so optional)
-                peer.piece_lookup = BitField(bt_msg.payload.clone());
-                info!(
-                    "Peer {:#?} has informed us that is has pieces {}",
-                    peer.conn_info,
-                    peer.piece_lookup.return_piece_indexes()
-                );
+                        info!(
+                            "Peer {:#?} has confirmed that they have piece with piece-index {}",
+                            peer.conn_info, piece_index
+                        );
+                    }
+                    MessageType::Bitfield => {
+                        // info about which pieces peer has
+                        // only sent right after handshake, and before any other msg (so optional)
+                        peer.piece_lookup = BitField(msg.payload.clone());
+                        info!(
+                            "Peer {:#?} has informed us that is has pieces {}",
+                            peer.conn_info,
+                            peer.piece_lookup.return_piece_indexes()
+                        );
 
-                if !peer.is_ready {
-                    peer.is_ready = true;
-                    self.mark_peer_ready();
-                }
-            }
-            MessageType::Request => {
-                // requests a piece - (index, begin byte offset, length)
-                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                info!(
-                    "Peer {:#?} has requested a piece with index {}",
-                    peer.conn_info, piece_idx
-                );
-
-                if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx) {
-                    let byte_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
-                    let length = slice_to_u32_msb(&bt_msg.payload[8..12]);
-
-                    let mut piece_store_guard = self.piece_store.lock().await;
-                    let target_block = match piece_store_guard.pieces[piece_idx as usize]
-                        .retrieve_block(byte_offset as usize, length as usize)
-                    {
-                        Some(block) => block,
-                        None => {
-                            error!(
-                                "Piece Retrieval failed for blockoffset {} of piece {}",
-                                byte_offset, piece_idx
-                            );
-                            return;
+                        if !peer.is_ready {
+                            peer.is_ready = true;
+                            self.mark_peer_ready();
                         }
-                    };
+                    }
+                    MessageType::Request => {
+                        // requests a piece - (index, begin byte offset, length)
+                        let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
+                        info!(
+                            "Peer {:#?} has requested a piece with index {}",
+                            peer.conn_info, piece_idx
+                        );
 
-                    info!(
-                        "Piece {} with Block offset {} retrieved",
-                        piece_idx, byte_offset
-                    );
-                    let mut pay_load = Vec::with_capacity(target_block.len() + 8);
+                        if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx) {
+                            let byte_offset = slice_to_u32_msb(&msg.payload[4..8]);
+                            let length = slice_to_u32_msb(&msg.payload[8..12]);
 
-                    pay_load.extend_from_slice(&piece_idx.to_be_bytes());
-                    pay_load.extend_from_slice(&byte_offset.to_be_bytes());
-                    pay_load.extend_from_slice(&target_block);
+                            let mut piece_store_guard = self.piece_store.lock().await;
+                            let target_block = match piece_store_guard.pieces[piece_idx as usize]
+                                .retrieve_block(byte_offset as usize, length as usize)
+                            {
+                                Some(block) => block,
+                                None => {
+                                    error!(
+                                        "Piece Retrieval failed for blockoffset {} of piece {}",
+                                        byte_offset, piece_idx
+                                    );
+                                    return;
+                                }
+                            };
 
-                    info!("Payload in response to request ready to send");
+                            info!(
+                                "Piece {} with Block offset {} retrieved",
+                                piece_idx, byte_offset
+                            );
+                            let mut pay_load = Vec::with_capacity(target_block.len() + 8);
 
-                    self.send_channels[&conn_info.clone()]
-                        .send(MessageType::Piece.build_msg(pay_load))
-                        .await
-                        .unwrap();
-                } else if peer.am_choking {
-                    info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", peer.conn_info, piece_idx);
-                } else {
-                    info!(
-                        "Do not have the piece with index {} that peer {:#?} has requested",
-                        piece_idx, conn_info
-                    );
+                            pay_load.extend_from_slice(&piece_idx.to_be_bytes());
+                            pay_load.extend_from_slice(&byte_offset.to_be_bytes());
+                            pay_load.extend_from_slice(&target_block);
+
+                            info!("Payload in response to request ready to send");
+
+                            self.send_channels[&conn_info.clone()]
+                                .send((MessageType::Piece.build_msg(pay_load), None))
+                                .await
+                                .unwrap();
+                        } else if peer.am_choking {
+                            info!("Currently choking peer {:#?} so we cannot fulfill its request of piece with index {}", peer.conn_info, piece_idx);
+                        } else {
+                            info!(
+                                "Do not have the piece with index {} that peer {:#?} has requested",
+                                piece_idx, conn_info
+                            );
+                        }
+                    }
+                    MessageType::Piece => {
+                        // in response to Request, returns piece data
+                        // index, begin, block data
+                        let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
+                        let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
+                        let block_data = &msg.payload[8..];
+                        let block_id =
+                            ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+
+                        info!(
+                            "Peer {:#?} has sent us piece {} starting at offset {} with length {}. Determined block id = {}",
+                            conn_info,
+                            piece_idx,
+                            block_offset,
+                            block_data.len(),
+                            block_id
+                        );
+
+                        peer.pipeline.retain(|p| p.block_id != block_id);
+
+                        info!(
+                            "AFTER: Peer {:?} has pipeline: {:?} and buffer: {:?}",
+                            peer, peer.pipeline, peer.buffer
+                        );
+
+                        let entry = peer.buffer.pop_front();
+
+                        self.request_tracker.resolve_request(PipelineEntry {
+                            piece_id: piece_idx,
+                            block_id,
+                        });
+
+                        if let Some(entry) = entry {
+                            self.pipeline_enqueue(entry, conn_info).await;
+                        }
+
+                        if self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
+                            block_offset as usize,
+                            block_data.len(),
+                            block_data,
+                        ) {
+                            info!("Notifying that we're finished with the piece...");
+                            self.notify_pipelines_empty.notify_one();
+                        }
+                    }
+                    MessageType::Cancel => {}
+                    MessageType::Port => {}
                 }
             }
-            MessageType::Piece => {
-                // in response to Request, returns piece data
-                // index, begin, block data
-                let piece_idx = slice_to_u32_msb(&bt_msg.payload[0..4]);
-                let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
-                let block_data = &bt_msg.payload[8..];
-                let block_id =
-                    ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
-
-                info!(
-                    "Peer {:#?} has sent us piece {} starting at offset {} with length {}. Determined block id = {}",
-                    conn_info,
-                    piece_idx,
-                    block_offset,
-                    block_data.len(),
-                    block_id
-                );
-
-                info!(
-                    "BEFORE: Peer {:?} has pipeline: {:?} and buffer: {:?}",
-                    peer, peer.pipeline, peer.buffer
-                );
-
-                peer.pipeline.retain(|p| p.block_id != block_id);
-
-                info!(
-                    "AFTER: Peer {:?} has pipeline: {:?} and buffer: {:?}",
-                    peer, peer.pipeline, peer.buffer
-                );
-
-                let entry = peer.buffer.pop_front();
-
-                self.request_tracker.resolve_request(PipelineEntry {
-                    piece_id: piece_idx,
-                    block_id,
-                });
-
-                if let Some(entry) = entry {
-                    self.pipeline_enqueue(entry, conn_info).await;
-                }
-
-                if self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
-                    block_offset as usize,
-                    block_data.len(),
-                    block_data,
-                ) {
-                    info!("Notifying that we're finished with the piece...");
-                    self.notify_pipelines_empty.notify_one();
-                }
-            }
-            MessageType::Cancel => {
-                // informing us that block <index><begin><length> is not needed anymore
-                // for endgame algo
-            }
-            MessageType::Port => {
-                // port that their dht node is listening on
-                // only for DHT extension
-            }
-            MessageType::CloseConnection => {
+            InternalMessage::CloseConnection => {
                 self.remove_peer(conn_info).await;
             }
-            MessageType::MigrateWork => {
+
+            InternalMessage::MigrateWork => {
                 // pop all items from peer's pipeline and buffer
                 let work: Vec<PipelineEntry> = {
                     let peer = self.find_peer_mut(conn_info).unwrap();
@@ -869,6 +960,18 @@ impl PeerManager {
                 };
                 info!("Migrating work {:?}", work);
                 self.redistribute_work(conn_info, work).await;
+            }
+
+            InternalMessage::UpdateSpeed { conn_info, speed } => {
+                // update speed to the corresponding peer
+                if let Some(curr_stats) =
+                    self.stats_tracker.lock().await.get_mut(&conn_info.clone())
+                {
+                    curr_stats.add_new_speed(speed);
+                    info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
+                } else {
+                    warn!("Invalid update message found");
+                }
             }
             _ => {
                 // let mut peer = self.find_peer_mut(conn_info);

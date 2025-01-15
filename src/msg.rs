@@ -1,4 +1,4 @@
-use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
+use crate::{peer::{ConnectionInfo, PipelineEntry, RemotePeer}, piece::BLOCK_SIZE};
 
 use std::{fmt, io::Cursor};
 
@@ -8,6 +8,8 @@ use std::fmt::{Display, Formatter};
 
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, BytesMut};
+use futures::stream::Forward;
+use http_req::tls::Conn;
 use log::{error, info, trace};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -147,8 +149,6 @@ pub enum MessageType {
     Piece,
     Cancel,
     Port,
-    CloseConnection,
-    MigrateWork,
 }
 
 impl MessageType {
@@ -185,8 +185,6 @@ impl MessageType {
             Self::Cancel => 8,
             Self::Port => 9,
             Self::KeepAlive => 10,
-            Self::CloseConnection => 11,
-            Self::MigrateWork => 12,
         }
     }
 
@@ -229,8 +227,31 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
-pub struct InternalMessage {
-    pub msg: Message,
-    pub conn_info: ConnectionInfo,
+pub enum InternalMessage{
+    CloseConnection,
+    ForwardMessage{
+        msg: Message,
+        conn_info: ConnectionInfo
+    },
+    MigrateWork,
+    UpdateSpeed{
+        conn_info: ConnectionInfo,
+        speed: f32,
+    },
 }
+
+// impl InternalMessageType {
+//     pub fn from_id(internal_msg_id: u8) -> Option<InternalMessageType>{
+//         match internal_msg_id{
+//             0 => Some(Self::CloseConnection),
+//             1 => Some(Self::ForwardMessage),
+//             2 => Some(Self::MigrateWork),
+//             3 => Some(Self::UpdateStats),
+//             _ => None
+//         }
+//     }
+
+//     pub fn build_msg(self, msg: Message, conn_info: ConnectionInfo) -> InternalMessage{
+//         return InternalMessage{InternalMessageType: self, }
+//     }
+// }

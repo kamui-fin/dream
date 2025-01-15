@@ -91,18 +91,28 @@ impl BitTorrent {
         peer_manager: Arc<Mutex<PeerManager>>,
     ) {
         loop {
-            let msg = msg_rx.recv().await;
-            if let Some(InternalMessage { msg, conn_info }) = &msg {
-                info!(
-                    "Received msg {:?} from peer {:?}",
-                    msg.msg_type,
-                    conn_info.addr().ip()
-                );
-                let start = Instant::now();
-                trace!("Acquiring peer lock...");
-                let mut peer_guard = peer_manager.lock().await;
-                trace!("Got the lock in {:?}", start.elapsed());
-                peer_guard.handle_msg(&msg, conn_info).await;
+            let int_msg = msg_rx.recv().await;
+            if let Some(int_msg) = &int_msg {
+                match int_msg {
+                    InternalMessage::ForwardMessage { msg, conn_info } => {
+                        info!(
+                            "Received msg {:?} from peer {:?}",
+                            msg.msg_type,
+                            conn_info.addr().ip()
+                        );
+                        peer_manager.lock().await.handle_msg(&int_msg, conn_info).await;
+                    },
+                    InternalMessage::UpdateSpeed { conn_info, speed } => {
+                        info!(
+                            "Received msg speed update from peer {:?}",
+                            conn_info.addr().ip()
+                        );
+                        peer_manager.lock().await.handle_msg(&int_msg, conn_info).await;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
             }
         }
     }
