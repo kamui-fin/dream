@@ -79,21 +79,28 @@ impl BitTorrent {
         let pt_clone_10s = piece_store.clone();
         tokio::spawn(async move {
             loop {
+                sleep(Duration::from_secs(10)).await;
+
                 pm_clone_10s
                     .lock()
                     .await
                     .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
 
                 sleep(Duration::from_secs(10)).await;
-            }
-        });
 
-        let pm_clone_30s = peer_manager.clone();
-        tokio::spawn(async move {
-            loop {
-                pm_clone_30s.lock().await.optimistic_unchoke();
+                pm_clone_10s
+                    .lock()
+                    .await
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
 
-                sleep(Duration::from_secs(30)).await;
+                sleep(Duration::from_secs(10)).await;
+
+                pm_clone_10s.lock().await.optimistic_unchoke().await;
+
+                pm_clone_10s
+                    .lock()
+                    .await
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
             }
         });
 
