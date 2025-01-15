@@ -1,7 +1,9 @@
-use crate::dht::{config::Args, kademlia::Kademlia};
 use std::{str::FromStr, sync::Arc, thread};
+
 use tiny_http::{Request, Response, Server};
 use tokio::runtime::{Handle, Runtime};
+
+use crate::dht::{config::Args, kademlia::Kademlia};
 
 pub mod config;
 pub mod context;

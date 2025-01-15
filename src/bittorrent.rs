@@ -1,28 +1,30 @@
-use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-
-use futures::future::join_all;
-use log::{debug, error, info, trace, warn};
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::{Mutex, Notify};
-use tokio::time::{sleep, Instant};
-
-use crate::msg::{InternalMessage, ServerCommand};
-use crate::peer::{self, ConnectionInfo, PipelineEntry, UnchokeMessage};
-use crate::tracker::{self, parse_torrent_file};
-use crate::utils::Notifier;
-use crate::{
-    msg::{Message, MessageType},
-    peer::{PeerManager, RemotePeer},
-    piece::{BitField, PieceStore, BLOCK_SIZE},
-    tracker::Metafile,
-    utils::slice_to_u32_msb,
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
 };
-use crate::{piece, PORT};
+
+use log::{error, info};
+use tokio::{
+    io::AsyncReadExt,
+    net::TcpListener,
+    sync::{
+        mpsc::{self, Receiver},
+        Mutex, Notify,
+    },
+    time::{sleep, Instant},
+};
+
+use crate::{
+    msg::{InternalMessage, ServerCommand},
+    peer::{ConnectionInfo, PeerManager},
+    piece::{PieceStore, BLOCK_SIZE},
+    tracker::{self, Metafile},
+    utils::Notifier,
+    PORT,
+};
 
 pub enum TorrentState {
     Seeder,
@@ -84,14 +86,16 @@ impl BitTorrent {
                 pm_clone_10s
                     .lock()
                     .await
-                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await)
+                    .await;
 
                 sleep(Duration::from_secs(10)).await;
 
                 pm_clone_10s
                     .lock()
                     .await
-                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await)
+                    .await;
 
                 sleep(Duration::from_secs(10)).await;
 
@@ -100,7 +104,8 @@ impl BitTorrent {
                 pm_clone_10s
                     .lock()
                     .await
-                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await);
+                    .recompute_choke_list(Self::get_torrent_state(pt_clone_10s.clone()).await)
+                    .await;
             }
         });
 
@@ -115,7 +120,7 @@ impl BitTorrent {
                 );
 
                 if let Ok(peers) = peers {
-                    pm_clone_30m.lock().await.sync_peers(peers);
+                    pm_clone_30m.lock().await.sync_peers(peers).await;
                 }
 
                 // Sleep for 30 minutes
@@ -160,14 +165,22 @@ impl BitTorrent {
                             msg.msg_type,
                             conn_info.addr().ip()
                         );
-                        peer_manager.lock().await.handle_msg(&int_msg, conn_info).await;
-                    },
+                        peer_manager
+                            .lock()
+                            .await
+                            .handle_msg(&int_msg, conn_info)
+                            .await;
+                    }
                     InternalMessage::UpdateSpeed { conn_info, speed } => {
                         info!(
                             "Received msg speed update from peer {:?}",
                             conn_info.addr().ip()
                         );
-                        peer_manager.lock().await.handle_msg(&int_msg, conn_info).await;
+                        peer_manager
+                            .lock()
+                            .await
+                            .handle_msg(&int_msg, conn_info)
+                            .await;
                     }
                     _ => {
                         continue;
@@ -271,6 +284,7 @@ impl BitTorrent {
                 // main_piece_queue.push_front(piece_idx);
             }
 
+            self.piece_store.lock().await.reset_piece(piece_idx);
             self.peer_manager.lock().await.request_tracker.reset();
             self.peer_manager
                 .lock()
@@ -293,29 +307,33 @@ impl BitTorrent {
 }
 
 pub struct Engine {
-    // map info hash to bittorrent struct
-    torrents: HashMap<[u8; 20], Arc<Mutex<BitTorrent>>>,
-    // listen for commands like AddTorrent
+    torrents: Vec<Arc<Mutex<BitTorrent>>>,
+    info_hashes: Vec<[u8; 20]>,
+
+    // listen for commands
     command_rx: mpsc::Receiver<ServerCommand>,
 }
-
-// TODO: be able to create a torrent from video file
 
 impl Engine {
     pub fn new(command_rx: mpsc::Receiver<ServerCommand>) -> Self {
         Self {
-            torrents: HashMap::new(),
+            torrents: Vec::new(),
+            info_hashes: Vec::new(),
             command_rx,
         }
     }
 
-    pub async fn add_torrent(&mut self, input_path: &str, output_dir: &str) -> anyhow::Result<()> {
-        let meta_file = parse_torrent_file(input_path)?;
+    pub async fn add_torrent(
+        &mut self,
+        meta_file: Metafile,
+        output_dir: &str,
+    ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
         let bt = BitTorrent::from_torrent_file(meta_file, output_dir).await?;
         let bt = Arc::new(Mutex::new(bt));
 
-        self.torrents.insert(info_hash, bt);
+        self.torrents.push(bt);
+        self.info_hashes.push(info_hash);
 
         Ok(())
     }
@@ -332,15 +350,17 @@ impl Engine {
 
                     // Handle handshake
                     let mut res = [0u8; 68];
-                    // Add timeout on this
+                    // TODO: Add timeout on this
                     socket.read_exact(&mut res).await?;
 
                     assert_eq!(res[0], 19);
                     assert_eq!(&res[1..20], b"BitTorrent protocol");
 
                     let info_hash: [u8; 20] = res[28..48].try_into().unwrap();
-                    if let Some(bittorrent) = self.torrents.get(&info_hash) {
-                        let bittorrent = bittorrent.lock().await;
+                    let index = self.info_hashes.iter().position(|i| i == &info_hash);
+
+                    if let Some(index) = index {
+                        let bittorrent = self.torrents[index].lock().await;
 
                         let mut pm_guard = bittorrent.peer_manager.lock().await;
                         if pm_guard.find_peer(&peer).is_none() {
@@ -356,10 +376,28 @@ impl Engine {
                 // Handle AddTorrent commands
                 Some(command) = self.command_rx.recv() => {
                     match command {
-                        ServerCommand::AddTorrent { input_path, output_dir } => {
-                            if let Err(e) = self.add_torrent(&input_path, &output_dir).await {
-                                error!("Failed to add torrent: {:?}", e);
+                        ServerCommand::AddExternalTorrent { input_path, output_dir } => {
+                            let meta_file = Metafile::parse_torrent_file(&input_path);
+                            match meta_file {
+                                Err(e) => {
+                                    error!("Failed to parse torrent file: {:?}", e);
+                                    continue;
+                                }
+                                Ok(meta_file) => {
+                                    if let Err(e) = self.add_torrent(meta_file, &output_dir).await {
+                                        error!("Failed to add torrent: {:?}", e);
+                                    }
+                                }
                             }
+                        },
+                        ServerCommand::AddVideo { input_path, output_dir } => {
+                            let meta_file = Metafile::from_video(&PathBuf::from_str(&input_path).unwrap(), 1024, None);
+                            if let Err(e) = self.add_torrent(meta_file, &output_dir).await {
+                                error!("Failed to add video: {:?}", e);
+                            }
+                        },
+                        ServerCommand::Start(idx) => {
+                            self.torrents[idx as usize].lock().await.begin_download().await?;
                         }
                     }
                 }

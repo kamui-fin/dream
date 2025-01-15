@@ -1,49 +1,38 @@
-use anyhow::Context;
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    hash::Hash,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    ops::Range,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
 use anyhow::{anyhow, Result};
-use byteorder::{BigEndian, ByteOrder};
-use futures::future::{self, join_all, Remote};
 use futures::{SinkExt, StreamExt};
-use http_req::tls::Conn;
 use lazy_static::lazy_static;
-use log::trace;
-use log::warn;
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use log::{error, info, trace, warn};
+use rand::{distributions::Alphanumeric, rngs::OsRng, thread_rng, Rng};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
-use sha1::digest::typenum::Bit;
-use std::alloc::System;
-use std::collections::HashMap;
-use std::fmt;
-use std::hash::Hash;
-use std::net::{IpAddr, Ipv4Addr};
-use std::ptr::read;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::current;
-use std::{collections::VecDeque, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::{mpsc, Mutex, Notify};
-use tokio::time::{self, sleep, Instant};
-use tokio_util::codec::Framed;
-
-use log::{error, info};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc::Sender,
-    time::timeout,
+    sync::{mpsc, mpsc::Sender, Mutex, Notify},
+    time::{sleep, timeout, Instant},
 };
+use tokio_util::codec::Framed;
 
-use crate::bittorrent::{BitTorrent, TorrentState};
-use crate::msg::{BitTorrentCodec, InternalMessage};
-use crate::piece::{PieceStore, KB_PER_BLOCK};
-use crate::tracker::TrackerResponse;
-use crate::utils::Notifier;
 use crate::{
-    msg::{Message, MessageType},
-    piece::{BitField, BLOCK_SIZE},
-    utils::slice_to_u32_msb,
+    bittorrent::TorrentState,
+    msg::{BitTorrentCodec, InternalMessage, Message, MessageType},
+    piece::{BitField, PieceStore, BLOCK_SIZE, KB_PER_BLOCK},
+    tracker::TrackerResponse,
+    utils::{slice_to_u32_msb, Notifier},
 };
-use crate::{peer, piece};
 
 lazy_static! {
     pub static ref DREAM_ID: String = thread_rng()
@@ -252,12 +241,13 @@ impl PeerSession {
         let mut framed = Framed::new(conn, BitTorrentCodec);
         // send bitfield
         let bitfield_msg = MessageType::Bitfield.build_msg(bitfield.0);
-        framed.send(bitfield_msg).await;
+        framed.send(bitfield_msg).await?;
 
         Ok(Self {
             framed,
             forwarder,
             peer,
+            request_tracker: HashMap::new(),
         })
     }
 
@@ -345,7 +335,7 @@ impl PeerSession {
                                 self.peer,
                                 e
                             );
-                            self.framed.close().await;
+                            let _ = self.framed.close().await;
                             let close_msg = InternalMessage::CloseConnection;
                             self.forwarder.send(close_msg).await.unwrap();
                             return;
@@ -426,10 +416,6 @@ pub struct PipelineEntry {
     block_id: u32,
 }
 
-pub struct UnchokeMessage {
-    pub peer: ConnectionInfo,
-}
-
 impl RemotePeer {
     fn from_peer(peer: ConnectionInfo, num_pieces: u32) -> Self {
         Self {
@@ -486,9 +472,8 @@ impl PeerManager {
 
         let num_peers = peers.len();
 
-        let not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
-        let mut stats_tracker = Arc::new(Mutex::new(HashMap::new()));
-
+        let num_not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
+        let stats_tracker = Arc::new(Mutex::new(HashMap::new()));
 
         for remote_peer in &peers {
             let info_hash_clone = info_hash.clone();
@@ -696,12 +681,12 @@ impl PeerManager {
     }
 
     pub async fn unchoke(&mut self, conn_info: &ConnectionInfo) {
-        self.send_message(conn_info, MessageType::UnChoke.build_msg(vec![]))
+        self.send_message(conn_info, MessageType::UnChoke.build_empty())
             .await;
     }
 
     pub async fn choke(&mut self, conn_info: &ConnectionInfo) {
-        self.send_message(conn_info, MessageType::Choke.build_msg(vec![]))
+        self.send_message(conn_info, MessageType::Choke.build_empty())
             .await;
     }
 
@@ -856,7 +841,6 @@ impl PeerManager {
         self.redistribute_work(conn_info, work).await;
     }
 
-
     pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
         // move optimistic unchoke peer to the end so we don't count it in our list of top peers
         let optimistic_unchoke = self
@@ -866,24 +850,31 @@ impl PeerManager {
             .map(|pos| self.peers.remove(pos));
 
         // sort peers by average speed depending on torrent state
-        self.peers.sort_by_key(|p| match torrent_state {
-            TorrentState::Seeder => p.stats.avg_download_speed,
-            TorrentState::Leecher => p.stats.avg_upload_speed,
-        });
+        // self.peers.sort_by_key(|p| match torrent_state {
+        //     TorrentState::Seeder => p.stats.avg_download_speed,
+        //     TorrentState::Leecher => p.stats.avg_upload_speed,
+        // });
         self.peers.reverse();
 
         // select top peers (up to 4)
         let top_count = self.peers.len().min(4);
-        let top_peers = &self.peers[..top_count];
+        let top_peers: Vec<_> = self.peers[..top_count]
+            .iter()
+            .map(|p| p.conn_info.clone())
+            .collect();
+        let rest_of_peers: Vec<_> = self.peers[top_count..]
+            .iter()
+            .map(|p| p.conn_info.clone())
+            .collect();
 
         // unchoke top peers
         for peer in top_peers {
-            self.unchoke(&peer.conn_info).await;
+            self.unchoke(&peer).await;
         }
 
         // choke the remaining peers
-        for peer in &self.peers[top_count..] {
-            self.choke(&peer.conn_info).await;
+        for peer in rest_of_peers {
+            self.choke(&peer).await;
         }
 
         // restore the optimistic unchoke peer if it exists
@@ -894,7 +885,7 @@ impl PeerManager {
 
     pub async fn optimistic_unchoke(&mut self) {
         if self.peers.len() > 4 {
-            let mut rng = rand::thread_rng();
+            let mut rng = OsRng;
             let random_index = rng.gen_range(4..self.peers.len());
             let random_peer = &mut self.peers[random_index];
             random_peer.optimistic_unchoke = true;
@@ -902,7 +893,6 @@ impl PeerManager {
             self.unchoke(&random_peer_conn).await;
         }
     }
-
 
     pub async fn handle_msg(&mut self, fw_msg: &InternalMessage, conn_info: &ConnectionInfo) {
         let peer = self.find_peer_mut(conn_info);
@@ -1096,10 +1086,6 @@ impl PeerManager {
                 } else {
                     warn!("Invalid update message found");
                 }
-            }
-            _ => {
-                // let mut peer = self.find_peer_mut(conn_info);
-                warn!("Invalid message from peer {:#?}", conn_info);
             }
         }
 

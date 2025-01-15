@@ -1,7 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{error, info};
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use sha1::{Digest, Sha1};
 use tokio::sync::Notify;
 

@@ -7,9 +7,8 @@ use std::{
 };
 
 use rand::Rng;
-use tokio::time::sleep;
-
 use serde_json::{json, Value};
+use tokio::time::sleep;
 
 use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 

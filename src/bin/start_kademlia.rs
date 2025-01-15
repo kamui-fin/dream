@@ -1,6 +1,5 @@
-extern crate pretty_env_logger;
-#[macro_use]
 extern crate log;
+extern crate pretty_env_logger;
 
 use clap::Parser;
 use dream::dht::{config::Args, start_dht};

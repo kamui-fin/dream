@@ -1,8 +1,8 @@
-use log::info;
-use serde::Serialize;
 use std::collections::LinkedList;
 
+use log::info;
 use rand::Rng;
+use serde::Serialize;
 
 use crate::dht::{
     config::{K, NUM_BITS},

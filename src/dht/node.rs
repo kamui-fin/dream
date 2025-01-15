@@ -1,5 +1,8 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{cmp::Ordering, net::IpAddr};
+use std::{
+    cmp::Ordering,
+    net::IpAddr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes

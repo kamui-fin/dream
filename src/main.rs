@@ -5,16 +5,9 @@ mod piece;
 mod tracker;
 mod utils;
 
-use std::sync::Arc;
-
 use anyhow::Result;
-use bittorrent::{BitTorrent, Engine};
-use log::info;
-use msg::InternalMessage;
-use tokio::sync::{
-    mpsc::{self, Receiver},
-    Mutex,
-};
+use bittorrent::Engine;
+use tokio::sync::mpsc::{self};
 
 const PORT: u16 = 6881;
 
@@ -31,7 +24,7 @@ async fn main() -> Result<()> {
         engine.start_server().await
     });
 
-    tx.send(msg::ServerCommand::AddTorrent {
+    tx.send(msg::ServerCommand::AddExternalTorrent {
         input_path,
         output_dir,
     })

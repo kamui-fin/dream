@@ -1,11 +1,12 @@
-use log::{info, trace};
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     vec,
 };
+
+use log::info;
 
 use crate::{tracker::Metafile, utils::hash_obj};
 

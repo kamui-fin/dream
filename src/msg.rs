@@ -1,17 +1,11 @@
-use crate::{peer::{ConnectionInfo, PipelineEntry, RemotePeer}, piece::BLOCK_SIZE};
-
-use std::{fmt, io::Cursor};
-
-use crate::piece::Piece;
-use crate::utils::slice_to_u32_msb;
-use std::fmt::{Display, Formatter};
+use std::{fmt, fmt::Formatter, io::Cursor};
 
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, BytesMut};
-use futures::stream::Forward;
-use http_req::tls::Conn;
-use log::{error, info, trace};
+use log::trace;
 use tokio_util::codec::{Decoder, Encoder};
+
+use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
 
@@ -227,14 +221,14 @@ impl Message {
     }
 }
 
-pub enum InternalMessage{
+pub enum InternalMessage {
     CloseConnection,
-    ForwardMessage{
+    ForwardMessage {
         msg: Message,
-        conn_info: ConnectionInfo
+        conn_info: ConnectionInfo,
     },
     MigrateWork,
-    UpdateSpeed{
+    UpdateSpeed {
         conn_info: ConnectionInfo,
         speed: f32,
     },
@@ -242,9 +236,13 @@ pub enum InternalMessage{
 
 #[derive(Debug)]
 pub enum ServerCommand {
-    AddTorrent {
+    AddExternalTorrent {
         input_path: String,
         output_dir: String,
     },
+    AddVideo {
+        input_path: String,
+        output_dir: String,
+    },
+    Start(u32),
 }
-

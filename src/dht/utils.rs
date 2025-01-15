@@ -1,7 +1,9 @@
-use crate::dht::node::Node;
+use std::net::{IpAddr, Ipv4Addr};
+
 use log::info;
 use rand::{rngs::OsRng, Rng, RngCore};
-use std::net::{IpAddr, Ipv4Addr};
+
+use crate::dht::node::Node;
 // use hex;
 
 pub fn gen_secret() -> [u8; 16] {

@@ -13,31 +13,30 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
-use futures::future::join_all;
-use futures::FutureExt;
-use log::error;
-use log::info;
-use serde::{Deserialize, Serialize};
-use sha1::Digest;
-use sha1::Sha1;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use std::{
-    collections::{BinaryHeap, HashSet},
-    net::IpAddr,
-    sync::Mutex,
+    collections::{BinaryHeap, HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
-use crate::dht::utils::deserialize_compact_peers;
+use futures::{future::join_all, FutureExt};
+use log::{error, info};
+use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
+use tokio::{
+    net::UdpSocket,
+    sync::oneshot,
+    task::{JoinHandle, JoinSet},
+    time::{sleep, timeout},
+};
+
 use crate::dht::{
     config::{Args, ALPHA, K, NUM_BITS, REFRESH_TIME},
+    context::RuntimeContext,
     node::{Node, NodeDistance},
+    utils::{deserialize_compact_node, deserialize_compact_peers, gen_trans_id},
 };
-use crate::dht::{context::RuntimeContext, utils::deserialize_compact_node, utils::gen_trans_id};
-use tokio::{net::UdpSocket, task::JoinSet, time::sleep};
 
 type Peer = (IpAddr, u16);
 
