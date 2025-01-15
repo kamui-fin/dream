@@ -42,8 +42,12 @@ lazy_static! {
         .collect();
 }
 
+const HANDSHAKE_LEN: usize = 68;
+const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
+const PROTOCOL_STR_LEN: usize = 19;
+
 const MAX_PIPELINE_SIZE: usize = 4;
-const STATS_WINDOW: usize = 5;
+const STATS_WINDOW_SEC: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -118,8 +122,8 @@ impl RequestTracker {
         );
 
         let sender_clone = self.timeout_sender.clone();
-
         let requests_clone = self.requests.clone();
+
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -198,9 +202,6 @@ impl PeerStats {
 }
 
 struct PeerSession {
-    // pertaining to connection
-    // conn: Arc<Mutex<TcpStream>>,
-    // conn: TcpStream,
     framed: Framed<TcpStream, BitTorrentCodec>,
     forwarder: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
@@ -223,26 +224,16 @@ impl PeerSession {
         })
     }
 
-    async fn from_session(
+    async fn from_stream(
         mut conn: TcpStream,
         forwarder: mpsc::Sender<InternalMessage>,
         peer: ConnectionInfo,
         info_hash: &[u8; 20],
         bitfield: BitField,
     ) -> anyhow::Result<Self> {
-        // respond back with handshake
-        let mut handshake = [0u8; 68];
-        handshake[0] = 19;
-        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
-        handshake[28..48].copy_from_slice(info_hash);
-        handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
-        conn.write_all(&handshake).await?;
-
+        Self::send_handshake(&mut conn, info_hash).await?;
         let mut framed = Framed::new(conn, BitTorrentCodec);
-        // send bitfield
-        let bitfield_msg = MessageType::Bitfield.build_msg(bitfield.0);
-        framed.send(bitfield_msg).await?;
-
+        Self::send_bitfield(&mut framed, bitfield).await?;
         Ok(Self {
             framed,
             forwarder,
@@ -251,34 +242,55 @@ impl PeerSession {
         })
     }
 
-    pub async fn peer_handshake(peer: ConnectionInfo, info_hash: &[u8; 20]) -> Result<TcpStream> {
-        let mut handshake = [0u8; 68];
-        handshake[0] = 19;
-        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
+    async fn send_handshake(conn: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<()> {
+        let mut handshake = [0u8; HANDSHAKE_LEN];
+        handshake[0] = PROTOCOL_STR_LEN as u8;
+        handshake[1..20].copy_from_slice(PROTOCOL_STR);
         handshake[28..48].copy_from_slice(info_hash);
         handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
+        conn.write_all(&handshake).await?;
+        Ok(())
+    }
 
+    async fn send_bitfield(
+        framed: &mut Framed<TcpStream, BitTorrentCodec>,
+        bitfield: BitField,
+    ) -> anyhow::Result<()> {
+        let bitfield_msg = MessageType::Bitfield.build_msg(bitfield.0);
+        framed.send(bitfield_msg).await?;
+        Ok(())
+    }
+
+    pub async fn peer_handshake(
+        peer: ConnectionInfo,
+        info_hash: &[u8; 20],
+    ) -> anyhow::Result<TcpStream> {
+        let mut stream = Self::connect_to_peer(&peer).await?;
+        Self::send_handshake(&mut stream, info_hash).await?;
+        Self::verify_handshake(&mut stream, info_hash).await?;
+        Ok(stream)
+    }
+
+    async fn connect_to_peer(peer: &ConnectionInfo) -> anyhow::Result<TcpStream> {
         let connect_timeout = Duration::from_secs(3);
-        let mut stream = match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
-            Ok(Ok(stream)) => stream,
+        match timeout(connect_timeout, TcpStream::connect(peer.addr())).await {
+            Ok(Ok(stream)) => Ok(stream),
             Ok(Err(e)) => {
                 error!("Failed to connect to {:?}: {}", peer, e);
-                return Err(anyhow!(e));
+                Err(anyhow!(e))
             }
             Err(_) => {
                 error!("Connection attempt timed out with {:?}", peer);
-                return Err(anyhow!("Connection timed out"));
+                Err(anyhow!("Connection timed out"))
             }
-        };
+        }
+    }
 
-        stream.write_all(&handshake).await?;
-
-        let mut res = [0u8; 68];
+    async fn verify_handshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<()> {
+        let mut res = [0u8; HANDSHAKE_LEN];
         stream.read_exact(&mut res).await?;
-
-        if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
-            trace!("Handshake successful with peer: {:#?}", peer);
-            Ok(stream)
+        if &res[0..20] == PROTOCOL_STR && &res[28..48] == info_hash {
+            Ok(())
         } else {
             stream.shutdown().await?;
             error!("Handshake mismatch");
@@ -324,12 +336,10 @@ impl PeerSession {
                                     msg,
                                     conn_info: self.peer.clone(),
                                 };
-                                trace!("MPSC len: {}", self.forwarder.capacity());
                                 self.forwarder.send(msg).await.unwrap();
                             }
                         }
                         Err(e) => {
-                            // doesn't matter what msg
                             error!(
                                 "Encountered malformed data from peer {:#?}: {:#?}",
                                 self.peer,
@@ -349,9 +359,6 @@ impl PeerSession {
                         return;
                     }
                 }
-                // else => {
-                //     break;
-                // }
             }
         }
     }
@@ -494,7 +501,7 @@ impl PeerManager {
             // create a task per peer that waits 5 seconds then updates the historical average of that peer
             tokio::spawn(async move {
                 loop {
-                    sleep(Duration::from_secs(STATS_WINDOW as u64)).await;
+                    sleep(Duration::from_secs(STATS_WINDOW_SEC as u64)).await;
                     let mut tracker_guard = stats_tracker_clone.lock().await;
                     if tracker_guard.contains_key(&target_conn_info) {
                         let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
@@ -565,17 +572,6 @@ impl PeerManager {
         }
     }
 
-    pub fn check_empty_pipelines(&self) {
-        if self
-            .peers
-            .iter()
-            .all(|p| p.buffer.is_empty() && p.pipeline.is_empty())
-        {
-            info!("About to notify that we're done??");
-            self.notify_pipelines_empty.notify_one();
-        }
-    }
-
     pub async fn with_piece(&self, piece_idx: u32) -> Vec<ConnectionInfo> {
         let mut result = Vec::new();
         for peer in &self.peers {
@@ -601,7 +597,7 @@ impl PeerManager {
 
         tokio::spawn(async move {
             let session =
-                PeerSession::from_session(stream, tx_clone, conn_info, &info_hash, bitfield).await;
+                PeerSession::from_stream(stream, tx_clone, conn_info, &info_hash, bitfield).await;
             if let Ok(mut session) = session {
                 session.start_listening(recv_msg).await;
             }
@@ -656,16 +652,6 @@ impl PeerManager {
                 "New pipeline: {:?} | New buffer: {:?}",
                 peer.pipeline, peer.buffer
             );
-        }
-    }
-
-    pub async fn peer_ready_for_piece(&self, peer: &ConnectionInfo, piece_idx: u32) -> bool {
-        let peer = self.find_peer(peer);
-        if let Some(peer) = peer {
-            peer.piece_lookup.piece_exists(piece_idx) && !peer.peer_choking
-        } else {
-            warn!("[HAS_PIECE] Peer {:#?} not found", peer);
-            false
         }
     }
 

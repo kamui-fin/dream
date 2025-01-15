@@ -221,17 +221,16 @@ impl Message {
     }
 }
 
-pub enum InternalMessage {
+pub enum InternalMessagePayload {
     CloseConnection,
-    ForwardMessage {
-        msg: Message,
-        conn_info: ConnectionInfo,
-    },
+    ForwardMessage { msg: Message },
     MigrateWork,
-    UpdateSpeed {
-        conn_info: ConnectionInfo,
-        speed: f32,
-    },
+    UpdateSpeed { speed: f32 },
+}
+
+pub struct InternalMessage {
+    payload: InternalMessagePayload,
+    origin: ConnectionInfo,
 }
 
 #[derive(Debug)]

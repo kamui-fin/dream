@@ -173,7 +173,7 @@ impl Piece {
 
     pub fn reset_piece(&mut self) {
         // NOTE: we only clear this data to save memory
-        // Other metadata remains like status == Received
+        // other metadata remains like status == Received
         self.buffer.clear();
         self.block_set.clear();
     }
@@ -186,8 +186,6 @@ impl Piece {
         }
     }
 
-    // can we really assume serial downloads?
-    // also we need a mapping between block_idx <---> (begin, len)
     pub fn store_block(&mut self, begin: usize, len: usize, data: &[u8]) -> bool {
         if begin + len <= self.buffer.len() {
             let block_id = ((begin / len) as f32).floor() as u32;

@@ -106,6 +106,7 @@ impl Metafile {
         }
     }
 
+    // TODO: repeated computation.. cache this
     pub fn get_info_hash(&self) -> [u8; 20] {
         let bencode_info = serde_bencoded::to_vec(&self.info).unwrap_or_default();
         hash_obj(bencode_info)
