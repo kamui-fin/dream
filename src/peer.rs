@@ -28,7 +28,7 @@ use tokio_util::codec::Framed;
 
 use crate::{
     bittorrent::TorrentState,
-    msg::{BitTorrentCodec, InternalMessage, Message, MessageType},
+    msg::{BitTorrentCodec, InternalMessage, InternalMessagePayload, Message, MessageType},
     piece::{BitField, PieceStore, BLOCK_SIZE, KB_PER_BLOCK},
     tracker::TrackerResponse,
     utils::{slice_to_u32_msb, Notifier},
@@ -327,15 +327,19 @@ impl PeerSession {
                                     self.request_tracker.remove(&corresponding_entry);
 
                                     // send a speed update message to add the new speed to the peer's stats
-                                    let speed_updater = InternalMessage::UpdateSpeed{conn_info: self.peer.clone(), speed: new_speed.as_secs_f32()};
+                                    let speed_updater = InternalMessage {
+                                        origin: self.peer.clone(),
+                                        payload: InternalMessagePayload::UpdateSpeed{speed: new_speed.as_secs_f32()}
+                                    };
                                     self.forwarder.send(speed_updater).await.unwrap();
                                     info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
                                 }
                                 // send normal piece message
-                                let msg = InternalMessage::ForwardMessage {
-                                    msg,
-                                    conn_info: self.peer.clone(),
+                                let msg = InternalMessage {
+                                    payload: (InternalMessagePayload::ForwardMessage {msg}),
+                                    origin: (self.peer.clone())
                                 };
+
                                 self.forwarder.send(msg).await.unwrap();
                             }
                         }
@@ -346,7 +350,7 @@ impl PeerSession {
                                 e
                             );
                             let _ = self.framed.close().await;
-                            let close_msg = InternalMessage::CloseConnection;
+                            let close_msg = InternalMessage{origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection};
                             self.forwarder.send(close_msg).await.unwrap();
                             return;
                         }
@@ -354,7 +358,7 @@ impl PeerSession {
                 }
                 Some(msg) = send_jobs.recv() => {
                     if let Err(_) = self.send_message(msg.0.clone(), msg.1).await {
-                        let close_msg = InternalMessage::CloseConnection;
+                        let close_msg = InternalMessage{origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection};
                         self.forwarder.send(close_msg).await.unwrap();
                         return;
                     }
@@ -397,8 +401,6 @@ pub struct RemotePeer {
     pub peer_interested: bool, // is this peer interested in us? = 0
     pub optimistic_unchoke: bool,
 
-    pub is_ready: bool,
-
     pub pipeline: Vec<PipelineEntry>,
     pub buffer: VecDeque<PipelineEntry>,
 }
@@ -407,12 +409,12 @@ impl fmt::Debug for RemotePeer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemotePeer")
             .field("peer", &self.conn_info)
-            // .field("pieces", &self.piece_lookup)
-            // .field("am_interested", &self.am_interested)
-            // .field("am_choking", &self.am_choking)
-            // .field("peer_interested", &self.peer_interested)
-            // .field("am_interested", &self.am_interested)
-            // .field("queue", &self.buffer)
+            .field("pieces", &self.piece_lookup)
+            .field("am_interested", &self.am_interested)
+            .field("am_choking", &self.am_choking)
+            .field("peer_interested", &self.peer_interested)
+            .field("am_interested", &self.am_interested)
+            .field("queue", &self.buffer)
             .finish()
     }
 }
@@ -434,7 +436,6 @@ impl RemotePeer {
             peer_interested: false,
             pipeline: Vec::new(),
             buffer: VecDeque::new(),
-            is_ready: false,
             optimistic_unchoke: false,
         }
     }
@@ -446,11 +447,9 @@ pub struct PeerManager {
 
     // channels
     send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
-    msg_tx: Sender<InternalMessage>, // only stored in case we want to add new peers dynamically
+    msg_tx: Sender<InternalMessage>, // for adding new peers dynamically
 
-    num_not_ready_peers: Arc<AtomicUsize>,
-    notify_all_ready: Arc<Notify>,
-    notify_pipelines_empty: Arc<Notifier>,
+    notify_finished_piece: Arc<Notifier>,
 
     pub request_tracker: RequestTracker,
     pub stats_tracker: Arc<Mutex<HashMap<ConnectionInfo, PeerStats>>>,
@@ -464,8 +463,7 @@ impl PeerManager {
         info_hash: &[u8; 20],
         num_pieces: u32,
         msg_tx: Sender<InternalMessage>,
-        notify_all_ready: Arc<Notify>,
-        notify_pipelines_empty: Arc<Notifier>,
+        notify_finished_piece: Arc<Notifier>,
     ) -> PeerManager {
         let request_tracker = RequestTracker::new(msg_tx.clone());
         let mut send_channels: HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>> =
@@ -477,68 +475,25 @@ impl PeerManager {
             .map(|peer| RemotePeer::from_peer(peer, num_pieces))
             .collect();
 
-        let num_peers = peers.len();
-
-        let num_not_ready_peers = Arc::new(AtomicUsize::new(num_peers));
         let stats_tracker = Arc::new(Mutex::new(HashMap::new()));
 
         for remote_peer in &peers {
-            let info_hash_clone = info_hash.clone();
-            let conn_info = remote_peer.conn_info.clone();
-            let tx_clone = msg_tx.clone();
-
-            let not_ready_peers_clone = Arc::clone(&num_not_ready_peers);
-            let notify_all_ready_clone = notify_all_ready.clone();
-
-            // initialize each peer's stats
-            stats_tracker
-                .lock()
-                .await
-                .insert(conn_info.clone(), PeerStats::init_stats());
-            let stats_tracker_clone = stats_tracker.clone();
-            let target_conn_info = conn_info.clone();
-
-            // create a task per peer that waits 5 seconds then updates the historical average of that peer
-            tokio::spawn(async move {
-                loop {
-                    sleep(Duration::from_secs(STATS_WINDOW_SEC as u64)).await;
-                    let mut tracker_guard = stats_tracker_clone.lock().await;
-                    if tracker_guard.contains_key(&target_conn_info) {
-                        let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
-                        curr_stats.update_overalls();
-                        // info!("5 seconds up, peer {:#?} has new kbps of {:#?}", target_conn_info, curr_stats.total_avg_kbps);
-                    } else {
-                        break;
-                    }
-                }
-            });
-
-            // the channel for sending messages to this peer session
-            let (send_msg, recv_msg) = mpsc::channel(2000);
-            send_channels.insert(conn_info.clone(), send_msg);
-
-            tokio::spawn(async move {
-                let session = PeerSession::new_session(tx_clone, conn_info, &info_hash_clone).await;
-                if let Ok(mut session) = session {
-                    session.start_listening(recv_msg).await;
-                } else {
-                    let old = not_ready_peers_clone.fetch_sub(1, Ordering::SeqCst);
-                    info!("Counter: {}", old - 1);
-                    if not_ready_peers_clone.load(Ordering::SeqCst) <= 5 {
-                        notify_all_ready_clone.notify_one();
-                    }
-                }
-            });
+            Self::initialize_peer(
+                remote_peer,
+                &info_hash,
+                msg_tx.clone(),
+                stats_tracker.clone(),
+                &mut send_channels,
+            )
+            .await;
         }
 
-        Self {
+        PeerManager {
             peers,
             send_channels,
             msg_tx,
             piece_store,
-            notify_pipelines_empty,
-            notify_all_ready,
-            num_not_ready_peers,
+            notify_finished_piece,
             request_tracker,
             stats_tracker,
         }
@@ -550,10 +505,6 @@ impl PeerManager {
                 self.create_peer(peer.clone()).await;
 
                 let tx_clone = self.msg_tx.clone();
-                // the channel for sending messages to this peer session
-                let (send_msg, recv_msg) = mpsc::channel(2000);
-                self.send_channels.insert(peer.clone(), send_msg);
-
                 let info_hash_clone = self
                     .piece_store
                     .lock()
@@ -562,14 +513,109 @@ impl PeerManager {
                     .get_info_hash()
                     .clone();
 
-                tokio::spawn(async move {
-                    let session = PeerSession::new_session(tx_clone, peer, &info_hash_clone).await;
-                    if let Ok(mut session) = session {
-                        session.start_listening(recv_msg).await;
-                    }
-                });
+                Self::initialize_peer_session(
+                    &mut self.send_channels,
+                    tx_clone,
+                    peer,
+                    info_hash_clone,
+                    None,
+                    None,
+                )
+                .await;
             }
         }
+    }
+
+    pub async fn init_session(
+        &mut self,
+        stream: TcpStream,
+        conn_info: ConnectionInfo,
+        info_hash: [u8; 20],
+    ) {
+        let bitfield = self.piece_store.lock().await.get_status_bitfield().clone();
+        let tx_clone = self.msg_tx.clone();
+
+        Self::initialize_peer_session(
+            &mut self.send_channels,
+            tx_clone,
+            conn_info.clone(),
+            info_hash,
+            Some(bitfield),
+            Some(stream),
+        )
+        .await;
+    }
+
+    async fn initialize_peer_session(
+        send_channels: &mut HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
+        tx_clone: Sender<InternalMessage>,
+        conn_info: ConnectionInfo,
+        info_hash: [u8; 20],
+        bitfield: Option<BitField>,
+        stream: Option<TcpStream>,
+    ) {
+        let (send_msg, recv_msg) = mpsc::channel(2000);
+        send_channels.insert(conn_info.clone(), send_msg);
+
+        tokio::spawn(async move {
+            let session = match stream {
+                Some(stream) => {
+                    PeerSession::from_stream(
+                        stream,
+                        tx_clone,
+                        conn_info,
+                        &info_hash,
+                        bitfield.unwrap(),
+                    )
+                    .await
+                }
+                None => PeerSession::new_session(tx_clone, conn_info, &info_hash).await,
+            };
+
+            if let Ok(mut session) = session {
+                session.start_listening(recv_msg).await;
+            }
+        });
+    }
+
+    async fn initialize_peer(
+        remote_peer: &RemotePeer,
+        info_hash: &[u8; 20],
+        msg_tx: Sender<InternalMessage>,
+        stats_tracker: Arc<Mutex<HashMap<ConnectionInfo, PeerStats>>>,
+        send_channels: &mut HashMap<ConnectionInfo, Sender<(Message, Option<PipelineEntry>)>>,
+    ) {
+        let conn_info = remote_peer.conn_info.clone();
+        let tx_clone = msg_tx.clone();
+
+        // initialize each peer's stats
+        stats_tracker
+            .lock()
+            .await
+            .insert(conn_info.clone(), PeerStats::init_stats());
+        let stats_tracker_clone = stats_tracker.clone();
+        let target_conn_info = conn_info.clone();
+
+        // create a task per peer that waits 5 seconds then updates the historical average of that peer
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(STATS_WINDOW_SEC as u64)).await;
+                let mut tracker_guard = stats_tracker_clone.lock().await;
+                if tracker_guard.contains_key(&target_conn_info) {
+                    let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
+                    curr_stats.update_overalls();
+                    info!(
+                        "5 seconds up, peer {:#?} has new kbps of {:#?}",
+                        target_conn_info, curr_stats.total_avg_kbps
+                    );
+                } else {
+                    break;
+                }
+            }
+        });
+
+        Self::initialize_peer_session(send_channels, tx_clone, conn_info, *info_hash, None, None)
+            .await;
     }
 
     pub async fn with_piece(&self, piece_idx: u32) -> Vec<ConnectionInfo> {
@@ -580,28 +626,6 @@ impl PeerManager {
             }
         }
         result
-    }
-
-    pub async fn init_session(
-        &mut self,
-        stream: TcpStream,
-        conn_info: ConnectionInfo,
-        info_hash: [u8; 20],
-    ) {
-        let bitfield = self.piece_store.lock().await.get_status_bitfield().clone();
-
-        let tx_clone = self.msg_tx.clone();
-        // the channel for sending messages to this peer session
-        let (send_msg, recv_msg) = mpsc::channel(2000);
-        self.send_channels.insert(conn_info.clone(), send_msg);
-
-        tokio::spawn(async move {
-            let session =
-                PeerSession::from_stream(stream, tx_clone, conn_info, &info_hash, bitfield).await;
-            if let Ok(mut session) = session {
-                session.start_listening(recv_msg).await;
-            }
-        });
     }
 
     pub async fn create_peer(&mut self, addr: ConnectionInfo) {
@@ -691,23 +715,6 @@ impl PeerManager {
             .await;
     }
 
-    pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-        if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
-            error!("Lost connection to peer {:#?}", conn_info);
-            self.remove_peer(conn_info).await;
-        }
-    }
-
-    async fn pipeline_enqueue(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
-        let peer = self.find_peer_mut(conn_info);
-        if let Some(peer) = peer {
-            peer.pipeline.push(entry.clone());
-            self.request_block(entry, conn_info).await;
-        } else {
-            warn!("[PIPELINE_ADD] Peer {:#?} not found", conn_info);
-        }
-    }
-
     async fn request_block(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
         let PipelineEntry { piece_id, block_id } = entry;
         let piece_id_bytes = piece_id.to_be_bytes();
@@ -733,18 +740,20 @@ impl PeerManager {
             .register_request(entry, conn_info.clone());
     }
 
-    fn mark_peer_ready(&self) {
-        trace!(
-            "Counter: {}",
-            self.num_not_ready_peers.load(Ordering::SeqCst)
-        );
-        self.num_not_ready_peers.fetch_sub(1, Ordering::SeqCst);
-        self.check_peers_ready();
+    pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
+        if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
+            error!("Lost connection to peer {:#?}", conn_info);
+            self.remove_peer(conn_info).await;
+        }
     }
 
-    fn check_peers_ready(&self) {
-        if self.num_not_ready_peers.load(Ordering::SeqCst) <= 5 {
-            self.notify_all_ready.notify_one();
+    async fn pipeline_enqueue(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
+        let peer = self.find_peer_mut(conn_info);
+        if let Some(peer) = peer {
+            peer.pipeline.push(entry.clone());
+            self.request_block(entry, conn_info).await;
+        } else {
+            warn!("[PIPELINE_ADD] Peer {:#?} not found", conn_info);
         }
     }
 
@@ -753,47 +762,72 @@ impl PeerManager {
         conn_info: &ConnectionInfo,
         mut work: Vec<PipelineEntry>,
     ) {
-        if !work.is_empty() {
-            let peers_with_piece: Vec<&mut RemotePeer> = self
-                .peers
-                .iter_mut()
-                .filter(|p| p.piece_lookup.piece_exists(work[0].piece_id))
-                .filter(|p| p.conn_info != *conn_info && !p.peer_choking)
-                .collect();
+        if work.is_empty() {
+            return;
+        }
 
-            if peers_with_piece.is_empty() {
-                panic!(); // if there is not a single peer with ALL pieces, this breaks our assumption!
-            }
+        let peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
 
-            let blocks_per_peer = std::cmp::max(1, (work.len() / peers_with_piece.len()) as u32);
-            let mut batch_request = vec![]; // we have to request later due to borrow checker
+        if peers_with_piece.is_empty() {
+            panic!(); // if there is not a single peer with ALL pieces, this breaks our assumption!
+        }
 
-            info!(
-                "Redistributing work of {} to {} peers ({} each)",
-                work.len(),
-                peers_with_piece.len(),
-                blocks_per_peer
-            );
+        let blocks_per_peer = std::cmp::max(1, (work.len() / peers_with_piece.len()) as u32);
+        let batch_request =
+            self.distribute_work_to_peers(peers_with_piece, &mut work, blocks_per_peer);
 
-            for peer in peers_with_piece {
-                let end_index = if work.len() < blocks_per_peer as usize {
-                    work.len()
+        self.request_blocks(batch_request).await;
+    }
+
+    fn get_peers_with_piece(
+        &mut self,
+        conn_info: &ConnectionInfo,
+        piece_id: u32,
+    ) -> Vec<&mut RemotePeer> {
+        self.peers
+            .iter_mut()
+            .filter(|p| p.piece_lookup.piece_exists(piece_id))
+            .filter(|p| p.conn_info != *conn_info && !p.peer_choking)
+            .collect()
+    }
+
+    fn distribute_work_to_peers(
+        &mut self,
+        peers_with_piece: Vec<&mut RemotePeer>,
+        work: &mut Vec<PipelineEntry>,
+        blocks_per_peer: u32,
+    ) -> Vec<(PipelineEntry, ConnectionInfo)> {
+        let mut batch_request = vec![];
+
+        info!(
+            "Redistributing work of {} to {} peers ({} each)",
+            work.len(),
+            peers_with_piece.len(),
+            blocks_per_peer
+        );
+
+        for peer in peers_with_piece {
+            let end_index = if work.len() < blocks_per_peer as usize {
+                work.len()
+            } else {
+                blocks_per_peer as usize
+            };
+            for entry in work.drain(0..end_index) {
+                if peer.pipeline.len() < MAX_PIPELINE_SIZE {
+                    peer.pipeline.push(entry.clone());
+                    batch_request.push((entry, peer.conn_info.clone()));
                 } else {
-                    blocks_per_peer as usize
-                };
-                for entry in work.drain(0..end_index) {
-                    if peer.pipeline.len() < MAX_PIPELINE_SIZE {
-                        peer.pipeline.push(entry.clone());
-                        batch_request.push((entry, peer.conn_info.clone()));
-                    } else {
-                        peer.buffer.push_back(entry);
-                    }
+                    peer.buffer.push_back(entry);
                 }
             }
+        }
 
-            for (entry, conn) in batch_request {
-                self.request_block(entry, &conn).await;
-            }
+        batch_request
+    }
+
+    async fn request_blocks(&mut self, batch_request: Vec<(PipelineEntry, ConnectionInfo)>) {
+        for (entry, conn) in batch_request {
+            self.request_block(entry, &conn).await;
         }
     }
 
@@ -804,9 +838,6 @@ impl PeerManager {
                 "Removing peer {:#?} with pipeline: {:#?} and buffer: {:#?}",
                 conn_info, peer.pipeline, peer.buffer
             );
-            if !peer.is_ready {
-                self.mark_peer_ready();
-            }
         } else {
             warn!("[DETETE_PEER] Peer {:#?} not found", conn_info);
             return;
@@ -836,10 +867,14 @@ impl PeerManager {
             .map(|pos| self.peers.remove(pos));
 
         // sort peers by average speed depending on torrent state
-        // self.peers.sort_by_key(|p| match torrent_state {
-        //     TorrentState::Seeder => p.stats.avg_download_speed,
-        //     TorrentState::Leecher => p.stats.avg_upload_speed,
-        // });
+        self.peers.sort_by_key(|p| match torrent_state {
+            TorrentState::Seeder => {
+                self.stats_tracker.lock().await[&p.conn_info].upload_total_avg_kbps
+            }
+            TorrentState::Leecher => {
+                self.stats_tracker.lock().await[&p.conn_info].download_total_avg_kbps
+            }
+        });
         self.peers.reverse();
 
         // select top peers (up to 4)
@@ -880,20 +915,17 @@ impl PeerManager {
         }
     }
 
-    pub async fn handle_msg(&mut self, fw_msg: &InternalMessage, conn_info: &ConnectionInfo) {
+    pub async fn handle_msg(&mut self, fw_msg: &InternalMessage) {
+        let conn_info = &fw_msg.origin;
         let peer = self.find_peer_mut(conn_info);
         if peer.is_none() {
-            warn!("Peer {:#?} not found", conn_info);
+            warn!("Peer {:#?} not found", &conn_info);
             return;
         }
 
         let peer = peer.unwrap();
-        let was_ready = peer.is_ready;
-        if !was_ready {
-            peer.is_ready = true;
-        }
-        match fw_msg {
-            InternalMessage::ForwardMessage { msg, conn_info } => {
+        match &fw_msg.payload {
+            InternalMessagePayload::ForwardMessage { msg } => {
                 match msg.msg_type {
                     MessageType::KeepAlive => {
                         // close connection after 2 min of inactivity (no commands)
@@ -940,11 +972,6 @@ impl PeerManager {
                             peer.conn_info,
                             peer.piece_lookup.return_piece_indexes()
                         );
-
-                        if !peer.is_ready {
-                            peer.is_ready = true;
-                            self.mark_peer_ready();
-                        }
                     }
                     MessageType::Request => {
                         // requests a piece - (index, begin byte offset, length)
@@ -1030,7 +1057,7 @@ impl PeerManager {
                         });
 
                         if let Some(entry) = entry {
-                            self.pipeline_enqueue(entry, conn_info).await;
+                            self.pipeline_enqueue(entry, &conn_info).await;
                         }
 
                         if self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
@@ -1039,44 +1066,40 @@ impl PeerManager {
                             block_data,
                         ) {
                             info!("Notifying that we're finished with the piece...");
-                            self.notify_pipelines_empty.notify_one();
+                            self.notify_finished_piece.notify_one();
                         }
                     }
                     MessageType::Cancel => {}
                     MessageType::Port => {}
                 }
             }
-            InternalMessage::CloseConnection => {
-                self.remove_peer(conn_info).await;
+            InternalMessagePayload::CloseConnection => {
+                self.remove_peer(&conn_info).await;
             }
 
-            InternalMessage::MigrateWork => {
+            InternalMessagePayload::MigrateWork => {
                 // pop all items from peer's pipeline and buffer
                 let work: Vec<PipelineEntry> = {
-                    let peer = self.find_peer_mut(conn_info).unwrap();
+                    let peer = self.find_peer_mut(&conn_info).unwrap();
                     let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
                     work.extend(peer.buffer.drain(..));
                     work
                 };
                 info!("Migrating work {:?}", work);
-                self.redistribute_work(conn_info, work).await;
+                self.redistribute_work(&conn_info, work).await;
             }
 
-            InternalMessage::UpdateSpeed { conn_info, speed } => {
+            InternalMessagePayload::UpdateSpeed { speed } => {
                 // update speed to the corresponding peer
                 if let Some(curr_stats) =
                     self.stats_tracker.lock().await.get_mut(&conn_info.clone())
                 {
-                    curr_stats.add_new_speed(speed);
+                    curr_stats.add_new_speed(&speed);
                     info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
                 } else {
                     warn!("Invalid update message found");
                 }
             }
-        }
-
-        if !was_ready {
-            self.mark_peer_ready();
         }
     }
 }

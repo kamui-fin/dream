@@ -1,2 +1,3 @@
-- Server commands:
-    - PAUSE, RESUME, REMOVE, CREATE
+-   Server commands:
+    -   PAUSE, RESUME, REMOVE, CREATE
+-   dream-cli, dream-server: communicate through IPC

@@ -229,8 +229,8 @@ pub enum InternalMessagePayload {
 }
 
 pub struct InternalMessage {
-    payload: InternalMessagePayload,
-    origin: ConnectionInfo,
+    pub payload: InternalMessagePayload,
+    pub origin: ConnectionInfo,
 }
 
 #[derive(Debug)]
