@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{future::join_all, FutureExt};
+use futures::future::join_all;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -121,7 +121,7 @@ impl KrpcSuccessResponse {
 }
 
 #[derive(Debug)]
-enum NodeOrPeer {
+pub enum NodeOrPeer {
     Peers(Vec<Peer>),
     Nodes(Vec<Node>),
 }
@@ -680,7 +680,7 @@ impl Kademlia {
                     }
 
                     // if we get a response, we need to upsert the oldest node and update its last seen and continue our search
-                    if !response.is_none() {
+                    if response.is_some() {
                         info!("Node {} responded to node {}'s ping and is being updated in the bucket", oldest_node.id, self.context.node.id);
                         oldest_node.update_last_seen();
                         routing_table.upsert_node(oldest_node);

@@ -13,7 +13,10 @@ use serde_bytes::ByteBuf;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    peer::{session::deserialize_peers, session::ConnectionInfo, DREAM_ID},
+    peer::{
+        session::{deserialize_peers, ConnectionInfo},
+        DREAM_ID,
+    },
     utils::hash_obj,
     PORT,
 };

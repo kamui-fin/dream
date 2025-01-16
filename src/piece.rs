@@ -10,7 +10,7 @@ use log::info;
 
 use crate::{tracker::Metafile, utils::hash_obj};
 
-pub const BLOCK_SIZE: u32 = (2 as u32).pow(14);
+pub const BLOCK_SIZE: u32 = 2_u32.pow(14);
 pub const KB_PER_BLOCK: u32 = BLOCK_SIZE / 1000;
 
 #[derive(Debug, Clone)]

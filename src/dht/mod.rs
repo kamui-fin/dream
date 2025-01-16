@@ -78,7 +78,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
             }
         }
         ("GET", "/ping") => {
-            let ip = url.trim_start_matches("/ping");
+            let _ = url.trim_start_matches("/ping");
 
             let ping_response = kademlia.handle_ping().await;
             let ping_response = serde_json::to_string(&ping_response).unwrap();

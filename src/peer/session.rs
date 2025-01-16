@@ -18,13 +18,12 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
+use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR, PROTOCOL_STR_LEN};
 use crate::{
     msg::{BitTorrentCodec, InternalMessage, InternalMessagePayload, Message, MessageType},
     piece::{BitField, BLOCK_SIZE},
     utils::slice_to_u32_msb,
 };
-
-use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR, PROTOCOL_STR_LEN};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -236,7 +235,7 @@ impl PeerSession {
         let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
         let block_id = ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
 
-        return PipelineEntry { piece_id, block_id };
+        PipelineEntry { piece_id, block_id }
     }
 
     pub async fn start_listening(

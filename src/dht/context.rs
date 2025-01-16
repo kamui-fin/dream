@@ -68,14 +68,3 @@ impl RuntimeContext {
         current_state
     }
 }
-
-/// Interfacing with the DHT from an external client
-/// Primarily for testing the network
-/// To be implemented as a simple HTTP server supporting:
-///     - PING
-///     - SRC
-///     - GET
-///     - PUT
-async fn start_testing_interface(port: u16) {
-    todo!()
-}

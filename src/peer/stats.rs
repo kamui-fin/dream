@@ -18,12 +18,12 @@ pub struct PeerStats {
 
 impl PeerStats {
     pub fn init_stats() -> Self {
-        return Self {
+        Self {
             current_speeds_sum: 0.0,
             current_blocks_downloaded: 0,
             total_avg_kbps: 0.0,
             total_kb: 0,
-        };
+        }
     }
 
     pub fn add_new_speed(&mut self, new_speed: &f32) {

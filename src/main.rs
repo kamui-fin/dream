@@ -1,4 +1,5 @@
 mod bittorrent;
+mod engine;
 mod msg;
 mod peer;
 mod piece;
@@ -6,7 +7,7 @@ mod tracker;
 mod utils;
 
 use anyhow::Result;
-use bittorrent::Engine;
+use engine::Engine;
 use tokio::sync::mpsc::{self};
 
 const PORT: u16 = 6881;

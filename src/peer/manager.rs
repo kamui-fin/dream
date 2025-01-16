@@ -11,6 +11,11 @@ use tokio::{
     time::sleep,
 };
 
+use super::{
+    session::{ConnectionInfo, PeerSession, RequestTracker},
+    stats::{PeerStats, STATS_WINDOW_SEC},
+    PipelineEntry, RemotePeer,
+};
 use crate::{
     bittorrent::TorrentState,
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
@@ -18,12 +23,6 @@ use crate::{
     piece::{BitField, PieceStore, BLOCK_SIZE},
     tracker::TrackerResponse,
     utils::{slice_to_u32_msb, Notifier},
-};
-
-use super::{
-    session::{ConnectionInfo, PeerSession, RequestTracker},
-    stats::{PeerStats, STATS_WINDOW_SEC},
-    PipelineEntry, RemotePeer,
 };
 
 pub struct PeerManager {
@@ -66,7 +65,7 @@ impl PeerManager {
         for remote_peer in &peers {
             Self::init_peer(
                 remote_peer,
-                &info_hash,
+                info_hash,
                 msg_tx.clone(),
                 stats_tracker.clone(),
                 &mut send_channels,
@@ -131,13 +130,7 @@ impl PeerManager {
                 self.create_peer(peer.clone()).await;
 
                 let tx_clone = self.msg_tx.clone();
-                let info_hash_clone = self
-                    .piece_store
-                    .lock()
-                    .await
-                    .meta_file
-                    .get_info_hash()
-                    .clone();
+                let info_hash_clone = self.piece_store.lock().await.meta_file.get_info_hash();
 
                 Self::init_session(
                     &mut self.send_channels,
@@ -455,7 +448,7 @@ impl PeerManager {
 
     /* Choking algorithm */
 
-    pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
+    pub async fn recompute_choke_list(&mut self, _torrent_state: TorrentState) {
         // move optimistic unchoke peer to the end so we don't count it in our list of top peers
         let optimistic_unchoke = self
             .peers
@@ -464,14 +457,14 @@ impl PeerManager {
             .map(|pos| self.peers.remove(pos));
 
         // sort peers by average speed depending on torrent state
-        self.peers.sort_by_key(|p| match torrent_state {
-            TorrentState::Seeder => {
-                // self.stats_tracker.lock().unwrap()[&p.conn_info].upload_total_avg_kbps
-            }
-            TorrentState::Leecher => {
-                // self.stats_tracker.lock().unwrap()[&p.conn_info].download_total_avg_kbps
-            }
-        });
+        // self.peers.sort_by_key(|p| match torrent_state {
+        //     TorrentState::Seeder => {
+        //         self.stats_tracker.lock().unwrap()[&p.conn_info].upload_total_avg_kbps
+        //     }
+        //     TorrentState::Leecher => {
+        //         self.stats_tracker.lock().unwrap()[&p.conn_info].download_total_avg_kbps
+        //     }
+        // });
         self.peers.reverse();
 
         // select top peers (up to 4)
@@ -656,7 +649,7 @@ impl PeerManager {
                         });
 
                         if let Some(entry) = entry {
-                            self.pipeline_enqueue(entry, &conn_info).await;
+                            self.pipeline_enqueue(entry, conn_info).await;
                         }
 
                         if self.piece_store.lock().await.pieces[piece_idx as usize].store_block(
@@ -673,19 +666,19 @@ impl PeerManager {
                 }
             }
             InternalMessagePayload::CloseConnection => {
-                self.remove_peer(&conn_info).await;
+                self.remove_peer(conn_info).await;
             }
 
             InternalMessagePayload::MigrateWork => {
                 // pop all items from peer's pipeline and buffer
                 let work: Vec<PipelineEntry> = {
-                    let peer = self.find_peer_mut(&conn_info).unwrap();
+                    let peer = self.find_peer_mut(conn_info).unwrap();
                     let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
                     work.extend(peer.buffer.drain(..));
                     work
                 };
                 info!("Migrating work {:?}", work);
-                self.redistribute_work(&conn_info, work).await;
+                self.redistribute_work(conn_info, work).await;
             }
 
             InternalMessagePayload::UpdateSpeed { speed } => {
@@ -696,7 +689,7 @@ impl PeerManager {
                     .unwrap()
                     .get_mut(&conn_info.clone())
                 {
-                    curr_stats.add_new_speed(&speed);
+                    curr_stats.add_new_speed(speed);
                     info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
                 } else {
                     warn!("Invalid update message found");

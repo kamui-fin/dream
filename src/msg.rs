@@ -5,8 +5,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use log::trace;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::peer::session::ConnectionInfo;
-use crate::piece::BLOCK_SIZE;
+use crate::{peer::session::ConnectionInfo, piece::BLOCK_SIZE};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
 
@@ -85,7 +84,7 @@ impl Encoder<Message> for BitTorrentCodec {
         buffer.extend_from_slice(&len_bytes);
 
         buffer.put_u8(msg.msg_type.to_id());
-        if msg.payload.len() > 0 {
+        if !msg.payload.is_empty() {
             buffer.extend_from_slice(&msg.payload);
         }
 
