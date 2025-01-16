@@ -53,3 +53,5 @@ impl Notifier {
         self.notified.store(false, Ordering::SeqCst);
     }
 }
+
+// TODO: structured logger

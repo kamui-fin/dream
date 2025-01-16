@@ -5,7 +5,8 @@ use bytes::{Buf, BufMut, BytesMut};
 use log::trace;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{peer::ConnectionInfo, piece::BLOCK_SIZE};
+use crate::peer::session::ConnectionInfo;
+use crate::piece::BLOCK_SIZE;
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
 
@@ -221,6 +222,7 @@ impl Message {
     }
 }
 
+#[derive(Clone)]
 pub enum InternalMessagePayload {
     CloseConnection,
     ForwardMessage { msg: Message },
@@ -228,6 +230,7 @@ pub enum InternalMessagePayload {
     UpdateSpeed { speed: f32 },
 }
 
+#[derive(Clone)]
 pub struct InternalMessage {
     pub payload: InternalMessagePayload,
     pub origin: ConnectionInfo,

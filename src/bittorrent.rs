@@ -1,27 +1,21 @@
 use std::{
-    collections::VecDeque,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
+    collections::VecDeque, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
 };
 
-use http_req::tls::Conn;
 use log::{error, info};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
     sync::{
         mpsc::{self, Receiver},
-        Mutex, Notify,
+        Mutex,
     },
     time::{sleep, Instant},
 };
 
 use crate::{
     msg::{InternalMessage, ServerCommand},
-    peer::{ConnectionInfo, PeerManager},
+    peer::{manager::PeerManager, session::ConnectionInfo},
     piece::{PieceStore, BLOCK_SIZE},
     tracker::{self, Metafile, TrackerResponse},
     utils::Notifier,
@@ -52,7 +46,6 @@ impl BitTorrent {
 
         let (msg_tx, msg_rx) = mpsc::channel(2000);
         let notify_pipelines_empty = Arc::new(Notifier::new());
-        let peer_ready_notify = Arc::new(Notify::new());
 
         let peer_manager = Self::connect_to_peers(
             peers,
@@ -60,7 +53,6 @@ impl BitTorrent {
             &info_hash,
             num_pieces,
             msg_tx,
-            peer_ready_notify.clone(),
             notify_pipelines_empty.clone(),
         )
         .await;
@@ -70,8 +62,6 @@ impl BitTorrent {
         Self::spawn_choke_manager(peer_manager.clone(), piece_store.clone());
         Self::spawn_peer_sync(peer_manager.clone(), piece_store.clone());
         Self::spawn_message_listener(msg_rx, peer_manager.clone());
-
-        peer_ready_notify.notified().await;
 
         Ok(Self {
             meta_file,
@@ -100,7 +90,6 @@ impl BitTorrent {
         info_hash: &[u8; 20],
         num_pieces: u32,
         msg_tx: mpsc::Sender<InternalMessage>,
-        peer_ready_notify: Arc<Notify>,
         notify_pipelines_empty: Arc<Notifier>,
     ) -> PeerManager {
         let peer_manager = PeerManager::connect_peers(
@@ -109,7 +98,6 @@ impl BitTorrent {
             info_hash,
             num_pieces,
             msg_tx,
-            peer_ready_notify,
             notify_pipelines_empty,
         )
         .await;
@@ -409,7 +397,9 @@ impl Engine {
             if pm_guard.find_peer(&peer).is_none() {
                 pm_guard.create_peer(peer.clone()).await;
                 info!("New connection from {:?}", peer);
-                pm_guard.init_session(socket, peer, info_hash).await;
+                pm_guard
+                    .init_session_from_stream(socket, peer, info_hash)
+                    .await;
             }
         }
         // If not serving, connection reset
