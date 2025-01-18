@@ -1,3 +1,13 @@
+- Clean shutdown
+- Alias u32, usize, etc to semantic names
+- unit testing, debug_assertions
+- more stats:
+  - \# of pending pieces
+  - \# of downloaded pieces
+  - upload rate
+- refactor:
+  - favor From<> implementations
+  - use more of codec encode for handshake
 -   Server commands:
     -   PAUSE, RESUME, REMOVE, CREATE
 -   dream-cli, dream-server: communicate through IPC

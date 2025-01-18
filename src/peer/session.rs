@@ -174,14 +174,17 @@ impl PeerSession {
         })
     }
 
-    async fn send_handshake(conn: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<()> {
+    async fn send_handshake(
+        conn: &mut TcpStream,
+        info_hash: &[u8; 20],
+    ) -> anyhow::Result<[u8; HANDSHAKE_LEN]> {
         let mut handshake = [0u8; HANDSHAKE_LEN];
         handshake[0] = PROTOCOL_STR_LEN as u8;
-        handshake[1..20].copy_from_slice(PROTOCOL_STR);
+        handshake[1..20].copy_from_slice(b"BitTorrent protocol");
         handshake[28..48].copy_from_slice(info_hash);
         handshake[48..68].copy_from_slice(DREAM_ID.as_bytes());
         conn.write_all(&handshake).await?;
-        Ok(())
+        Ok(handshake)
     }
 
     async fn send_bitfield(
@@ -198,8 +201,8 @@ impl PeerSession {
         info_hash: &[u8; 20],
     ) -> anyhow::Result<TcpStream> {
         let mut stream = Self::connect_to_peer(&peer).await?;
-        Self::send_handshake(&mut stream, info_hash).await?;
-        Self::verify_handshake(&mut stream, info_hash).await?;
+        let handshake = Self::send_handshake(&mut stream, info_hash).await?;
+        Self::verify_handshake(&mut stream, handshake).await?;
         Ok(stream)
     }
 
@@ -218,10 +221,13 @@ impl PeerSession {
         }
     }
 
-    async fn verify_handshake(stream: &mut TcpStream, info_hash: &[u8; 20]) -> anyhow::Result<()> {
+    async fn verify_handshake(
+        stream: &mut TcpStream,
+        handshake: [u8; HANDSHAKE_LEN],
+    ) -> anyhow::Result<()> {
         let mut res = [0u8; HANDSHAKE_LEN];
         stream.read_exact(&mut res).await?;
-        if &res[0..20] == PROTOCOL_STR && &res[28..48] == info_hash {
+        if res[0..20] == handshake[0..20] && res[28..48] == handshake[28..48] {
             Ok(())
         } else {
             stream.shutdown().await?;
@@ -281,22 +287,29 @@ impl PeerSession {
                                 self.peer,
                                 e
                             );
-                            let _ = self.framed.close().await;
-                            let close_msg = InternalMessage{origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection};
-                            self.forwarder.send(close_msg).await.unwrap();
+                            let _ = self.close().await;
                             return;
                         }
                     }
                 }
                 Some(msg) = send_jobs.recv() => {
                     if let Err(_) = self.send_message(msg.0.clone(), msg.1).await {
-                        let close_msg = InternalMessage{origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection};
-                        self.forwarder.send(close_msg).await.unwrap();
+                        let _ = self.close().await;
                         return;
                     }
                 }
             }
         }
+    }
+
+    pub async fn close(&mut self) -> anyhow::Result<()> {
+        let _ = self.framed.close().await;
+        let close_msg = InternalMessage {
+            origin: self.peer.clone(),
+            payload: InternalMessagePayload::CloseConnection,
+        };
+        self.forwarder.send(close_msg).await.unwrap();
+        Ok(())
     }
 
     pub async fn send_message(
