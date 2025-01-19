@@ -1,4 +1,4 @@
-use std::collections::LinkedList;
+use std::{collections::LinkedList, hash::RandomState};
 
 use log::info;
 use num_bigint::{BigUint, RandBigInt};
@@ -105,13 +105,19 @@ impl RoutingTable {
     }
 
     pub fn get_refresh_target(&self, bucket_idx: usize) -> NodeId {
-        let start = BigUint::one() << (ID_SIZE * 8 - bucket_idx - 1);
-        let end = BigUint::one() << ((ID_SIZE * 8 - bucket_idx) as u32);
+        let start = BigUint::from(1u8) << (ID_SIZE * 8 - bucket_idx - 1);
+        let end = BigUint::from(1u8) << ((ID_SIZE * 8 - bucket_idx) as u32);
 
         let mut rng = rand::thread_rng();
 
-        let mut node_id = rng.gen_biguint_range(&start, &end);
-        rng.gen_range(start..end)
+        let node_id = rng.gen_biguint_range(&start, &end);
+        let node_id_bytes = node_id.to_bytes_be();
+
+        let num_bytes = node_id_bytes.len().min(20);
+        let mut res_node_id: NodeId = [0; 20];
+        res_node_id[20 - num_bytes..].copy_from_slice(&node_id_bytes[node_id_bytes.len() - num_bytes..]);
+
+        res_node_id
     }
 
     pub fn get_nodes(&self, target_node_id: NodeId) -> Vec<Node> {
