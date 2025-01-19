@@ -271,7 +271,10 @@ impl Kademlia {
         info!("[CLIENT] Sending query to {addr}: {:#?}", query);
         let transaction_id = query.t.clone();
         let query = serde_bencoded::to_vec(&query).unwrap();
-        self.socket.send_to(&query, addr).await.unwrap();
+        self.socket
+            .send_to(&query, addr)
+            .await
+            .expect("Unable to send query");
 
         let future = self.manager.create_future(transaction_id);
         match timeout(Duration::from_secs(3), future).await {
@@ -298,6 +301,24 @@ impl Kademlia {
         let request = KrpcRequest::new("ping", arguments);
 
         self.send_request(request, addr).await
+    }
+
+    pub async fn send_ping_init(&self, addr: &str) -> Option<KrpcSuccessResponse> {
+        let arguments = HashMap::from([("id".to_string(), encode_node_id(self.node_id))]);
+        let query = KrpcRequest::new("ping", arguments);
+
+        let query = serde_bencoded::to_vec(&query).unwrap();
+        self.socket
+            .send_to(&query, addr)
+            .await
+            .expect("Unable to send query");
+
+        info!("Waiting for response from {addr}");
+        let mut buf = [0; 2048];
+        let (len, _) = self.socket.recv_from(&mut buf).await.unwrap();
+        let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
+
+        Some(response)
     }
 
     pub async fn send_find_node(&self, dest: Node, target_node_id: NodeId) -> Vec<Node> {

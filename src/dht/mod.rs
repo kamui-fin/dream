@@ -1,4 +1,9 @@
-use std::{net::IpAddr, str::FromStr, sync::Arc, thread};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    str::FromStr,
+    sync::Arc,
+    thread,
+};
 
 use node::Node;
 use tiny_http::{Request, Response, Server};
@@ -13,12 +18,81 @@ pub mod kademlia;
 pub mod node;
 pub mod routing;
 pub mod utils;
+use igd::aio::{search_gateway, Gateway};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+
+async fn setup_upnp_mapping(
+    local_ip: SocketAddrV4,
+    external_port: u16,
+    internal_port: u16,
+) -> Option<u16> {
+    println!("Local IP: {}", local_ip);
+    match search_gateway(Default::default()).await {
+        Ok(gateway) => {
+            println!("Discovered gateway: {}", gateway);
+
+            let duration = 3600; // 1 hour lease
+            let description = "BitTorrent DHT Client";
+
+            match gateway
+                .add_port(
+                    igd::PortMappingProtocol::UDP,
+                    external_port,
+                    local_ip,
+                    duration,
+                    description,
+                )
+                .await
+            {
+                Ok(_) => {
+                    println!(
+                        "Port {} mapped to {}:{}",
+                        external_port, local_ip, internal_port
+                    );
+                    Some(external_port)
+                }
+                Err(err) => {
+                    eprintln!("Failed to map port: {}", err);
+                    None
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to discover UPnP gateway: {}", err);
+            None
+        }
+    }
+}
+
+fn convert_to_socketaddrv4(addr: SocketAddr) -> Option<SocketAddrV4> {
+    if let SocketAddr::V4(v4_addr) = addr {
+        Some(v4_addr)
+    } else {
+        None // Return None if the address is not IPv4
+    }
+}
 
 pub async fn start_dht(args: &Args) {
+    let external_port = 6881;
+    let internal_port: u16 = 6881;
+
     let kademlia = Arc::new(Kademlia::init(args).await);
+
+    if let Some(mapped_port) = setup_upnp_mapping(
+        SocketAddrV4::new(Ipv4Addr::new(100, 125, 43, 68), internal_port),
+        external_port,
+        internal_port,
+    )
+    .await
+    {
+        println!("Successfully mapped external port: {}", mapped_port);
+    } else {
+        eprintln!("UPnP mapping failed. Continuing without port forwarding.");
+    }
     let bootstrap = if let Some((ip, port)) = args.get_bootstrap() {
         let response = kademlia
-            .send_ping(&format!("{}:{}", ip, port))
+            .send_ping_init(&format!("{}:{}", ip, port))
             .await
             .expect("Unable to communicate with boostrap node");
         let node_id = response.extract_id();

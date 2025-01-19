@@ -41,6 +41,8 @@ impl Engine {
         self.torrents.push(bt);
         self.info_hashes.push(info_hash);
 
+        info!("Finished adding torrent");
+
         Ok(())
     }
 

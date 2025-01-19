@@ -104,6 +104,7 @@ impl RoutingTable {
         true
     }
 
+    // TODO: test
     pub fn get_refresh_target(&self, bucket_idx: usize) -> NodeId {
         let start = BigUint::from(1u8) << (ID_SIZE * 8 - bucket_idx - 1);
         let end = BigUint::from(1u8) << ((ID_SIZE * 8 - bucket_idx) as u32);
@@ -115,7 +116,8 @@ impl RoutingTable {
 
         let num_bytes = node_id_bytes.len().min(20);
         let mut res_node_id: NodeId = [0; 20];
-        res_node_id[20 - num_bytes..].copy_from_slice(&node_id_bytes[node_id_bytes.len() - num_bytes..]);
+        res_node_id[20 - num_bytes..]
+            .copy_from_slice(&node_id_bytes[node_id_bytes.len() - num_bytes..]);
 
         res_node_id
     }

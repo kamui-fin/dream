@@ -226,7 +226,8 @@ pub enum InternalMessagePayload {
     CloseConnection,
     ForwardMessage { msg: Message },
     MigrateWork,
-    UpdateSpeed { speed: f32 },
+    UpdateDownloadSpeed { speed: f32 },
+    UpdateUploadSpeed { speed: f32 },
 }
 
 #[derive(Clone)]

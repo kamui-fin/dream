@@ -5,6 +5,11 @@ use crate::piece::KB_PER_BLOCK;
 pub const STATS_WINDOW_SEC: usize = 5;
 
 pub struct PeerStats {
+    pub download: Stat,
+    pub upload: Stat,
+}
+
+pub struct Stat {
     // track the sum of the speeds to calculate kbps every n-seconds
     pub current_speeds_sum: f32,
     // track kb downloaded in current window
@@ -16,8 +21,8 @@ pub struct PeerStats {
     pub total_kb: u32,
 }
 
-impl PeerStats {
-    pub fn init_stats() -> Self {
+pub impl Stat {
+    fn init_stats() -> Self {
         Self {
             current_speeds_sum: 0.0,
             current_blocks_downloaded: 0,
@@ -40,7 +45,7 @@ impl PeerStats {
 
         // take weighted moving average and weigh the current kbps more than the historical average
         self.total_avg_kbps = (0.125 * current_window_kbps) + (0.875 * self.total_avg_kbps);
-        info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
+        // info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
 
         // track historical kb downloaded
         self.total_kb += self.current_blocks_downloaded * KB_PER_BLOCK;
@@ -48,5 +53,14 @@ impl PeerStats {
         // reset current window
         self.current_speeds_sum = 0.0;
         self.current_blocks_downloaded = 0;
+    }
+}
+
+impl PeerStats {
+    pub fn init_stats() -> Self {
+        Self {
+            download: Stat::init_stats(),
+            upload: Stat::init_stats(),
+        }
     }
 }

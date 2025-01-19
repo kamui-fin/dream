@@ -267,7 +267,7 @@ impl PeerSession {
                                     // send a speed update message to add the new speed to the peer's stats
                                     let speed_updater = InternalMessage {
                                         origin: self.peer.clone(),
-                                        payload: InternalMessagePayload::UpdateSpeed{speed: new_speed.as_secs_f32()}
+                                        payload: InternalMessagePayload::UpdateDownloadSpeed{speed: new_speed.as_secs_f32()}
                                     };
                                     self.forwarder.send(speed_updater).await.unwrap();
                                     info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
@@ -321,8 +321,20 @@ impl PeerSession {
             self.request_tracker.insert(entry, Instant::now());
         }
 
+        let start_time = Instant::now();
+        let is_block = msg.msg_type == MessageType::Piece;
         let result = self.framed.send(msg).await;
+        let total_time = Instant::now() - start_time;
 
+        if (is_block) {
+            let upload_speed_update = InternalMessage {
+                origin: self.peer.clone(),
+                payload: InternalMessagePayload::UpdateUploadSpeed {
+                    speed: total_time.as_secs_f32(),
+                },
+            };
+            self.forwarder.send(upload_speed_update).await.unwrap();
+        }
         match result {
             Ok(_) => Ok(()),
             Err(e) => {

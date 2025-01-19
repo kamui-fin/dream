@@ -189,6 +189,7 @@ impl BitTorrent {
         );
 
         while let Some(piece_idx) = main_piece_queue.pop_front() {
+            info!("{} pieces left", main_piece_queue.len());
             self.download_piece(piece_idx).await?;
         }
 
@@ -217,6 +218,12 @@ impl BitTorrent {
         while candidates_unchoked.is_empty() {
             info!("Waiting for peer to unchoke us");
             tokio::time::sleep(Duration::from_secs(5)).await;
+            candidates = self
+                .peer_manager
+                .lock()
+                .await
+                .with_piece(piece_idx as u32)
+                .await;
             candidates_unchoked = self.get_unchoked_candidates(&candidates).await;
         }
 
@@ -308,8 +315,11 @@ impl BitTorrent {
             panic!();
         }
 
-        self.piece_store.lock().await.reset_piece(piece_idx);
+        info!("reset piece");
+        store.reset_piece(piece_idx);
+        info!("reset shi");
         self.peer_manager.lock().await.request_tracker.reset();
+        info!("distributed have");
         self.peer_manager
             .lock()
             .await

@@ -110,10 +110,10 @@ impl PeerManager {
                 if tracker_guard.contains_key(&target_conn_info) {
                     let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
                     curr_stats.update_overalls();
-                    info!(
-                        "5 seconds up, peer {:#?} has new kbps of {:#?}",
-                        target_conn_info, curr_stats.total_avg_kbps
-                    );
+                    // info!(
+                    //     "5 seconds up, peer {:#?} has new kbps of {:#?}",
+                    //     target_conn_info, curr_stats.total_avg_kbps
+                    // );
                 } else {
                     break;
                 }
@@ -376,6 +376,7 @@ impl PeerManager {
     pub async fn broadcast_have(&mut self, piece_idx: u32) {
         let conns: Vec<_> = self.send_channels.keys().cloned().collect();
         for connection in conns {
+            info!("Sending HAVE to {:#?}", connection);
             self.send_message(
                 &connection,
                 MessageType::Have.build_msg(piece_idx.to_be_bytes().to_vec()),
@@ -681,7 +682,7 @@ impl PeerManager {
                 self.redistribute_work(conn_info, work).await;
             }
 
-            InternalMessagePayload::UpdateSpeed { speed } => {
+            InternalMessagePayload::UpdateDownloadSpeed { speed } => {
                 // update speed to the corresponding peer
                 if let Some(curr_stats) = self
                     .stats_tracker
@@ -689,7 +690,21 @@ impl PeerManager {
                     .unwrap()
                     .get_mut(&conn_info.clone())
                 {
-                    curr_stats.add_new_speed(speed);
+                    curr_stats.download.add_new_speed(speed);
+                    info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
+                } else {
+                    warn!("Invalid update message found");
+                }
+            }
+            InternalMessagePayload::UpdateUploadSpeed { speed } => {
+                // update speed to the corresponding peer
+                if let Some(curr_stats) = self
+                    .stats_tracker
+                    .lock()
+                    .unwrap()
+                    .get_mut(&conn_info.clone())
+                {
+                    curr_stats.upload.add_new_speed(speed);
                     info!("Added new speed {:#?} to peer {:#?}", speed, conn_info);
                 } else {
                     warn!("Invalid update message found");

@@ -31,5 +31,7 @@ async fn main() -> Result<()> {
     })
     .await?;
 
+    tx.send(msg::ServerCommand::Start(0)).await?;
+
     result.await?
 }

@@ -303,7 +303,7 @@ impl PieceStore {
 
     pub fn get_missing_pieces(&self) -> Vec<usize> {
         (0..self.num_pieces as usize)
-            .filter(|i| self.pieces[*i].status == RequestStatus::Received)
+            .filter(|i| self.pieces[*i].status != RequestStatus::Received)
             .collect::<Vec<usize>>()
     }
 
