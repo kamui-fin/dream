@@ -1,7 +1,9 @@
-use std::{str::FromStr, sync::Arc, thread};
+use std::{net::IpAddr, str::FromStr, sync::Arc, thread};
 
+use node::Node;
 use tiny_http::{Request, Response, Server};
 use tokio::runtime::{Handle, Runtime};
+use utils::decode_node_id;
 
 use crate::dht::{config::Args, kademlia::Kademlia};
 
@@ -14,7 +16,20 @@ pub mod utils;
 
 pub async fn start_dht(args: &Args) {
     let kademlia = Arc::new(Kademlia::init(args).await);
-    let bootstrap = args.get_bootstrap();
+    let bootstrap = if let Some((ip, port)) = args.get_bootstrap() {
+        let response = kademlia
+            .send_ping(&format!("{}:{}", ip, port))
+            .await
+            .expect("Unable to communicate with boostrap node");
+        let node_id = response.extract_id();
+        Some(Node::new(
+            node_id,
+            IpAddr::from_str(&ip).expect("Unable to parse boostrap IP"),
+            port,
+        ))
+    } else {
+        None
+    };
 
     let kademlia_clone = kademlia.clone();
     thread::spawn(move || {
@@ -40,7 +55,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         ("GET", _) if url.starts_with("/peers/") => {
             let info_hash = url.trim_start_matches("/peers/");
             let peers = kademlia
-                .recursive_get_peers(info_hash.parse().unwrap())
+                .recursive_get_peers(decode_node_id(info_hash.to_string()))
                 .await;
             let peers = serde_json::to_string(&peers).unwrap();
             request
@@ -61,21 +76,16 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         }
         ("POST", _) if url.starts_with("/closest/") => {
             let id_str = url.trim_start_matches("/closest/");
-            if let Ok(id) = id_str.parse::<u32>() {
-                let closest_nodes = kademlia.recursive_find_nodes(id).await;
+            let id = decode_node_id(id_str.to_string());
+            let closest_nodes = kademlia.recursive_find_nodes(id).await;
 
-                let closest_nodes = serde_json::to_string(&closest_nodes).unwrap();
+            let closest_nodes = serde_json::to_string(&closest_nodes).unwrap();
 
-                request
-                    .respond(Response::from_string(closest_nodes).with_header(
-                        tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
-                    ))
-                    .unwrap();
-            } else {
-                request
-                    .respond(Response::from_string("Invalid ID").with_status_code(400))
-                    .unwrap();
-            }
+            request
+                .respond(Response::from_string(closest_nodes).with_header(
+                    tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
+                ))
+                .unwrap();
         }
         ("GET", "/ping") => {
             let _ = url.trim_start_matches("/ping");
@@ -93,38 +103,5 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
                 .respond(Response::from_string("404 Not Found").with_status_code(404))
                 .unwrap();
         }
-    }
-}
-
-pub async fn start_n_nodes(n: usize) {
-    // start the first node in the current thread
-    let handle = thread::spawn(|| {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(start_dht(&Args {
-            id: Some(1),
-            udp_port: 8080,
-            ..Args::default()
-        }));
-    });
-
-    // spawn additional nodes in separate threads
-    let mut handles = vec![handle];
-    for i in 1..n {
-        let udp_port = 8080 + i as u16;
-        let handle = thread::spawn(move || {
-            let rt = Runtime::new().unwrap();
-            rt.block_on(start_dht(&Args {
-                id: None,
-                udp_port,
-                bootstrap_id: Some(1),
-                bootstrap_ip: Some("127.0.0.1".to_owned()),
-                bootstrap_port: Some(8080),
-            }));
-        });
-        handles.push(handle);
-    }
-
-    for handle in handles {
-        handle.join().expect("Thread panicked");
     }
 }

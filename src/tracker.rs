@@ -25,7 +25,10 @@ pub struct Hashes(pub Vec<[u8; 20]>);
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct Metafile {
-    pub announce: String, // URL of the tracker
+    pub announce: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "announce-list")]
+    pub announce_list: Vec<Vec<String>>,
     pub comment: Option<String>,
     pub creation_date: Option<usize>,
     pub info: Info,
@@ -102,11 +105,28 @@ impl Metafile {
             .as_secs() as usize;
 
         Metafile {
-            announce: String::new(),
+            announce: None,
+            announce_list: Vec::new(),
             comment,
             creation_date: Some(creation_date),
             info,
         }
+    }
+
+    pub fn get_announce(&self) -> String {
+        if let Some(announce) = &self.announce {
+            return announce.clone();
+        } else if !self.announce_list.is_empty() {
+            for tier in &self.announce_list {
+                for tracker in tier {
+                    let url = Url::parse(&tracker).expect("Invalid tracker URL");
+                    if url.scheme() == "http" || url.scheme() == "https" {
+                        return tracker.clone();
+                    }
+                }
+            }
+        }
+        panic!("No announce URL found");
     }
 
     // TODO: repeated computation.. cache this

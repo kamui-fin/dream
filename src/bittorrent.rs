@@ -1,6 +1,4 @@
-use std::{
-    collections::VecDeque, path::PathBuf, sync::Arc, time::Duration,
-};
+use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info};
 use tokio::{
@@ -70,7 +68,7 @@ impl BitTorrent {
 
     async fn fetch_peers(meta_file: &Metafile) -> anyhow::Result<TrackerResponse> {
         let peers = tracker::get_peers_from_tracker(
-            &meta_file.announce,
+            &meta_file.get_announce(),
             tracker::TrackerRequest::new(meta_file),
         )?;
         info!("Tracker has found {} peers", peers.peers.len());
@@ -137,17 +135,17 @@ impl BitTorrent {
     fn spawn_peer_sync(peer_manager: Arc<Mutex<PeerManager>>, piece_store: Arc<Mutex<PieceStore>>) {
         tokio::spawn(async move {
             loop {
+                sleep(Duration::from_secs(30 * 60)).await;
+
                 let pt_lock = piece_store.lock().await;
                 let peers = tracker::get_peers_from_tracker(
-                    &pt_lock.meta_file.announce,
+                    &pt_lock.meta_file.get_announce(),
                     tracker::TrackerRequest::new(&pt_lock.meta_file),
                 );
 
                 if let Ok(peers) = peers {
                     peer_manager.lock().await.sync_peers(peers).await;
                 }
-
-                sleep(Duration::from_secs(30 * 60)).await;
             }
         });
     }

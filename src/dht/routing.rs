@@ -1,13 +1,13 @@
 use std::collections::LinkedList;
 
 use log::info;
+use num_bigint::{BigUint, RandBigInt};
 use rand::Rng;
 use serde::Serialize;
 
-use crate::dht::{
-    config::{K, NUM_BITS},
-    node::Node,
-};
+use crate::dht::{config::K, node::Node};
+
+use super::utils::{xor_id, NodeId, ID_SIZE};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -23,16 +23,29 @@ use crate::dht::{
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
 #[derive(Serialize, Clone)]
 pub struct RoutingTable {
-    node_id: u32,
+    node_id: NodeId,
     // array of linked lists with NUM_BITS elements
     pub buckets: Vec<LinkedList<Node>>,
 }
 
+fn leading_zeros(node_id: NodeId) -> usize {
+    let mut count = 0;
+    for byte in node_id.iter() {
+        if *byte == 0 {
+            count += 8;
+        } else {
+            count += byte.leading_zeros() as usize;
+            break;
+        }
+    }
+    count
+}
+
 impl RoutingTable {
-    pub fn new(node_id: u32) -> Self {
+    pub fn new(node_id: NodeId) -> Self {
         Self {
             node_id,
-            buckets: vec![LinkedList::new(); NUM_BITS],
+            buckets: vec![LinkedList::new(); ID_SIZE],
         }
     }
 
@@ -46,18 +59,18 @@ impl RoutingTable {
         all_nodes
     }
 
-    pub fn find_bucket_idx(&self, node_id: u32) -> usize {
-        let xor_result = node_id ^ self.node_id;
-        (xor_result.leading_zeros() - ((32 - NUM_BITS) as u32)) as usize
+    pub fn find_bucket_idx(&self, node_id: NodeId) -> usize {
+        let xor_result = xor_id(&node_id, &self.node_id);
+        leading_zeros(xor_result)
     }
 
-    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: u32) -> Option<&Node> {
+    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: NodeId) -> Option<&Node> {
         self.buckets[bucket_idx]
             .iter()
             .find(|&node| (node.id == node_id))
     }
 
-    pub fn remove_node(&mut self, node_id: u32, bucket_idx: usize) {
+    pub fn remove_node(&mut self, node_id: NodeId, bucket_idx: usize) {
         let mut new_list: LinkedList<Node> = LinkedList::new();
 
         while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
@@ -74,7 +87,7 @@ impl RoutingTable {
         let bucket_idx = self.find_bucket_idx(node.id);
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
         let is_full = self.buckets[bucket_idx].len() >= K;
-        info!("Attempting to add node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
+        // info!("Attempting to add node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
 
         if already_exists {
             self.remove_node(node.id, bucket_idx);
@@ -91,18 +104,19 @@ impl RoutingTable {
         true
     }
 
-    pub fn get_refresh_target(&self, bucket_idx: usize) -> u32 {
-        let start = 2u32.pow((NUM_BITS - bucket_idx - 1) as u32);
-        let end = 2u32.pow((NUM_BITS - bucket_idx) as u32);
+    pub fn get_refresh_target(&self, bucket_idx: usize) -> NodeId {
+        let start = BigUint::one() << (ID_SIZE * 8 - bucket_idx - 1);
+        let end = BigUint::one() << ((ID_SIZE * 8 - bucket_idx) as u32);
 
         let mut rng = rand::thread_rng();
 
+        let mut node_id = rng.gen_biguint_range(&start, &end);
         rng.gen_range(start..end)
     }
 
-    pub fn get_nodes(&self, target_node_id: u32) -> Vec<Node> {
+    pub fn get_nodes(&self, target_node_id: NodeId) -> Vec<Node> {
         let mut nodes = self.get_all_nodes();
-        nodes.sort_by_key(|node| node.id ^ target_node_id);
+        nodes.sort_by_key(|node| xor_id(&node.id, &target_node_id));
         nodes.truncate(K);
 
         if let Some(first_match) = nodes.first() {
@@ -112,17 +126,5 @@ impl RoutingTable {
         }
 
         nodes
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bucket_finder() {
-        let rt = RoutingTable::new(0);
-        assert_eq!(rt.find_bucket_idx(0b001101), 2);
-        assert_eq!(rt.find_bucket_idx(0b000001), 5);
     }
 }

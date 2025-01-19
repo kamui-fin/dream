@@ -12,6 +12,8 @@ use tokio::time::sleep;
 
 use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
+use super::utils::generate_node_id;
+
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
     pub routing_table: Arc<tokio::sync::Mutex<RoutingTable>>,
@@ -23,16 +25,13 @@ pub struct RuntimeContext {
 
 impl RuntimeContext {
     pub fn init(args: &Args) -> Self {
-        let node_id = args.id.unwrap_or_else(|| {
-            let mut rng = rand::thread_rng();
-            rng.gen_range(0..64)
-        });
+        let node_id = generate_node_id();
         let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
         let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<String, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
             std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),
-            args.udp_port,
+            args.port,
         );
         let secret = Arc::new(Mutex::new(gen_secret()));
 
