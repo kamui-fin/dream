@@ -109,11 +109,18 @@ impl PeerManager {
                 let mut tracker_guard = stats_tracker_clone.lock().unwrap();
                 if tracker_guard.contains_key(&target_conn_info) {
                     let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
-                    curr_stats.update_overalls();
-                    // info!(
-                    //     "5 seconds up, peer {:#?} has new kbps of {:#?}",
-                    //     target_conn_info, curr_stats.total_avg_kbps
-                    // );
+
+                    // replace previous window with current window data and start a new window
+                    curr_stats.download.update_overalls();
+                    curr_stats.upload.update_overalls();
+                    info!(
+                        "5 seconds up, peer {:#?} has new DOWNLOAD kbps of {:#?}",
+                        target_conn_info, curr_stats.download.total_avg_kbps
+                    );
+                    info!(
+                        "5 seconds up, peer {:#?} has new UPLOAD kbps of {:#?}",
+                        target_conn_info, curr_stats.upload.total_avg_kbps
+                    );
                 } else {
                     break;
                 }

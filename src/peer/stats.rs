@@ -43,8 +43,8 @@ impl Stat {
         // convert secs per block to kbps
         let current_window_kbps = (KB_PER_BLOCK) as f32 / average_time;
 
-        // take weighted moving average and weigh the current kbps more than the historical average
-        self.total_avg_kbps = (0.125 * current_window_kbps) + (0.875 * self.total_avg_kbps);
+        // newest average becomes historical (so we can use in algos)
+        self.total_avg_kbps = current_window_kbps;
         // info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
 
         // track historical kb downloaded
