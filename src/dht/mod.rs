@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddrV4},
     str::FromStr,
     sync::Arc,
     thread,
@@ -7,7 +7,10 @@ use std::{
 
 use node::Node;
 use tiny_http::{Request, Response, Server};
-use tokio::runtime::{Handle, Runtime};
+use tokio::{
+    net::lookup_host,
+    runtime::{Handle, Runtime},
+};
 use utils::decode_node_id;
 
 use crate::dht::{config::Args, kademlia::Kademlia};
@@ -18,9 +21,7 @@ pub mod kademlia;
 pub mod node;
 pub mod routing;
 pub mod utils;
-use igd::aio::{search_gateway, Gateway};
-use std::time::Duration;
-use tokio::net::UdpSocket;
+use igd::aio::search_gateway;
 
 async fn setup_upnp_mapping(
     local_ip: SocketAddrV4,
@@ -65,14 +66,6 @@ async fn setup_upnp_mapping(
     }
 }
 
-fn convert_to_socketaddrv4(addr: SocketAddr) -> Option<SocketAddrV4> {
-    if let SocketAddr::V4(v4_addr) = addr {
-        Some(v4_addr)
-    } else {
-        None // Return None if the address is not IPv4
-    }
-}
-
 pub async fn start_dht(args: &Args) {
     let external_port = 6881;
     let internal_port: u16 = 6881;
@@ -80,7 +73,7 @@ pub async fn start_dht(args: &Args) {
     let kademlia = Arc::new(Kademlia::init(args).await);
 
     if let Some(mapped_port) = setup_upnp_mapping(
-        SocketAddrV4::new(Ipv4Addr::new(100, 125, 43, 68), internal_port),
+        SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 226), internal_port),
         external_port,
         internal_port,
     )
@@ -90,17 +83,21 @@ pub async fn start_dht(args: &Args) {
     } else {
         eprintln!("UPnP mapping failed. Continuing without port forwarding.");
     }
-    let bootstrap = if let Some((ip, port)) = args.get_bootstrap() {
+    let bootstrap = if let Some(addr) = args.bootstrap.clone() {
+        let ip = lookup_host((addr, 0))
+            .await
+            .expect("Unable to resolve boostrap node addr")
+            .next()
+            .unwrap()
+            .ip();
+
         let response = kademlia
-            .send_ping_init(&format!("{}:{}", ip, port))
+            .send_ping_init(&format!("{}:{}", ip, 6881))
             .await
             .expect("Unable to communicate with boostrap node");
         let node_id = response.extract_id();
-        Some(Node::new(
-            node_id,
-            IpAddr::from_str(&ip).expect("Unable to parse boostrap IP"),
-            port,
-        ))
+
+        Some(Node::new(node_id, ip, 6881))
     } else {
         None
     };
@@ -140,8 +137,9 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         }
         ("PUT", _) if url.starts_with("/announce/") => {
             let info_hash = url.trim_start_matches("/announce/");
+            let info_hash = decode_node_id(info_hash.to_string());
             let handle = Handle::current();
-            handle.spawn(kademlia.announce_peer(info_hash.into()));
+            handle.spawn(kademlia.announce_peer(info_hash));
             request
                 .respond(Response::from_string(
                     "Announced as peer to requested torrent",

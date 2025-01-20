@@ -1,8 +1,6 @@
-use std::{collections::LinkedList, hash::RandomState};
+use std::collections::LinkedList;
 
-use log::info;
 use num_bigint::{BigUint, RandBigInt};
-use rand::Rng;
 use serde::Serialize;
 
 use crate::dht::{config::K, node::Node};

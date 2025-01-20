@@ -6,28 +6,27 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use rand::Rng;
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
-use super::utils::generate_node_id;
+use super::utils::{generate_node_id, NodeId};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
     pub routing_table: Arc<tokio::sync::Mutex<RoutingTable>>,
-    pub peer_store: Arc<tokio::sync::Mutex<HashMap<String, Vec<Node>>>>,
+    pub peer_store: Arc<tokio::sync::Mutex<HashMap<NodeId, Vec<Node>>>>,
     pub node: Node,
     pub secret: Arc<Mutex<[u8; 16]>>,
-    pub announce_log: Arc<Vec<String>>,
+    pub announce_log: Arc<Vec<NodeId>>,
 }
 
 impl RuntimeContext {
     pub fn init(args: &Args) -> Self {
         let node_id = generate_node_id();
         let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
-        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<String, Vec<Node>>::new()));
+        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<NodeId, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
             std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),

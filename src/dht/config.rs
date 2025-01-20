@@ -1,8 +1,6 @@
-use std::{net::Ipv4Addr, str::FromStr};
 
 use clap::{command, Parser};
 
-use crate::dht::node::Node;
 
 // Max number of entries in K-bucket
 pub const K: usize = 2;
@@ -16,20 +14,9 @@ pub const REFRESH_TIME: u64 = 15 * 60;
 #[derive(Parser, Debug, Default)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = 6881)]
     pub port: u16,
 
-    #[arg(long)]
-    pub bootstrap_ip: Option<String>,
-
-    #[arg(long)]
-    pub bootstrap_port: Option<u16>,
-}
-
-impl Args {
-    pub fn get_bootstrap(&self) -> Option<(String, u16)> {
-        let (ip, port) = (self.bootstrap_ip.clone()?, self.bootstrap_port?);
-
-        Some((ip, port))
-    }
+    #[arg(long, default_value = "router.bittorrent.com:6881")]
+    pub bootstrap: Option<String>,
 }

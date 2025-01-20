@@ -21,7 +21,7 @@ pub struct Stat {
     pub total_kb: u32,
 }
 
-pub impl Stat {
+impl Stat {
     fn init_stats() -> Self {
         Self {
             current_speeds_sum: 0.0,

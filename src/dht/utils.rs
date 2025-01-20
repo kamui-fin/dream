@@ -15,8 +15,10 @@ pub const ID_SIZE: usize = 20; // 160 bits
 
 pub type NodeId = [u8; ID_SIZE];
 
-pub fn encode_node_id(node_id: NodeId) -> String {
-    hex::encode(node_id)
+pub fn vec_to_id(vec: &Vec<u8>) -> NodeId {
+    let mut result = [0u8; ID_SIZE];
+    result.copy_from_slice(vec);
+    result
 }
 
 pub fn decode_node_id(node_id: String) -> NodeId {
@@ -33,14 +35,14 @@ pub fn generate_node_id() -> NodeId {
         let mut file = fs::File::open(path).expect("Unable to open file");
         let mut id = [0u8; 20];
         file.read_exact(&mut id).expect("Unable to read data");
-        return id;
+        id
     } else {
         let mut rng = rand::thread_rng();
         let mut id = [0u8; 20];
         rng.fill(&mut id);
         let mut file = fs::File::create(path).expect("Unable to create file");
         file.write_all(&id).expect("Unable to write data");
-        return id;
+        id
     }
 }
 
@@ -64,10 +66,10 @@ pub fn gen_trans_id() -> String {
     format!("{:02x}", trans_id)
 }
 
-pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> {
+pub fn deserialize_compact_node(bytes: &Vec<u8>) -> Vec<Node> {
     let mut nodes = Vec::new();
 
-    let bytes = hex::decode(serialized_nodes.unwrap()).unwrap();
+    // let bytes = hex::decode(serialized_nodes.unwrap()).unwrap();
 
     for curr_chunk in bytes.chunks(7) {
         if curr_chunk.len() == 26 {
@@ -89,10 +91,8 @@ pub fn deserialize_compact_node(serialized_nodes: Option<&String>) -> Vec<Node> 
     nodes
 }
 
-pub fn deserialize_compact_peers(serialized_peers: Option<&String>) -> Vec<(IpAddr, u16)> {
+pub fn deserialize_compact_peers(bytes: &Vec<u8>) -> Vec<(IpAddr, u16)> {
     let mut peers = Vec::new();
-
-    let bytes = hex::decode(serialized_peers.unwrap()).unwrap();
 
     println!("Decoded bytes {:#?}", bytes);
 

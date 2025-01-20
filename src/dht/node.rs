@@ -29,7 +29,7 @@ impl Node {
         }
     }
 
-    pub fn get_peer_compact_format(&self) -> String {
+    pub fn get_peer_compact_format(&self) -> Vec<u8> {
         let mut compact_info = [0u8; 6];
 
         if let IpAddr::V4(v4_addr) = self.ip {
@@ -40,10 +40,10 @@ impl Node {
         let port = self.port.to_be_bytes();
         compact_info[4..6].copy_from_slice(&port);
 
-        hex::encode(compact_info)
+        compact_info.to_vec()
     }
 
-    pub fn get_node_compact_format(&self) -> String {
+    pub fn get_node_compact_format(&self) -> Vec<u8> {
         let mut compact_info = [0u8; 26];
         compact_info[0..20].copy_from_slice(&self.id);
 
@@ -55,7 +55,7 @@ impl Node {
         let port = self.port.to_be_bytes();
         compact_info[25..27].copy_from_slice(&port);
 
-        hex::encode(compact_info)
+        compact_info.to_vec()
     }
 
     pub fn is_questionable(&self) -> bool {
