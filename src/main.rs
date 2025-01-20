@@ -1,5 +1,6 @@
 mod bittorrent;
 mod engine;
+mod metafile;
 mod msg;
 mod peer;
 mod piece;

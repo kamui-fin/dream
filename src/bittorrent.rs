@@ -10,10 +10,11 @@ use tokio::{
 };
 
 use crate::{
+    metafile::Metafile,
     msg::InternalMessage,
     peer::{manager::PeerManager, session::ConnectionInfo},
     piece::{PieceStore, BLOCK_SIZE},
-    tracker::{self, Metafile, TrackerResponse},
+    tracker::{self, TrackerResponse},
     utils::Notifier,
 };
 

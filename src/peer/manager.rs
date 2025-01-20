@@ -109,7 +109,7 @@ impl PeerManager {
                 let mut tracker_guard = stats_tracker_clone.lock().unwrap();
                 if tracker_guard.contains_key(&target_conn_info) {
                     let curr_stats = tracker_guard.get_mut(&target_conn_info).unwrap();
-                    curr_stats.update_overalls();
+                    // curr_stats.update_overalls();
                     // info!(
                     //     "5 seconds up, peer {:#?} has new kbps of {:#?}",
                     //     target_conn_info, curr_stats.total_avg_kbps
@@ -662,8 +662,12 @@ impl PeerManager {
                             self.notify_finished_piece.notify_one();
                         }
                     }
-                    MessageType::Cancel => {}
-                    MessageType::Port => {}
+                    MessageType::Cancel => {
+                        // TODO:
+                    }
+                    MessageType::Port => {
+                        // The listen port is the port this peer's DHT node is listening on. This peer should be inserted in the local routing table (if DHT tracker is supported).
+                    }
                 }
             }
             InternalMessagePayload::CloseConnection => {

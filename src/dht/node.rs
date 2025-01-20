@@ -89,6 +89,6 @@ impl Ord for NodeDistance {
 
 impl PartialOrd for NodeDistance {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        self.dist.partial_cmp(&other.dist)
     }
 }

@@ -3,6 +3,7 @@ use std::{
     str::FromStr,
     sync::Arc,
     thread,
+    time::Duration,
 };
 
 use node::Node;
@@ -70,8 +71,6 @@ pub async fn start_dht(args: &Args) {
     let external_port = 6881;
     let internal_port: u16 = 6881;
 
-    let kademlia = Arc::new(Kademlia::init(args).await);
-
     if let Some(mapped_port) = setup_upnp_mapping(
         SocketAddrV4::new(
             Ipv4Addr::from_str(&args.ip).expect("Invalid IP address passed in"),
@@ -86,6 +85,9 @@ pub async fn start_dht(args: &Args) {
     } else {
         eprintln!("UPnP mapping failed. Continuing without port forwarding.");
     }
+
+    let kademlia = Arc::new(Kademlia::init(args).await);
+
     let bootstrap = if let Some(addr) = args.bootstrap.clone() {
         let ip = lookup_host((addr, 0))
             .await

@@ -43,7 +43,7 @@ impl RoutingTable {
     pub fn new(node_id: NodeId) -> Self {
         Self {
             node_id,
-            buckets: vec![LinkedList::new(); ID_SIZE],
+            buckets: vec![LinkedList::new(); ID_SIZE * 8],
         }
     }
 
