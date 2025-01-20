@@ -73,7 +73,10 @@ pub async fn start_dht(args: &Args) {
     let kademlia = Arc::new(Kademlia::init(args).await);
 
     if let Some(mapped_port) = setup_upnp_mapping(
-        SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 226), internal_port),
+        SocketAddrV4::new(
+            Ipv4Addr::from_str(&args.ip).expect("Invalid IP address passed in"),
+            internal_port,
+        ),
         external_port,
         internal_port,
     )

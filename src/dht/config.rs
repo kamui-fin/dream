@@ -1,6 +1,4 @@
-
 use clap::{command, Parser};
-
 
 // Max number of entries in K-bucket
 pub const K: usize = 2;
@@ -16,6 +14,9 @@ pub const REFRESH_TIME: u64 = 15 * 60;
 pub struct Args {
     #[arg(short, long, default_value_t = 6881)]
     pub port: u16,
+
+    #[arg(long)]
+    pub ip: String, // which interface to bind to?
 
     #[arg(long, default_value = "router.bittorrent.com:6881")]
     pub bootstrap: Option<String>,
