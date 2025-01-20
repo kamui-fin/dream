@@ -25,8 +25,8 @@ use crate::{
     utils::slice_to_u32_msb,
 };
 
-const KEEPALIVE_RECEIVER_TIMEOUT: u64 = 10;
-const KEEPALIVE_SENDER_TIMEOUT: u64 = 5;
+const KEEPALIVE_RECEIVER_TIMEOUT: u64 = 60;
+const KEEPALIVE_SENDER_TIMEOUT: u64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -290,6 +290,9 @@ impl PeerSession {
                             if msg.msg_type == MessageType::KeepAlive {
                                 continue;
                             } else {
+                                if msg.msg_type == MessageType::Request{
+                                    warn!("Request came in");
+                                }
                                 if msg.msg_type == MessageType::Piece {
                                     // get the pipeline entry to track request
                                     let corresponding_entry = Self::get_pipeline_entry(msg.clone());
@@ -362,13 +365,14 @@ impl PeerSession {
         let result = self.framed.send(msg).await;
         let total_time = Instant::now() - start_time;
 
-        if (is_block) {
+        if is_block {
             let upload_speed_update = InternalMessage {
                 origin: self.peer.clone(),
                 payload: InternalMessagePayload::UpdateUploadSpeed {
                     speed: total_time.as_secs_f32(),
                 },
             };
+            warn!("Block sent with speed {:#?}", total_time);
             self.forwarder.send(upload_speed_update).await.unwrap();
         }
         match result {

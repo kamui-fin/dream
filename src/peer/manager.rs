@@ -25,6 +25,11 @@ use crate::{
     utils::{slice_to_u32_msb, Notifier},
 };
 
+pub struct GlobalStats{
+    pub num_pieces_pending: u32,
+    pub num_pieces_downloaded: u32,
+}
+
 pub struct PeerManager {
     pub peers: Vec<RemotePeer>,
     piece_store: Arc<Mutex<PieceStore>>,
@@ -37,6 +42,7 @@ pub struct PeerManager {
 
     pub request_tracker: RequestTracker,
     pub stats_tracker: Arc<std::sync::Mutex<HashMap<ConnectionInfo, PeerStats>>>,
+    pub global_stats: GlobalStats
 }
 
 impl PeerManager {
@@ -81,6 +87,7 @@ impl PeerManager {
             notify_finished_piece,
             request_tracker,
             stats_tracker,
+            global_stats: GlobalStats{num_pieces_pending: 0, num_pieces_downloaded: 0}
         }
     }
 
@@ -448,6 +455,11 @@ impl PeerManager {
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
+
+        if msg.msg_type == MessageType::Request{
+            self.global_stats.num_pieces_pending += 1;
+        }
+
         if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
             error!("Lost connection to peer {:#?}", conn_info);
             self.remove_peer(conn_info).await;
@@ -667,6 +679,8 @@ impl PeerManager {
                         ) {
                             info!("Notifying that we're finished with the piece...");
                             self.notify_finished_piece.notify_one();
+                            self.global_stats.num_pieces_pending -= 1;
+                            self.global_stats.num_pieces_downloaded+=1;
                         }
                     }
                     MessageType::Cancel => {}
