@@ -683,8 +683,12 @@ impl PeerManager {
                             self.global_stats.num_pieces_downloaded+=1;
                         }
                     }
-                    MessageType::Cancel => {}
-                    MessageType::Port => {}
+                    MessageType::Cancel => {
+                        // TODO:
+                    }
+                    MessageType::Port => {
+                        // The listen port is the port this peer's DHT node is listening on. This peer should be inserted in the local routing table (if DHT tracker is supported).
+                    }
                 }
             }
             InternalMessagePayload::CloseConnection => {

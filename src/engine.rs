@@ -8,7 +8,7 @@ use tokio::{
 };
 
 use crate::{
-    bittorrent::BitTorrent, msg::ServerCommand, peer::session::ConnectionInfo, tracker::Metafile,
+    bittorrent::BitTorrent, metafile::Metafile, msg::ServerCommand, peer::session::ConnectionInfo,
     PORT,
 };
 

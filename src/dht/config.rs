@@ -1,9 +1,9 @@
 use clap::{command, Parser};
 
 // Max number of entries in K-bucket
-pub const K: usize = 2;
+pub const K: usize = 4;
 // Max concurrent requests
-pub const ALPHA: usize = 2;
+pub const ALPHA: usize = 3;
 // Amount of time to wait before refreshing
 pub const REFRESH_TIME: u64 = 15 * 60;
 

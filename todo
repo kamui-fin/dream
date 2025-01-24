@@ -1,10 +1,14 @@
+dht integration:
+- test GET peers on mainline dht (e.g. for arch)
+- create trait Tracker that works for both http tracker and dht
+- periodically announce given the interval of trait
+- implement PORT msg and send it to newly connected peers
+- migrate everything to this new trait
+
+
 - Clean shutdown
 - Alias u32, usize, etc to semantic names
 - unit testing, debug_assertions
-- more stats:
-  - \# of pending pieces
-  - \# of downloaded pieces
-  - upload rate
 - refactor:
   - favor From<> implementations
   - use more of codec encode for handshake

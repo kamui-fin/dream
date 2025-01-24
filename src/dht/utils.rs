@@ -69,9 +69,7 @@ pub fn gen_trans_id() -> String {
 pub fn deserialize_compact_node(bytes: &Vec<u8>) -> Vec<Node> {
     let mut nodes = Vec::new();
 
-    // let bytes = hex::decode(serialized_nodes.unwrap()).unwrap();
-
-    for curr_chunk in bytes.chunks(7) {
+    for curr_chunk in bytes.chunks(26) {
         if curr_chunk.len() == 26 {
             let mut id = [0u8; 20];
             id.copy_from_slice(&curr_chunk[0..20]);
@@ -81,9 +79,7 @@ pub fn deserialize_compact_node(bytes: &Vec<u8>) -> Vec<Node> {
                 curr_chunk[22],
                 curr_chunk[23],
             );
-            info!("Ip decoded to {:#?}", ip);
             let port = u16::from_be_bytes([curr_chunk[24], curr_chunk[25]]);
-
             nodes.push(Node::new(id, std::net::IpAddr::V4(ip), port));
         }
     }
@@ -93,8 +89,6 @@ pub fn deserialize_compact_node(bytes: &Vec<u8>) -> Vec<Node> {
 
 pub fn deserialize_compact_peers(bytes: &Vec<u8>) -> Vec<(IpAddr, u16)> {
     let mut peers = Vec::new();
-
-    println!("Decoded bytes {:#?}", bytes);
 
     for curr_chunk in bytes.chunks(6) {
         if curr_chunk.len() == 6 {

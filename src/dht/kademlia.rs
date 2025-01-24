@@ -23,7 +23,7 @@ use std::{
 
 use futures::future::join_all;
 use hex::encode;
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
@@ -31,7 +31,7 @@ use tokio::{
     net::UdpSocket,
     sync::oneshot,
     task::{JoinHandle, JoinSet},
-    time::{sleep, timeout},
+    time::{sleep, timeout, Instant},
 };
 
 use crate::dht::{
@@ -205,7 +205,7 @@ pub enum NodeOrPeer {
 
 #[derive(Debug)]
 pub struct GetPeersResponse {
-    pub token: ByteBuf,
+    pub token: Option<ByteBuf>,
     pub value: NodeOrPeer,
 }
 
@@ -229,7 +229,7 @@ impl Kademlia {
     pub async fn init(args: &Args) -> Self {
         let context = Arc::new(RuntimeContext::init(args));
         let socket = Arc::new(
-            UdpSocket::bind(format!("0.0.0.0:{}", context.node.port))
+            UdpSocket::bind(format!("{}:{}", args.ip, context.node.port))
                 .await
                 .unwrap(),
         );
@@ -352,7 +352,7 @@ impl Kademlia {
 
     pub async fn send_response(&self, response: KrpcSuccessResponse, source_node: Node) {
         info!(
-            "[SERVER] Sending response {:?} to {:#?}",
+            "[SERVER] Sending response {:?} to {:?}",
             response, source_node
         );
         let addr = SocketAddr::new(source_node.ip, source_node.port);
@@ -374,25 +374,43 @@ impl Kademlia {
 
         let query = serde_bencoded::to_vec(&query).unwrap();
 
-        self.socket
-            .connect(addr)
-            .await
-            .expect("Unable to connect even");
+        let mut attempts = 0;
+        let max_retries = 10;
 
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        while attempts < max_retries {
+            attempts += 1;
 
-        self.socket
-            .send(&query)
-            .await
-            .expect("Unable to send query");
+            if let Err(e) = self.socket.connect(addr).await {
+                eprintln!("Attempt {attempts}/{max_retries}: Unable to connect: {e}");
+            } else if let Err(e) = self.socket.send(&query).await {
+                eprintln!("Attempt {attempts}/{max_retries}: Failed to send query: {e}");
+            } else {
+                let mut buf = [0; 2048];
+                match timeout(Duration::from_secs(2), self.socket.recv(&mut buf)).await {
+                    Ok(Ok(len)) => {
+                        if let Ok(response) =
+                            serde_bencoded::from_bytes::<KrpcSuccessResponse>(&buf[..len])
+                        {
+                            return Some(response); // If successful, return the response
+                        } else {
+                            eprintln!("Attempt {attempts}/{max_retries}: Failed to parse response");
+                        }
+                    }
+                    Ok(Err(e)) => eprintln!(
+                        "Attempt {attempts}/{max_retries}: Failed to receive response: {e}"
+                    ),
+                    Err(_) => {
+                        eprintln!("Attempt {attempts}/{max_retries}: Timeout waiting for response")
+                    }
+                }
+            }
 
-        info!("Waiting for response from {addr}");
-        let mut buf = [0; 2048];
-        let len = self.socket.recv(&mut buf).await.unwrap();
-        info!("Received response len = {len}");
-        let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
+            if attempts < max_retries {
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
 
-        Some(response)
+        None
     }
 
     pub async fn send_find_node(&self, dest: Node, target_node_id: NodeId) -> Vec<Node> {
@@ -403,67 +421,87 @@ impl Kademlia {
         let request = KrpcRequest::new("find_node", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
 
-        let response: KrpcSuccessResponse = self.send_request(request, &addr).await.unwrap();
-        if let Some(serialized_nodes) = response.r.get("nodes") {
+        let response = self.send_request(request, &addr).await;
+        if let Some(response) = response {
+            let serialized_nodes = response.r.get("nodes").unwrap();
             deserialize_compact_node(serialized_nodes)
         } else {
             vec![]
         }
     }
 
-    pub async fn send_get_peers(&self, dest: Node, info_hash: [u8; 20]) -> GetPeersResponse {
+    pub async fn send_get_peers(
+        &self,
+        dest: Node,
+        info_hash: [u8; 20],
+    ) -> Option<GetPeersResponse> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("info_hash".into(), info_hash.to_vec().into()),
         ]);
         let request = KrpcRequest::new("get_peers", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        let response = self.send_request(request, &addr).await.unwrap();
+        let response = self.send_request(request, &addr).await?;
 
-        let token = response.r.get("token").unwrap().clone();
+        info!("get_peers response = {:?}", response);
+
+        let token = response.r.get("token").cloned();
         if let Some(nodes) = response.r.get("nodes") {
             let nodes = deserialize_compact_node(nodes);
-            GetPeersResponse {
+            Some(GetPeersResponse {
                 token,
                 value: NodeOrPeer::Nodes(nodes),
-            }
+            })
         } else {
             let peers = response.r.get("values").unwrap(); // not deserialized
             let peers = deserialize_compact_peers(peers);
-            GetPeersResponse {
+            Some(GetPeersResponse {
                 token,
                 value: NodeOrPeer::Peers(peers),
-            }
+            })
         }
     }
 
-    pub async fn send_announce_peer(&self, dest: Node, info_hash: NodeId) -> KrpcSuccessResponse {
+    pub async fn send_announce_peer(
+        &self,
+        dest: Node,
+        info_hash: NodeId,
+    ) -> Option<KrpcSuccessResponse> {
         info!(
             "Sending announce peer for hash {:#?} to dest {:#?}",
             info_hash.to_hex(),
             dest
         );
-        let get_peers = self.send_get_peers(dest.clone(), info_hash.clone()).await;
+        let get_peers = self.send_get_peers(dest.clone(), info_hash.clone()).await?;
 
         info!("First, get_peers response = {:#?}", get_peers);
 
-        let arguments = HashMap::from([
+        let mut arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("info_hash".into(), info_hash.to_vec().into()),
-            ("token".into(), get_peers.token.into()),
         ]);
+
+        if let Some(token) = get_peers.token {
+            arguments.insert("token".into(), token);
+        }
+
         let request = KrpcRequest::new("announce_peer", arguments);
         let addr = format!("{}:{}", dest.ip, dest.port);
-        self.send_request(request, &addr).await.unwrap()
+
+        self.send_request(request, &addr).await
     }
 
     async fn select_initial_nodes(&self, target_node_id: NodeId) -> Vec<NodeDistance> {
         let mut alpha_set = vec![];
         let routing_table_clone = self.context.routing_table.lock().await;
-        let mut bucket_idx = std::cmp::min(routing_table_clone.find_bucket_idx(target_node_id), 5);
+        let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+
+        if bucket_idx == ID_SIZE * 8 {
+            bucket_idx = 0;
+        }
 
         let mut traversed_buckets = 0;
-        while routing_table_clone.buckets[bucket_idx as usize].is_empty()
+        while routing_table_clone.buckets[bucket_idx].is_empty()
             && traversed_buckets != routing_table_clone.buckets.len()
         {
             bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len();
@@ -488,15 +526,18 @@ impl Kademlia {
         target_node_id: NodeId,
     ) {
         for node in new_nodes {
-            if !within_heap.lock().unwrap().contains(&node.id) {
-                max_heap.lock().unwrap().push(NodeDistance {
+            let mut within_heap = within_heap.lock().unwrap();
+            let mut max_heap = max_heap.lock().unwrap();
+
+            if !within_heap.contains(&node.id) {
+                max_heap.push(NodeDistance {
                     node: node.clone(),
                     dist: xor_id(&node.id, &target_node_id),
                 });
-                if max_heap.lock().unwrap().len() > K {
-                    max_heap.lock().unwrap().pop();
+                if max_heap.len() > K {
+                    max_heap.pop();
                 }
-                within_heap.lock().unwrap().insert(node.id);
+                within_heap.insert(node.id);
             }
         }
     }
@@ -539,7 +580,7 @@ impl Kademlia {
                     let k_closest_nodes = kademlia
                         .send_find_node(distance_node.node.clone(), target_node_id)
                         .await;
-                    info!("{:#?}", k_closest_nodes);
+                    info!("K closest nodes: {:?}", k_closest_nodes);
                     kademlia.update_closest_nodes(
                         &max_heap,
                         &within_heap,
@@ -550,7 +591,9 @@ impl Kademlia {
             }
 
             // Join all tasks
+            let start = Instant::now();
             while set.join_next().await.is_some() {}
+            warn!("Round took {:?}", start.elapsed());
 
             // Resend to new unqueried nodes
             let new_closest = max_heap
@@ -567,7 +610,8 @@ impl Kademlia {
                 break;
             }
 
-            alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
+            // alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
+            alpha_set = new_closest.to_vec();
         }
 
         let max_heap = max_heap.lock().unwrap();
@@ -631,18 +675,22 @@ impl Kademlia {
                     let get_peers_res = kademlia
                         .send_get_peers(distance_node.node.clone(), info_hash)
                         .await;
-                    info!("[CLIENT] get_peers response: {:?}", get_peers_res);
-                    match get_peers_res.value {
-                        NodeOrPeer::Peers(peers) => Some(peers),
-                        NodeOrPeer::Nodes(k_closest_nodes) => {
-                            kademlia.update_closest_nodes(
-                                &max_heap,
-                                &within_heap,
-                                k_closest_nodes,
-                                info_hash,
-                            );
-                            None
+                    if let Some(get_peers_res) = get_peers_res {
+                        info!("[CLIENT] get_peers response: {:?}", get_peers_res);
+                        match get_peers_res.value {
+                            NodeOrPeer::Peers(peers) => Some(peers),
+                            NodeOrPeer::Nodes(k_closest_nodes) => {
+                                kademlia.update_closest_nodes(
+                                    &max_heap,
+                                    &within_heap,
+                                    k_closest_nodes,
+                                    info_hash,
+                                );
+                                None
+                            }
                         }
+                    } else {
+                        None
                     }
                 });
             }
@@ -673,7 +721,7 @@ impl Kademlia {
                 break;
             }
 
-            alpha_set = new_closest[0..ALPHA].to_vec();
+            alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
         }
 
         vec![]

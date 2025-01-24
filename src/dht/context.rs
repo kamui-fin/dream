@@ -29,7 +29,7 @@ impl RuntimeContext {
         let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<NodeId, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
-            std::net::IpAddr::V4(Ipv4Addr::from_str("0.0.0.0").unwrap()),
+            std::net::IpAddr::V4(Ipv4Addr::from_str(&args.ip).unwrap()), // TODO: we probably need public IP?
             args.port,
         );
         let secret = Arc::new(Mutex::new(gen_secret()));
