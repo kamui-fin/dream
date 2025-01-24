@@ -7,14 +7,14 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Deserializer};
 use serde_bytes::ByteBuf;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
-    time::{timeout, Instant},
+    time::{sleep, timeout, Instant},
 };
 use tokio_util::codec::Framed;
 
@@ -24,6 +24,9 @@ use crate::{
     piece::{BitField, BLOCK_SIZE},
     utils::slice_to_u32_msb,
 };
+
+const KEEPALIVE_RECEIVER_TIMEOUT: u64 = 60;
+const KEEPALIVE_SENDER_TIMEOUT: u64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
@@ -248,14 +251,48 @@ impl PeerSession {
         &mut self,
         mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>,
     ) {
+
+        let keepalive_receiver = sleep(Duration::from_secs(KEEPALIVE_RECEIVER_TIMEOUT));
+        tokio::pin!(keepalive_receiver);
+
+        let keepalive_sender = sleep(Duration::from_secs(KEEPALIVE_SENDER_TIMEOUT));
+        tokio::pin!(keepalive_sender);
+
         loop {
             tokio::select! {
+                _ = &mut keepalive_sender => {
+                    warn!("No message sent in the past {} secs, sending keepalive to peer: {:#?}", KEEPALIVE_SENDER_TIMEOUT, self.peer);
+                    let keepalive_msg =  MessageType::KeepAlive.build_msg(Vec::new());
+ 
+                    if let Err(_) = self.send_message(keepalive_msg.clone(), None).await {
+                        warn!("Keepalive send failed, closing connection to peeer {:#?}", self.peer);
+                        let close_msg = InternalMessage { origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection };
+                        self.framed.close().await.unwrap();
+                        self.forwarder.send(close_msg).await.unwrap();
+                        return;
+                    }
+                    info!("PeerSession sent {:?} successfully", keepalive_msg);
+                    keepalive_sender.as_mut().reset(Instant::now() + Duration::from_secs(KEEPALIVE_SENDER_TIMEOUT));
+                    info!("Timer reset for keepalive sender");
+                }
+                _ = &mut keepalive_receiver => {
+                    warn!("No message received in the past {} seconds, closing connection to peer {:#?}", KEEPALIVE_RECEIVER_TIMEOUT, self.peer);
+                    self.framed.close().await.unwrap();
+                    let close_msg = InternalMessage { origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection };
+                    self.forwarder.send(close_msg).await.unwrap();
+                    return;
+                }
                 Some(msg) = self.framed.next() => {
+                    // reset receiver
+                    keepalive_receiver.as_mut().reset(Instant::now() + Duration::from_secs(KEEPALIVE_RECEIVER_TIMEOUT));
                     match msg {
                         Ok(msg) => {
                             if msg.msg_type == MessageType::KeepAlive {
                                 continue;
                             } else {
+                                if msg.msg_type == MessageType::Request{
+                                    warn!("Request came in");
+                                }
                                 if msg.msg_type == MessageType::Piece {
                                     // get the pipeline entry to track request
                                     let corresponding_entry = Self::get_pipeline_entry(msg.clone());
@@ -297,6 +334,8 @@ impl PeerSession {
                         let _ = self.close().await;
                         return;
                     }
+                    // reset sender since we sent a different msg
+                    keepalive_sender.as_mut().reset(Instant::now() + Duration::from_secs(KEEPALIVE_SENDER_TIMEOUT));
                 }
             }
         }
@@ -326,13 +365,14 @@ impl PeerSession {
         let result = self.framed.send(msg).await;
         let total_time = Instant::now() - start_time;
 
-        if (is_block) {
+        if is_block {
             let upload_speed_update = InternalMessage {
                 origin: self.peer.clone(),
                 payload: InternalMessagePayload::UpdateUploadSpeed {
                     speed: total_time.as_secs_f32(),
                 },
             };
+            warn!("Block sent with speed {:#?}", total_time);
             self.forwarder.send(upload_speed_update).await.unwrap();
         }
         match result {
