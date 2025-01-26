@@ -31,3 +31,6 @@ tokio-util = { version = "0.7.13", features = ["codec"]}
 bytes = "1.9.0"
 num-bigint = { version = "0.4.6", features = ["rand"] }
 igd = { version = "0.12.1", features = ["aio"] }
+hyper = { version = "1.5.2", features =  ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }

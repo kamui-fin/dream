@@ -2,3 +2,7 @@
 .vscode
 output
 .aider*
+
+*.torrent
+*.mp4
+*.bin
