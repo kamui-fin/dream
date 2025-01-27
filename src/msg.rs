@@ -1,4 +1,8 @@
-use std::{fmt, fmt::Formatter, io::Cursor};
+use std::{
+    fmt::{self, Formatter},
+    io::Cursor,
+    ops::Range,
+};
 
 use anyhow::anyhow;
 use bytes::{Buf, BufMut, BytesMut};
@@ -237,7 +241,8 @@ pub struct InternalMessage {
 }
 
 #[derive(Debug)]
-pub enum ServerCommand {
+pub enum ServerMsg {
+    // Requests
     AddExternalTorrent {
         input_path: String,
         output_dir: String,
@@ -246,5 +251,18 @@ pub enum ServerCommand {
         input_path: String,
         output_dir: String,
     },
-    Start(u32),
+    // Responses
+    StreamRequestRange {
+        start: u64,
+        end: u64,
+        info_hash: [u8; 20],
+        response_tx: tokio::sync::mpsc::Sender<DataReady>,
+    },
+}
+
+#[derive(Debug)]
+pub struct DataReady {
+    pub start: u64,
+    pub end: u64,
+    pub data: Vec<u8>,
 }

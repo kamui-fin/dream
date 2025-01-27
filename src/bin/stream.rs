@@ -118,14 +118,14 @@ async fn video_handler(
 
     // If we are in leeching state, we need to wait for the piece to be downloaded
     // Using the range, determine the necessary piece(s)
-    // --> [client] MPSC SEND: RequestRange(start, end, info_hash)
+    // --> [client] MPSC SEND: StreamRequestRange(start, end, info_hash)
     // Engine pushes the piece(s) to the front of the queue
     // --> [engine] MPSC recv: find pieces encompassing range and move to front
     //     - PROBLEM: multiple clients fighting for different pieces to be downloaded first
     //     - If we can't find pieces in queue, create them and push to front
-
-    // --> [client] MPSC recv: DataReady(start, end, data)
-    //     - keep consuming until reach end of range
+    // --> [client] MPSC recv: DataReady(start, end)
+    //     - engine will keep sending pieces until we reach the end of the range
+    //     - of course, we handle
 
     // Return a response with the appropriate headers
     let boxed_body = BodyExt::boxed(stream_body);

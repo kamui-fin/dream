@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    ops::Range,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use sha1::{Digest, Sha1};
 use tokio::sync::Notify;
@@ -55,3 +58,11 @@ impl Notifier {
 }
 
 // TODO: structured logger
+
+// given a (start, end) inclusive byte range, what is the Range<u32> of pieces that it covers?
+pub fn byte_to_piece_range(start: u64, end: u64, piece_len: u64) -> Range<u64> {
+    let start_piece = start / piece_len;
+    let end_piece = end / piece_len;
+
+    start_piece..end_piece
+}

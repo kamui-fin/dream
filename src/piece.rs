@@ -180,7 +180,7 @@ impl Piece {
     }
 
     pub fn retrieve_block(&mut self, begin: usize, len: usize) -> Option<Vec<u8>> {
-        if begin + len < self.buffer.len() {
+        if begin + len <= self.buffer.len() {
             Some(self.buffer[begin..(begin + len)].to_vec())
         } else {
             None
@@ -306,6 +306,17 @@ impl PieceStore {
         Ok(())
     }
 
+    pub fn get_piece_data_fs(&self, piece_idx: u32) -> Vec<u8> {
+        let piece = &self.pieces[piece_idx as usize];
+        let mut file = File::open(&piece.output_path).expect("Failed to open the file");
+        let mut buffer = vec![0; piece.buffer.len()];
+        file.seek(SeekFrom::Start(piece.offset))
+            .expect("Failed to seek the file");
+        file.read(&mut buffer).expect("Failed to read the file");
+
+        buffer
+    }
+
     pub fn persist(&self, idx: usize) -> anyhow::Result<()> {
         let output_path = self.output_dir.join(self.meta_file.info.name.clone());
         if !output_path.exists() {
@@ -315,7 +326,9 @@ impl PieceStore {
         let piece = &self.pieces[idx];
         piece.persist()?;
 
-        Ok(self.save_bitfield())
+        self.save_bitfield();
+
+        Ok(())
     }
 
     pub fn save_bitfield(&self) {

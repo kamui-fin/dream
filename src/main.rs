@@ -26,13 +26,11 @@ async fn main() -> Result<()> {
         engine.start_server().await
     });
 
-    tx.send(msg::ServerCommand::AddExternalTorrent {
+    tx.send(msg::ServerMsg::AddExternalTorrent {
         input_path,
         output_dir,
     })
     .await?;
-
-    tx.send(msg::ServerCommand::Start(0)).await?;
 
     result.await?
 }

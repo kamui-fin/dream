@@ -11,11 +11,11 @@ use tokio::{
 
 use crate::{
     metafile::Metafile,
-    msg::InternalMessage,
+    msg::{DataReady, InternalMessage, ServerMsg},
     peer::{manager::PeerManager, session::ConnectionInfo},
     piece::{PieceStore, BLOCK_SIZE},
     tracker::{self, TrackerResponse},
-    utils::Notifier,
+    utils::{self, Notifier},
 };
 
 pub enum TorrentState {
@@ -28,6 +28,7 @@ pub struct BitTorrent {
     pub piece_store: Arc<Mutex<PieceStore>>, // references meta_file
     pub peer_manager: Arc<Mutex<PeerManager>>,
     notify_pipelines_empty: Arc<Notifier>,
+    main_piece_queue: VecDeque<usize>,
 }
 
 impl BitTorrent {
@@ -64,6 +65,7 @@ impl BitTorrent {
             piece_store,
             peer_manager,
             notify_pipelines_empty,
+            main_piece_queue: VecDeque::new(),
         })
     }
 
@@ -180,24 +182,7 @@ impl BitTorrent {
         }
     }
 
-    pub async fn begin_download(&mut self) -> anyhow::Result<()> {
-        let mut main_piece_queue =
-            VecDeque::from(self.piece_store.lock().await.get_missing_pieces());
-
-        info!(
-            "Started downloaded queue for {} pieces",
-            main_piece_queue.len()
-        );
-
-        while let Some(piece_idx) = main_piece_queue.pop_front() {
-            info!("{} pieces left", main_piece_queue.len());
-            self.download_piece(piece_idx).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn download_piece(&mut self, piece_idx: usize) -> anyhow::Result<()> {
+    pub async fn download_piece(&mut self, piece_idx: usize) -> anyhow::Result<Vec<u8>> {
         let start = Instant::now();
         let piece_size = self.meta_file.get_piece_len(piece_idx);
         let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
@@ -232,14 +217,14 @@ impl BitTorrent {
         self.notify_pipelines_empty.wait_for_notification().await;
         info!("Done waiting for piece DL");
 
-        self.verify_and_persist_piece(piece_idx).await?;
+        let piece_data = self.verify_and_persist_piece(piece_idx).await?;
 
         println!(
             "Piece {piece_idx} successfully downloaded in {:?}",
             start.elapsed()
         );
 
-        Ok(())
+        Ok(piece_data)
     }
 
     async fn show_interest_in_peers(&mut self, candidates: &mut Vec<ConnectionInfo>) {
@@ -301,9 +286,10 @@ impl BitTorrent {
         }
     }
 
-    async fn verify_and_persist_piece(&mut self, piece_idx: usize) -> anyhow::Result<()> {
+    async fn verify_and_persist_piece(&mut self, piece_idx: usize) -> anyhow::Result<Vec<u8>> {
         let mut store = self.piece_store.lock().await;
         let piece = &store.pieces[piece_idx];
+        let piece_data = piece.buffer.clone();
         if piece.verify_hash() {
             info!("Hash verified");
             store.persist(piece_idx)?;
@@ -324,6 +310,6 @@ impl BitTorrent {
             .broadcast_have(piece_idx as u32)
             .await;
 
-        Ok(())
+        Ok(piece_data)
     }
 }

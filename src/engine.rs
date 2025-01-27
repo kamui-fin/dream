@@ -8,8 +8,11 @@ use tokio::{
 };
 
 use crate::{
-    bittorrent::BitTorrent, metafile::Metafile, msg::ServerCommand, peer::session::ConnectionInfo,
-    PORT,
+    bittorrent::BitTorrent,
+    metafile::Metafile,
+    msg::{DataReady, ServerMsg},
+    peer::session::ConnectionInfo,
+    utils, PORT,
 };
 
 pub struct Engine {
@@ -17,11 +20,11 @@ pub struct Engine {
     info_hashes: Vec<[u8; 20]>,
 
     // listen for external commands
-    command_rx: mpsc::Receiver<ServerCommand>,
+    command_rx: mpsc::Receiver<ServerMsg>,
 }
 
 impl Engine {
-    pub fn new(command_rx: mpsc::Receiver<ServerCommand>) -> Self {
+    pub fn new(command_rx: mpsc::Receiver<ServerMsg>) -> Self {
         Self {
             torrents: Vec::new(),
             info_hashes: Vec::new(),
@@ -96,9 +99,9 @@ impl Engine {
         Ok(())
     }
 
-    async fn handle_command(&mut self, command: ServerCommand) -> anyhow::Result<()> {
+    async fn handle_command(&mut self, command: ServerMsg) -> anyhow::Result<()> {
         match command {
-            ServerCommand::AddExternalTorrent {
+            ServerMsg::AddExternalTorrent {
                 input_path,
                 output_dir,
             } => {
@@ -114,7 +117,7 @@ impl Engine {
                     }
                 }
             }
-            ServerCommand::AddVideo {
+            ServerMsg::AddVideo {
                 input_path,
                 output_dir,
             } => {
@@ -124,12 +127,54 @@ impl Engine {
                     error!("Failed to add video: {:?}", e);
                 }
             }
-            ServerCommand::Start(idx) => {
-                self.torrents[idx as usize]
-                    .lock()
-                    .await
-                    .begin_download()
-                    .await?;
+            ServerMsg::StreamRequestRange {
+                start,
+                end,
+                info_hash,
+                response_tx,
+            } => {
+                let idx = self
+                    .info_hashes
+                    .iter()
+                    .position(|i| i == &info_hash)
+                    .unwrap();
+                let mut bt = self.torrents[idx].lock().await;
+
+                let pieces_needed =
+                    utils::byte_to_piece_range(start, end, bt.meta_file.get_piece_len(0));
+
+                let mut curr_start = start;
+                for piece in pieces_needed {
+                    let mut piece_data: Vec<u8> = if bt
+                        .piece_store
+                        .lock()
+                        .await
+                        .get_status_bitfield()
+                        .piece_exists(piece as u32)
+                    {
+                        // fetch from output file
+                        bt.piece_store.lock().await.get_piece_data_fs(piece as u32)
+                    } else {
+                        // download
+                        bt.download_piece(piece as usize).await.unwrap_or_default()
+                    };
+                    let piece_len = piece_data.len() as u64;
+
+                    // check if we need to truncate piece_data to match end
+                    if curr_start + piece_len - 1 > end {
+                        let new_len = end - curr_start + 1;
+                        piece_data.truncate(new_len as usize);
+                    }
+
+                    let data_msg = DataReady {
+                        start: curr_start,
+                        end: curr_start + piece_len - 1, // TODO: check for off by one bugs
+                        data: piece_data,
+                    };
+                    response_tx.send(data_msg).await?;
+
+                    curr_start += piece_len;
+                }
             }
         }
 
