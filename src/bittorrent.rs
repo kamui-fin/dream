@@ -194,9 +194,6 @@ impl BitTorrent {
             self.download_piece(piece_idx).await?;
         }
 
-        info!("Concatenating all pieces");
-        self.piece_store.lock().await.concat()?;
-
         Ok(())
     }
 

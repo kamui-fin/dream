@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
     vec,
 };
@@ -137,11 +137,12 @@ pub struct Piece {
     pub block_set: HashSet<u32>,
     pub downloaded_bytes: u32,
     pub output_path: PathBuf,
+    pub offset: u64,
 }
 
 impl Piece {
-    pub fn new(size: u64, hash: [u8; 20], output_path: PathBuf) -> Self {
-        if !output_path.exists() {
+    pub fn new(offset: u64, size: u64, hash: [u8; 20], output_path: PathBuf, exists: bool) -> Self {
+        if !exists {
             Self {
                 buffer: vec![0; size as usize],
                 status: RequestStatus::Pending,
@@ -149,24 +150,24 @@ impl Piece {
                 downloaded_bytes: 0,
                 hash,
                 output_path,
+                offset,
             }
         } else {
             let mut file = File::open(&output_path).expect("Failed to open the file");
             let mut buffer = vec![0; size as usize];
+            // seek to offset and read <size> bytes
+            file.seek(SeekFrom::Start(offset))
+                .expect("Failed to seek the file");
             let bytes_read = file.read(&mut buffer).expect("Failed to read the file");
-            let status = if bytes_read as u64 == size && hash_obj(&buffer) == hash {
-                RequestStatus::Received
-            } else {
-                RequestStatus::Pending
-            };
 
             Self {
                 buffer: vec![0; size as usize],
                 block_set: HashSet::new(),
                 hash,
                 output_path,
-                status,
+                status: RequestStatus::Received,
                 downloaded_bytes: bytes_read as u32,
+                offset,
             }
         }
     }
@@ -229,7 +230,9 @@ impl Piece {
 
     pub fn persist(&self) -> anyhow::Result<()> {
         if self.status == RequestStatus::Received {
-            let mut file = File::create(&self.output_path)?;
+            let mut file = OpenOptions::new().write(true).open(&self.output_path)?;
+
+            file.seek(SeekFrom::Start(self.offset))?;
             file.write_all(&self.buffer)?;
         }
 
@@ -249,20 +252,35 @@ pub struct PieceStore {
 
 impl PieceStore {
     pub fn new(meta_file: Metafile, output_dir: PathBuf) -> Self {
+        let mut bitfield = BitField::new(meta_file.get_num_pieces());
         if !output_dir.exists() {
             std::fs::create_dir(&output_dir).unwrap();
+        } else {
+            // load bitfield if exists
+            let bitfield_path = output_dir.join("meta.bin");
+            if bitfield_path.exists() {
+                let mut file = File::open(bitfield_path).expect("Failed to open bitfield file");
+                let mut buffer = vec![];
+                file.read_to_end(&mut buffer)
+                    .expect("Failed to read bitfield file");
+
+                bitfield = BitField(buffer);
+            }
         }
+
+        let output_path = output_dir.join(meta_file.info.name.clone());
 
         let hashes = meta_file.get_piece_hashes();
         let num_pieces = meta_file.get_num_pieces();
 
         let mut pieces = vec![];
         for idx in 0..num_pieces {
-            let output_path = output_dir.join(format!("{}-{idx}.part", meta_file.info.name));
             let piece = Piece::new(
+                (idx as u64) * meta_file.get_piece_len(idx as usize),
                 meta_file.get_piece_len(idx as usize),
                 hashes.0[idx as usize],
-                output_path,
+                output_path.clone(),
+                bitfield.piece_exists(idx),
             );
 
             pieces.push(piece);
@@ -276,29 +294,37 @@ impl PieceStore {
         }
     }
 
-    pub fn persist(&self, idx: usize) -> anyhow::Result<()> {
-        let piece = &self.pieces[idx];
-        piece.persist()
-    }
-
-    pub fn concat(&self) -> anyhow::Result<()> {
-        let piece_files = (0..(self.num_pieces)).map(|idx| &self.pieces[idx as usize].output_path);
-
-        let dest_file_path = self.output_dir.join(&self.meta_file.info.name);
-        let mut output = OpenOptions::new()
+    pub fn create_output_file(&self, output_path: PathBuf) -> anyhow::Result<()> {
+        // create a new file with appropriate size and fill it with zeros
+        let file = OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
-            .open(dest_file_path)?;
+            .open(output_path)?;
 
-        for input_path in piece_files {
-            let mut input = File::open(input_path)?;
-            let mut buffer = Vec::new();
-            input.read_to_end(&mut buffer)?;
-            output.write_all(&buffer)?;
-        }
+        file.set_len(self.meta_file.info.length.unwrap())?;
 
         Ok(())
+    }
+
+    pub fn persist(&self, idx: usize) -> anyhow::Result<()> {
+        let output_path = self.output_dir.join(self.meta_file.info.name.clone());
+        if !output_path.exists() {
+            self.create_output_file(output_path)?;
+        }
+
+        let piece = &self.pieces[idx];
+        piece.persist()?;
+
+        Ok(self.save_bitfield())
+    }
+
+    pub fn save_bitfield(&self) {
+        let bitfield = self.get_status_bitfield();
+        let bitfield_path = self.output_dir.join("meta.bin");
+        let mut file = File::create(bitfield_path).expect("Failed to create bitfield file");
+
+        file.write_all(&bitfield.0)
+            .expect("Failed to write bitfield");
     }
 
     pub fn get_missing_pieces(&self) -> Vec<usize> {

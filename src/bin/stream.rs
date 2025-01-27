@@ -110,14 +110,25 @@ async fn video_handler(
 
     let content_length = end - start + 1;
 
+    // When a video is completely downloaded i.e. we are in SEEDING state:
+    // Construct a byte stream of data in the range
     file.seek(SeekFrom::Start(start)).await.unwrap();
-
     let reader_stream = ReaderStream::new(file).take(content_length as usize);
-
     let stream_body = StreamBody::new(reader_stream.map_ok(Frame::data));
 
-    let boxed_body = BodyExt::boxed(stream_body);
+    // If we are in leeching state, we need to wait for the piece to be downloaded
+    // Using the range, determine the necessary piece(s)
+    // --> [client] MPSC SEND: RequestRange(start, end, info_hash)
+    // Engine pushes the piece(s) to the front of the queue
+    // --> [engine] MPSC recv: find pieces encompassing range and move to front
+    //     - PROBLEM: multiple clients fighting for different pieces to be downloaded first
+    //     - If we can't find pieces in queue, create them and push to front
 
+    // --> [client] MPSC recv: DataReady(start, end, data)
+    //     - keep consuming until reach end of range
+
+    // Return a response with the appropriate headers
+    let boxed_body = BodyExt::boxed(stream_body);
     let response = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, "video/mp4")
