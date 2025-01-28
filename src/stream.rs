@@ -29,9 +29,13 @@ use std::{convert::Infallible, net::SocketAddr};
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::{BytesCodec, FramedRead};
 use tokio_util::io::ReaderStream;
+
+use crate::msg::{DataReady, ServerMsg};
 
 static NOTFOUND: &[u8] = b"Not Found";
 
@@ -68,18 +72,57 @@ fn not_found() -> Response<BoxBody<Bytes, std::io::Error>> {
         .unwrap()
 }
 
+async fn handle_stream_request(
+    engine_tx: mpsc::Sender<ServerMsg>,
+    start: u64,
+    end: u64,
+    info_hash: [u8; 20],
+) -> std::result::Result<BoxBody<Bytes, std::io::Error>, Box<dyn std::error::Error>> {
+    // consume engine_tx of ReadyData until has_more is false
+    let (stream_tx, stream_rx) = mpsc::channel(2000);
+
+    engine_tx
+        .send(ServerMsg::StreamRequestRange {
+            start,
+            end,
+            info_hash,
+            response_tx: stream_tx,
+        })
+        .await?;
+
+    let stream_body = ReceiverStream::new(stream_rx).map(|data_ready| {
+        if data_ready.has_more {
+            Ok::<_, std::io::Error>(hyper::body::Bytes::from(data_ready.data))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "No more data",
+            ))
+        }
+    });
+
+    let stream = StreamBody::new(stream_body.map_ok(Frame::data));
+
+    Ok(BodyExt::boxed(stream))
+}
+
 async fn video_handler(
     req: Request<impl Body>,
+    engine_tx: mpsc::Sender<ServerMsg>,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>> {
     // Extract the `info_hash` from the path
     let path = req.uri().path().trim_start_matches('/');
 
     if path.is_empty() {}
 
+    let info_hash_data = hex::decode(path).unwrap();
+    let mut info_hash = [0; 20];
+    info_hash.copy_from_slice(&info_hash_data);
+
     let file_path = format!("{}.mp4", path);
     if !Path::new(&file_path).exists() {}
 
-    let mut file = match File::open(&file_path).await {
+    let file = match File::open(&file_path).await {
         Ok(f) => f,
         Err(_) => {
             error!("Unable to open file: {}", file_path);
@@ -110,13 +153,6 @@ async fn video_handler(
 
     let content_length = end - start + 1;
 
-    // When a video is completely downloaded i.e. we are in SEEDING state:
-    // Construct a byte stream of data in the range
-    file.seek(SeekFrom::Start(start)).await.unwrap();
-    let reader_stream = ReaderStream::new(file).take(content_length as usize);
-    let stream_body = StreamBody::new(reader_stream.map_ok(Frame::data));
-
-    // If we are in leeching state, we need to wait for the piece to be downloaded
     // Using the range, determine the necessary piece(s)
     // --> [client] MPSC SEND: StreamRequestRange(start, end, info_hash)
     // Engine pushes the piece(s) to the front of the queue
@@ -127,8 +163,11 @@ async fn video_handler(
     //     - engine will keep sending pieces until we reach the end of the range
     //     - of course, we handle
 
-    // Return a response with the appropriate headers
-    let boxed_body = BodyExt::boxed(stream_body);
+    // consume engine_tx of ReadyData until has_more is false
+    let body = handle_stream_request(engine_tx, start, end, info_hash)
+        .await
+        .unwrap();
+
     let response = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, "video/mp4")
@@ -137,7 +176,7 @@ async fn video_handler(
             header::CONTENT_RANGE,
             format!("bytes {}-{}/{}", start, end, file_size),
         )
-        .body(boxed_body)
+        .body(body)
         .unwrap();
 
     Ok(response)

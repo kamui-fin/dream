@@ -144,7 +144,7 @@ impl Engine {
                     utils::byte_to_piece_range(start, end, bt.meta_file.get_piece_len(0));
 
                 let mut curr_start = start;
-                for piece in pieces_needed {
+                for (i, piece) in pieces_needed.enumerate() {
                     let mut piece_data: Vec<u8> = if bt
                         .piece_store
                         .lock()
@@ -160,20 +160,28 @@ impl Engine {
                     };
                     let piece_len = piece_data.len() as u64;
 
-                    // check if we need to truncate piece_data to match end
-                    if curr_start + piece_len - 1 > end {
-                        let new_len = end - curr_start + 1;
-                        piece_data.truncate(new_len as usize);
+                    // handle when start starts middle of piece
+
+                    // start truncation --> truncate start_of_piece to start % piece_len (NONE-INCLUSIVE)
+                    // end truncation --> truncate end+1 till the end_of_piece (INCLUSIVE) end
+                    let normal_piece_len = bt.meta_file.get_piece_len(0);
+
+                    if curr_start == start && curr_start % piece_len != 0 {
+                        piece_data = piece_data[(start % piece_len) as usize..].to_vec();
+                    }
+
+                    if end / normal_piece_len == piece {
+                        let truncate_len = (end % normal_piece_len + 1);
+                        piece_data.truncate(truncate_len as usize);
                     }
 
                     let data_msg = DataReady {
-                        start: curr_start,
-                        end: curr_start + piece_len - 1, // TODO: check for off by one bugs
+                        has_more: end / normal_piece_len == piece,
                         data: piece_data,
                     };
                     response_tx.send(data_msg).await?;
 
-                    curr_start += piece_len;
+                    curr_start = (piece + 1) * bt.meta_file.get_piece_len(0);
                 }
             }
         }

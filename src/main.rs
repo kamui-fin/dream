@@ -4,6 +4,7 @@ mod metafile;
 mod msg;
 mod peer;
 mod piece;
+mod stream;
 mod tracker;
 mod utils;
 

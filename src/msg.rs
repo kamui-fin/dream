@@ -247,10 +247,6 @@ pub enum ServerMsg {
         input_path: String,
         output_dir: String,
     },
-    AddVideo {
-        input_path: String,
-        output_dir: String,
-    },
     // Responses
     StreamRequestRange {
         start: u64,
@@ -262,7 +258,6 @@ pub enum ServerMsg {
 
 #[derive(Debug)]
 pub struct DataReady {
-    pub start: u64,
-    pub end: u64,
+    pub has_more: bool,
     pub data: Vec<u8>,
 }
