@@ -8,6 +8,8 @@ mod stream;
 mod tracker;
 mod utils;
 
+use std::{path::PathBuf, sync::Arc};
+
 use anyhow::Result;
 use engine::Engine;
 use tokio::sync::mpsc::{self};
@@ -29,9 +31,15 @@ async fn main() -> Result<()> {
 
     tx.send(msg::ServerMsg::AddExternalTorrent {
         input_path,
-        output_dir,
+        output_dir: output_dir.clone(),
     })
     .await?;
+
+    tokio::spawn(async move {
+        stream::start_server(Arc::new(tx.clone()), Arc::new(PathBuf::from(output_dir)))
+            .await
+            .expect("Server failed to run");
+    });
 
     result.await?
 }

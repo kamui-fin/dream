@@ -32,7 +32,10 @@ pub struct BitTorrent {
 }
 
 impl BitTorrent {
-    pub async fn from_torrent_file(meta_file: Metafile, output_dir: &str) -> anyhow::Result<Self> {
+    pub async fn from_torrent_file(
+        meta_file: Metafile,
+        output_dir: PathBuf,
+    ) -> anyhow::Result<Self> {
         info!("Parsed metafile: {:#?}", meta_file);
 
         let peers = Self::fetch_peers(&meta_file).await?;
@@ -78,8 +81,8 @@ impl BitTorrent {
         Ok(peers)
     }
 
-    fn initialize_piece_store(meta_file: &Metafile, output_dir: &str) -> PieceStore {
-        PieceStore::new(meta_file.clone(), PathBuf::from(output_dir))
+    fn initialize_piece_store(meta_file: &Metafile, output_dir: PathBuf) -> PieceStore {
+        PieceStore::new(meta_file.clone(), output_dir)
     }
 
     async fn connect_to_peers(
