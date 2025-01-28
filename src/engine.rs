@@ -35,10 +35,11 @@ impl Engine {
     pub async fn add_torrent(
         &mut self,
         meta_file: Metafile,
-        output_dir: &str,
+        output_dir: PathBuf,
     ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
-        let bt = BitTorrent::from_torrent_file(meta_file, output_dir).await?;
+        let bt = BitTorrent::from_torrent_file(meta_file, output_dir.join(hex::encode(info_hash)))
+            .await?;
         let bt = Arc::new(Mutex::new(bt));
 
         self.torrents.push(bt);
@@ -111,7 +112,8 @@ impl Engine {
                         error!("Failed to parse torrent file: {:?}", e);
                     }
                     Ok(meta_file) => {
-                        if let Err(e) = self.add_torrent(meta_file, &output_dir).await {
+                        if let Err(e) = self.add_torrent(meta_file, PathBuf::from(output_dir)).await
+                        {
                             error!("Failed to add torrent: {:?}", e);
                         }
                     }
@@ -123,7 +125,7 @@ impl Engine {
             } => {
                 let meta_file =
                     Metafile::from_video(&PathBuf::from_str(&input_path).unwrap(), 1024, None);
-                if let Err(e) = self.add_torrent(meta_file, &output_dir).await {
+                if let Err(e) = self.add_torrent(meta_file, PathBuf::from(output_dir)).await {
                     error!("Failed to add video: {:?}", e);
                 }
             }
