@@ -4,7 +4,7 @@ use log::{error, info};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, oneshot, Mutex},
 };
 
 use crate::{
@@ -12,8 +12,10 @@ use crate::{
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
-    utils, PORT,
+    utils,
 };
+
+pub const PORT: u16 = 6881;
 
 pub struct Engine {
     torrents: Vec<Arc<Mutex<BitTorrent>>>,
@@ -36,8 +38,11 @@ impl Engine {
         &mut self,
         meta_file: Metafile,
         output_dir: PathBuf,
+        response_tx: oneshot::Sender<u64>,
     ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
+        response_tx.send(meta_file.info.length.unwrap()).unwrap();
+
         let bt = BitTorrent::from_torrent_file(meta_file, output_dir.join(hex::encode(info_hash)))
             .await?;
         let bt = Arc::new(Mutex::new(bt));
@@ -105,28 +110,21 @@ impl Engine {
             ServerMsg::AddExternalTorrent {
                 input_path,
                 output_dir,
+                response_tx,
             } => {
-                let meta_file = Metafile::parse_torrent_file(&input_path);
+                let meta_file = Metafile::parse_torrent_file(input_path);
                 match meta_file {
                     Err(e) => {
                         error!("Failed to parse torrent file: {:?}", e);
                     }
                     Ok(meta_file) => {
-                        if let Err(e) = self.add_torrent(meta_file, PathBuf::from(output_dir)).await
+                        if let Err(e) = self
+                            .add_torrent(meta_file, PathBuf::from(output_dir), response_tx)
+                            .await
                         {
                             error!("Failed to add torrent: {:?}", e);
                         }
                     }
-                }
-            }
-            ServerMsg::AddVideo {
-                input_path,
-                output_dir,
-            } => {
-                let meta_file =
-                    Metafile::from_video(&PathBuf::from_str(&input_path).unwrap(), 1024, None);
-                if let Err(e) = self.add_torrent(meta_file, PathBuf::from(output_dir)).await {
-                    error!("Failed to add video: {:?}", e);
                 }
             }
             ServerMsg::StreamRequestRange {

@@ -251,7 +251,6 @@ impl PeerSession {
         &mut self,
         mut send_jobs: mpsc::Receiver<(Message, Option<PipelineEntry>)>,
     ) {
-
         let keepalive_receiver = sleep(Duration::from_secs(KEEPALIVE_RECEIVER_TIMEOUT));
         tokio::pin!(keepalive_receiver);
 
@@ -263,7 +262,7 @@ impl PeerSession {
                 _ = &mut keepalive_sender => {
                     warn!("No message sent in the past {} secs, sending keepalive to peer: {:#?}", KEEPALIVE_SENDER_TIMEOUT, self.peer);
                     let keepalive_msg =  MessageType::KeepAlive.build_msg(Vec::new());
- 
+
                     if let Err(_) = self.send_message(keepalive_msg.clone(), None).await {
                         warn!("Keepalive send failed, closing connection to peeer {:#?}", self.peer);
                         let close_msg = InternalMessage { origin: self.peer.clone(), payload: InternalMessagePayload::CloseConnection };

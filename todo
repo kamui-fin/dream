@@ -6,12 +6,10 @@ dht integration:
 - migrate everything to this new trait
 
 
+- Cancel downloading immediately when ConnectionReset from mpv
 - Clean shutdown
 - Alias u32, usize, etc to semantic names
 - unit testing, debug_assertions
 - refactor:
   - favor From<> implementations
   - use more of codec encode for handshake
--   Server commands:
-    -   PAUSE, RESUME, REMOVE, CREATE
--   dream-cli, dream-server: communicate through IPC

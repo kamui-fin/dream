@@ -36,9 +36,11 @@ impl BitTorrent {
         meta_file: Metafile,
         output_dir: PathBuf,
     ) -> anyhow::Result<Self> {
-        info!("Parsed metafile: {:#?}", meta_file);
+        // info!("Parsed metafile: {:#?}", meta_file);
 
         let peers = Self::fetch_peers(&meta_file).await?;
+        info!("Fetched peers: {:#?}", peers);
+
         let piece_store = Self::initialize_piece_store(&meta_file, output_dir);
         let info_hash = piece_store.meta_file.get_info_hash();
         let num_pieces = piece_store.meta_file.get_num_pieces();
@@ -180,6 +182,7 @@ impl BitTorrent {
         loop {
             let int_msg = msg_rx.recv().await;
             if let Some(int_msg) = &int_msg {
+                info!("Received {:#?}", int_msg.payload);
                 peer_manager.lock().await.handle_msg(int_msg).await;
             }
         }

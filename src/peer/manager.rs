@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use rand::{rngs::OsRng, Rng};
 use tokio::{
     net::TcpStream,
@@ -25,7 +25,7 @@ use crate::{
     utils::{slice_to_u32_msb, Notifier},
 };
 
-pub struct GlobalStats{
+pub struct GlobalStats {
     pub num_pieces_pending: u32,
     pub num_pieces_downloaded: u32,
 }
@@ -42,7 +42,7 @@ pub struct PeerManager {
 
     pub request_tracker: RequestTracker,
     pub stats_tracker: Arc<std::sync::Mutex<HashMap<ConnectionInfo, PeerStats>>>,
-    pub global_stats: GlobalStats
+    pub global_stats: GlobalStats,
 }
 
 impl PeerManager {
@@ -87,7 +87,10 @@ impl PeerManager {
             notify_finished_piece,
             request_tracker,
             stats_tracker,
-            global_stats: GlobalStats{num_pieces_pending: 0, num_pieces_downloaded: 0}
+            global_stats: GlobalStats {
+                num_pieces_pending: 0,
+                num_pieces_downloaded: 0,
+            },
         }
     }
 
@@ -120,13 +123,15 @@ impl PeerManager {
                     // replace previous window with current window data and start a new window
                     curr_stats.download.update_overalls();
                     curr_stats.upload.update_overalls();
-                    info!(
+                    trace!(
                         "5 seconds up, peer {:#?} has new DOWNLOAD kbps of {:#?}",
-                        target_conn_info, curr_stats.download.total_avg_kbps
+                        target_conn_info,
+                        curr_stats.download.total_avg_kbps
                     );
-                    info!(
+                    trace!(
                         "5 seconds up, peer {:#?} has new UPLOAD kbps of {:#?}",
-                        target_conn_info, curr_stats.upload.total_avg_kbps
+                        target_conn_info,
+                        curr_stats.upload.total_avg_kbps
                     );
                 } else {
                     break;
@@ -455,8 +460,7 @@ impl PeerManager {
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-
-        if msg.msg_type == MessageType::Request{
+        if msg.msg_type == MessageType::Request {
             self.global_stats.num_pieces_pending += 1;
         }
 
@@ -552,6 +556,15 @@ impl PeerManager {
                     MessageType::UnChoke => {
                         // peer has unchoked us
                         peer.peer_choking = false;
+
+                        // request blocks again, just in case it didn't go through due to getting choked
+                        let pipeline = peer.pipeline.clone();
+                        let batch_request: Vec<(PipelineEntry, ConnectionInfo)> = pipeline
+                            .iter()
+                            .map(|entry| (entry.clone(), conn_info.clone()))
+                            .collect();
+
+                        self.request_blocks(batch_request).await;
 
                         info!("Peer {:#?} has unchoked us", conn_info);
                     }
@@ -680,7 +693,7 @@ impl PeerManager {
                             info!("Notifying that we're finished with the piece...");
                             self.notify_finished_piece.notify_one();
                             self.global_stats.num_pieces_pending -= 1;
-                            self.global_stats.num_pieces_downloaded+=1;
+                            self.global_stats.num_pieces_downloaded += 1;
                         }
                     }
                     MessageType::Cancel => {

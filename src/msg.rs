@@ -2,6 +2,7 @@ use std::{
     fmt::{self, Formatter},
     io::Cursor,
     ops::Range,
+    path::PathBuf,
 };
 
 use anyhow::anyhow;
@@ -225,7 +226,7 @@ impl Message {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum InternalMessagePayload {
     CloseConnection,
     ForwardMessage { msg: Message },
@@ -244,8 +245,9 @@ pub struct InternalMessage {
 pub enum ServerMsg {
     // Requests
     AddExternalTorrent {
-        input_path: String,
-        output_dir: String,
+        input_path: PathBuf,
+        output_dir: PathBuf,
+        response_tx: tokio::sync::oneshot::Sender<u64>,
     },
     // Responses
     StreamRequestRange {

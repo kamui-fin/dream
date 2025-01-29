@@ -22,14 +22,16 @@ use hyper::Result;
 use hyper::{header, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::{error, info};
+use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{convert::Infallible, net::SocketAddr};
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::codec::{BytesCodec, FramedRead};
@@ -39,10 +41,10 @@ use crate::msg::{DataReady, ServerMsg};
 
 static NOTFOUND: &[u8] = b"Not Found";
 
-#[tokio::main]
-pub async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    pretty_env_logger::init();
-
+pub async fn start_server(
+    engine_tx: Arc<mpsc::Sender<ServerMsg>>,
+    output_dir: Arc<PathBuf>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
 
     let listener = TcpListener::bind(addr).await?;
@@ -53,9 +55,17 @@ pub async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send 
 
         let io = TokioIo::new(tcp);
 
+        let engine_tx = engine_tx.clone();
+        let output_dir = output_dir.clone();
+
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new()
-                .serve_connection(io, service_fn(video_handler))
+                .serve_connection(
+                    io,
+                    service_fn(|req: Request<hyper::body::Incoming>| {
+                        video_handler(req, engine_tx.clone(), output_dir.clone())
+                    }),
+                )
                 .await
             {
                 eprintln!("Error serving connection: {:?}", err);
@@ -73,7 +83,7 @@ fn not_found() -> Response<BoxBody<Bytes, std::io::Error>> {
 }
 
 async fn handle_stream_request(
-    engine_tx: mpsc::Sender<ServerMsg>,
+    engine_tx: Arc<mpsc::Sender<ServerMsg>>,
     start: u64,
     end: u64,
     info_hash: [u8; 20],
@@ -108,7 +118,8 @@ async fn handle_stream_request(
 
 async fn video_handler(
     req: Request<impl Body>,
-    engine_tx: mpsc::Sender<ServerMsg>,
+    engine_tx: Arc<mpsc::Sender<ServerMsg>>,
+    output_dir: Arc<PathBuf>,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>> {
     // Extract the `info_hash` from the path
     let path = req.uri().path().trim_start_matches('/');
@@ -119,18 +130,19 @@ async fn video_handler(
     let mut info_hash = [0; 20];
     info_hash.copy_from_slice(&info_hash_data);
 
-    let file_path = format!("{}.mp4", path);
-    if !Path::new(&file_path).exists() {}
+    // send ADD_TORRENT to engine
+    let (response_tx, response_rx) = oneshot::channel();
+    engine_tx
+        .send(ServerMsg::AddExternalTorrent {
+            input_path: PathBuf::from("test.torrent"), // figure out where to pull torrent file from for now
+            output_dir: output_dir.to_path_buf(),
+            response_tx,
+        })
+        .await
+        .unwrap();
+    // wait for response containing file size
+    let file_size = response_rx.await.unwrap();
 
-    let file = match File::open(&file_path).await {
-        Ok(f) => f,
-        Err(_) => {
-            error!("Unable to open file: {}", file_path);
-            return Ok(not_found());
-        }
-    };
-
-    let file_size = file.metadata().await.unwrap().len();
     let mut start = 0;
     let mut end = file_size - 1;
 

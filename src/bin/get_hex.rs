@@ -1,14 +1,11 @@
 fn main() {
-    println!(
-        "{:#?}",
-        hex::encode(&[
-            217, 194, 251, 171, 61, 246, 68, 167, 7, 168, 101, 172, 5, 2, 177, 244, 227, 87, 168,
-            246
-        ])
-    );
+    // get hex from .torrent file info hash
 
-    println!(
-        "{:#?}",
-        hex::decode("d9c2fbab3df644a707a865ac0502b1f4e357a8f6")
-    );
+    let path = "test.torrent";
+    let meta_file =
+        dream::metafile::Metafile::parse_torrent_file(std::path::PathBuf::from(path)).unwrap();
+
+    let info_hash = meta_file.get_info_hash();
+    let hex = hex::encode(info_hash);
+    println!("{}", hex);
 }

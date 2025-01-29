@@ -4,12 +4,12 @@ use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
+    engine::PORT,
     metafile::Metafile,
     peer::{
         session::{deserialize_peers, ConnectionInfo},
         DREAM_ID,
     },
-    PORT,
 };
 #[derive(Debug)]
 pub enum Event {
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_dht_tracker() {
-        let torrent = Metafile::parse_torrent_file("archlinux.torrent").unwrap();
+        let torrent = Metafile::parse_torrent_file("archlinux.torrent".into()).unwrap();
         let info_hash = torrent.get_info_hash();
         println!("{}", hex::encode(&info_hash));
     }

@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::{
-    fs,
-    fs::File,
+    fs::{self, File},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -54,7 +53,7 @@ pub struct Info {
 }
 
 impl Metafile {
-    pub fn parse_torrent_file(file_path: &str) -> anyhow::Result<Metafile> {
+    pub fn parse_torrent_file(file_path: PathBuf) -> anyhow::Result<Metafile> {
         let mut file = File::open(file_path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
