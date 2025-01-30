@@ -40,10 +40,12 @@ impl BitField {
     }
 
     pub fn return_piece_indexes(&self) -> String {
-        (0..(self.0.len() * 8))
-            .filter(|i| self.piece_exists(*i as u32))
-            .count()
-            .to_string()
+        format!(
+            "{:#?}",
+            (0..(self.0.len() * 8))
+                .filter(|i| !self.piece_exists(*i as u32))
+                .next()
+        )
     }
 }
 

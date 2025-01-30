@@ -12,7 +12,7 @@ use crate::{
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
-    utils,
+    piece, utils,
 };
 
 pub const PORT: u16 = 6881;
@@ -23,6 +23,8 @@ pub struct Engine {
 
     // listen for external commands
     command_rx: mpsc::Receiver<ServerMsg>,
+
+    last_stream_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Engine {
@@ -31,6 +33,7 @@ impl Engine {
             torrents: Vec::new(),
             info_hashes: Vec::new(),
             command_rx,
+            last_stream_handle: None,
         }
     }
 
@@ -42,6 +45,10 @@ impl Engine {
     ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
         response_tx.send(meta_file.info.length.unwrap()).unwrap();
+
+        if self.info_hashes.contains(&info_hash) {
+            return Ok(());
+        }
 
         let bt = BitTorrent::from_torrent_file(meta_file, output_dir.join(hex::encode(info_hash)))
             .await?;
@@ -66,7 +73,7 @@ impl Engine {
                 }
 
                 Some(command) = self.command_rx.recv() => {
-                    self.handle_command(command).await?;
+                    self.handle_command(command).await.unwrap();
                 }
             }
         }
@@ -133,56 +140,62 @@ impl Engine {
                 info_hash,
                 response_tx,
             } => {
+                if let Some(last_stream) = &self.last_stream_handle {
+                    last_stream.abort();
+                }
+
                 let idx = self
                     .info_hashes
                     .iter()
                     .position(|i| i == &info_hash)
                     .unwrap();
-                let mut bt = self.torrents[idx].lock().await;
 
-                let pieces_needed =
-                    utils::byte_to_piece_range(start, end, bt.meta_file.get_piece_len(0));
+                let bt = self.torrents[idx].clone();
+                self.last_stream_handle = Some(tokio::spawn(async move {
+                    let mut bt = bt.lock().await;
 
-                let mut curr_start = start;
-                for (i, piece) in pieces_needed.enumerate() {
-                    let mut piece_data: Vec<u8> = if bt
-                        .piece_store
-                        .lock()
-                        .await
-                        .get_status_bitfield()
-                        .piece_exists(piece as u32)
-                    {
-                        // fetch from output file
-                        bt.piece_store.lock().await.get_piece_data_fs(piece as u32)
-                    } else {
-                        // download
-                        bt.download_piece(piece as usize).await.unwrap_or_default()
-                    };
-                    let piece_len = piece_data.len() as u64;
+                    let pieces_needed =
+                        utils::byte_to_piece_range(start, end, bt.meta_file.get_piece_len(0));
+                    let last_piece = pieces_needed.end;
 
-                    // handle when start starts middle of piece
+                    let mut curr_start = start;
+                    for (i, piece) in pieces_needed.enumerate() {
+                        let mut piece_data: Vec<u8> = if bt
+                            .piece_store
+                            .lock()
+                            .await
+                            .get_status_bitfield()
+                            .piece_exists(piece as u32)
+                        {
+                            // fetch from output file
+                            bt.piece_store.lock().await.get_piece_data_fs(piece as u32)
+                        } else {
+                            // download
+                            bt.download_piece(piece as usize).await.unwrap_or_default()
+                        };
+                        let piece_len = piece_data.len() as u64;
+                        // start truncation --> truncate start_of_piece to start % piece_len (NONE-INCLUSIVE)
+                        // end truncation --> truncate end+1 till the end_of_piece (INCLUSIVE) end
+                        let normal_piece_len = bt.meta_file.get_piece_len(0);
 
-                    // start truncation --> truncate start_of_piece to start % piece_len (NONE-INCLUSIVE)
-                    // end truncation --> truncate end+1 till the end_of_piece (INCLUSIVE) end
-                    let normal_piece_len = bt.meta_file.get_piece_len(0);
+                        if curr_start == start && curr_start % piece_len != 0 {
+                            piece_data = piece_data[(start % piece_len) as usize..].to_vec();
+                        }
 
-                    if curr_start == start && curr_start % piece_len != 0 {
-                        piece_data = piece_data[(start % piece_len) as usize..].to_vec();
+                        if end / normal_piece_len == piece {
+                            let truncate_len = end % normal_piece_len + 1;
+                            piece_data.truncate(truncate_len as usize);
+                        }
+
+                        let data_msg = DataReady {
+                            has_more: last_piece != piece,
+                            data: piece_data,
+                        };
+
+                        response_tx.send(data_msg).await.unwrap();
+                        curr_start = (piece + 1) * bt.meta_file.get_piece_len(0);
                     }
-
-                    if end / normal_piece_len == piece {
-                        let truncate_len = (end % normal_piece_len + 1);
-                        piece_data.truncate(truncate_len as usize);
-                    }
-
-                    let data_msg = DataReady {
-                        has_more: end / normal_piece_len == piece,
-                        data: piece_data,
-                    };
-                    response_tx.send(data_msg).await?;
-
-                    curr_start = (piece + 1) * bt.meta_file.get_piece_len(0);
-                }
+                }));
             }
         }
 

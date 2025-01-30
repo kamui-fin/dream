@@ -102,6 +102,7 @@ async fn handle_stream_request(
 
     let stream_body = ReceiverStream::new(stream_rx).map(|data_ready| {
         if data_ready.has_more {
+            println!("[STREAM] got sum data lol");
             Ok::<_, std::io::Error>(hyper::body::Bytes::from(data_ready.data))
         } else {
             Err(std::io::Error::new(

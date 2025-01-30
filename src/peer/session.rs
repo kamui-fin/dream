@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
@@ -140,7 +140,8 @@ pub struct PeerSession {
     framed: Framed<TcpStream, BitTorrentCodec>,
     forwarder: mpsc::Sender<InternalMessage>,
     peer: ConnectionInfo,
-    request_tracker: HashMap<PipelineEntry, Instant>,
+    speed_tracker: HashMap<PipelineEntry, Instant>,
+    request_history: HashSet<PipelineEntry>,
 }
 
 impl PeerSession {
@@ -155,7 +156,8 @@ impl PeerSession {
             framed,
             forwarder,
             peer,
-            request_tracker: HashMap::new(),
+            speed_tracker: HashMap::new(),
+            request_history: HashSet::new(),
         })
     }
 
@@ -173,7 +175,8 @@ impl PeerSession {
             framed,
             forwarder,
             peer,
-            request_tracker: HashMap::new(),
+            speed_tracker: HashMap::new(),
+            request_history: HashSet::new(),
         })
     }
 
@@ -295,18 +298,22 @@ impl PeerSession {
                                 if msg.msg_type == MessageType::Piece {
                                     // get the pipeline entry to track request
                                     let corresponding_entry = Self::get_pipeline_entry(msg.clone());
-                                    let new_speed = Instant::now() - self.request_tracker[&corresponding_entry];
 
-                                    // remove the entry once the request has been fulfilled
-                                    self.request_tracker.remove(&corresponding_entry);
 
-                                    // send a speed update message to add the new speed to the peer's stats
-                                    let speed_updater = InternalMessage {
-                                        origin: self.peer.clone(),
-                                        payload: InternalMessagePayload::UpdateDownloadSpeed{speed: new_speed.as_secs_f32()}
-                                    };
-                                    self.forwarder.send(speed_updater).await.unwrap();
-                                    info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
+                                    if let Some(speed) = self.speed_tracker.get(&corresponding_entry) {
+                                        let new_speed = Instant::now() - *speed;
+
+                                        // remove the entry once the request has been fulfilled
+                                        self.speed_tracker.remove(&corresponding_entry);
+
+                                        // send a speed update message to add the new speed to the peer's stats
+                                        let speed_updater = InternalMessage {
+                                            origin: self.peer.clone(),
+                                            payload: InternalMessagePayload::UpdateDownloadSpeed{speed: new_speed.as_secs_f32()}
+                                        };
+                                        self.forwarder.send(speed_updater).await.unwrap();
+                                        info!("Block {:#?} came in with speed {:#?}", corresponding_entry.block_id, new_speed);
+                                    }
                                 }
                                 // send normal piece message
                                 let msg = InternalMessage {
@@ -356,7 +363,13 @@ impl PeerSession {
         request_entry: Option<PipelineEntry>,
     ) -> anyhow::Result<()> {
         if let Some(entry) = request_entry {
-            self.request_tracker.insert(entry, Instant::now());
+            if self.request_history.contains(&entry) {
+                warn!("Duplicate request for {:#?}", entry);
+                return Ok(());
+            }
+            // info!("Storing request for {:#?}", entry);
+            self.speed_tracker.insert(entry.clone(), Instant::now());
+            self.request_history.insert(entry);
         }
 
         let start_time = Instant::now();

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
+use futures::{future::BoxFuture, FutureExt};
 use log::{error, info, trace, warn};
 use rand::{rngs::OsRng, Rng};
 use tokio::{
@@ -8,7 +9,7 @@ use tokio::{
         mpsc::{self, Sender},
         Mutex,
     },
-    time::sleep,
+    time::{self, sleep},
 };
 
 use super::{
@@ -342,10 +343,11 @@ impl PeerManager {
             return;
         }
 
-        let peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
+        let mut peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
 
-        if peers_with_piece.is_empty() {
-            panic!(); // if there is not a single peer with ALL pieces, this breaks our assumption!
+        while peers_with_piece.is_empty() {
+            time::sleep(Duration::from_secs(5)).await;
+            peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
         }
 
         let blocks_per_peer = std::cmp::max(1, (work.len() / peers_with_piece.len()) as u32);
@@ -395,7 +397,7 @@ impl PeerManager {
     pub async fn broadcast_have(&mut self, piece_idx: u32) {
         let conns: Vec<_> = self.send_channels.keys().cloned().collect();
         for connection in conns {
-            info!("Sending HAVE to {:#?}", connection);
+            trace!("Sending HAVE to {:#?}", connection);
             self.send_message(
                 &connection,
                 MessageType::Have.build_msg(piece_idx.to_be_bytes().to_vec()),
@@ -450,20 +452,20 @@ impl PeerManager {
             block_id, piece_id, conn_info
         );
         let msg = MessageType::Request.build_msg(payload);
-        self.send_channels[&conn_info.clone()]
+        let send_res = self.send_channels[&conn_info.clone()]
             .send((msg, Some(entry.clone())))
-            .await
-            .unwrap();
+            .await;
+
+        if let Err(_) = send_res {
+            error!("Lost connection to peer {:#?}", conn_info);
+            Box::pin(self.remove_peer(conn_info)).await;
+        }
 
         self.request_tracker
             .register_request(entry, conn_info.clone());
     }
 
     pub async fn send_message(&mut self, conn_info: &ConnectionInfo, msg: Message) {
-        if msg.msg_type == MessageType::Request {
-            self.global_stats.num_pieces_pending += 1;
-        }
-
         if let Err(_) = self.send_channels[conn_info].send((msg, None)).await {
             error!("Lost connection to peer {:#?}", conn_info);
             self.remove_peer(conn_info).await;
@@ -692,7 +694,6 @@ impl PeerManager {
                         ) {
                             info!("Notifying that we're finished with the piece...");
                             self.notify_finished_piece.notify_one();
-                            self.global_stats.num_pieces_pending -= 1;
                             self.global_stats.num_pieces_downloaded += 1;
                         }
                     }

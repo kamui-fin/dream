@@ -305,11 +305,8 @@ impl BitTorrent {
             panic!();
         }
 
-        info!("reset piece");
         store.reset_piece(piece_idx);
-        info!("reset shi");
         self.peer_manager.lock().await.request_tracker.reset();
-        info!("distributed have");
         self.peer_manager
             .lock()
             .await

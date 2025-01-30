@@ -235,7 +235,7 @@ pub enum InternalMessagePayload {
     UpdateUploadSpeed { speed: f32 },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct InternalMessage {
     pub payload: InternalMessagePayload,
     pub origin: ConnectionInfo,
