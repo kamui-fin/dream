@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::dht::{config::K, node::Node};
 
-use super::utils::{xor_id, NodeId, ID_SIZE};
+use super::utils::{HashId, ID_SIZE};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -21,14 +21,14 @@ use super::utils::{xor_id, NodeId, ID_SIZE};
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
 #[derive(Serialize, Clone)]
 pub struct RoutingTable {
-    node_id: NodeId,
+    node_id: HashId,
     // array of linked lists with NUM_BITS elements
     pub buckets: Vec<LinkedList<Node>>,
 }
 
-fn leading_zeros(node_id: NodeId) -> usize {
+fn leading_zeros(node_id: HashId) -> usize {
     let mut count = 0;
-    for byte in node_id.iter() {
+    for byte in node_id.0.iter() {
         if *byte == 0 {
             count += 8;
         } else {
@@ -40,7 +40,7 @@ fn leading_zeros(node_id: NodeId) -> usize {
 }
 
 impl RoutingTable {
-    pub fn new(node_id: NodeId) -> Self {
+    pub fn new(node_id: HashId) -> Self {
         Self {
             node_id,
             buckets: vec![LinkedList::new(); ID_SIZE * 8],
@@ -57,18 +57,18 @@ impl RoutingTable {
         all_nodes
     }
 
-    pub fn find_bucket_idx(&self, node_id: NodeId) -> usize {
-        let xor_result = xor_id(&node_id, &self.node_id);
+    pub fn find_bucket_idx(&self, node_id: HashId) -> usize {
+        let xor_result = node_id.distance(&self.node_id);
         leading_zeros(xor_result)
     }
 
-    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: NodeId) -> Option<&Node> {
+    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: HashId) -> Option<&Node> {
         self.buckets[bucket_idx]
             .iter()
             .find(|&node| (node.id == node_id))
     }
 
-    pub fn remove_node(&mut self, node_id: NodeId, bucket_idx: usize) {
+    pub fn remove_node(&mut self, node_id: HashId, bucket_idx: usize) {
         let mut new_list: LinkedList<Node> = LinkedList::new();
 
         while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
@@ -103,7 +103,7 @@ impl RoutingTable {
     }
 
     // TODO: test
-    pub fn get_refresh_target(&self, bucket_idx: usize) -> NodeId {
+    pub fn get_refresh_target(&self, bucket_idx: usize) -> HashId {
         let start = BigUint::from(1u8) << (ID_SIZE * 8 - bucket_idx - 1);
         let end = BigUint::from(1u8) << ((ID_SIZE * 8 - bucket_idx) as u32);
 
@@ -113,16 +113,16 @@ impl RoutingTable {
         let node_id_bytes = node_id.to_bytes_be();
 
         let num_bytes = node_id_bytes.len().min(20);
-        let mut res_node_id: NodeId = [0; 20];
+        let mut res_node_id = [0; 20];
         res_node_id[20 - num_bytes..]
             .copy_from_slice(&node_id_bytes[node_id_bytes.len() - num_bytes..]);
 
-        res_node_id
+        res_node_id.into()
     }
 
-    pub fn get_nodes(&self, target_node_id: NodeId) -> Vec<Node> {
+    pub fn get_nodes(&self, target_node_id: HashId) -> Vec<Node> {
         let mut nodes = self.get_all_nodes();
-        nodes.sort_by_key(|node| xor_id(&node.id, &target_node_id));
+        nodes.sort_by_key(|node| node.id.distance(&target_node_id));
         nodes.truncate(K);
 
         if let Some(first_match) = nodes.first() {

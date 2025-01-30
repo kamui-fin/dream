@@ -4,20 +4,20 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::utils::NodeId;
+use super::utils::HashId;
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug, serde::Serialize)]
 pub struct Node {
-    pub id: NodeId,
+    pub id: HashId,
     pub ip: IpAddr,
     pub port: u16,
     pub last_seen: u64,
 }
 
 impl Node {
-    pub fn new(id: NodeId, ip: IpAddr, port: u16) -> Self {
+    pub fn new(id: HashId, ip: IpAddr, port: u16) -> Self {
         Self {
             id,
             ip,
@@ -45,7 +45,7 @@ impl Node {
 
     pub fn get_node_compact_format(&self) -> Vec<u8> {
         let mut compact_info = [0u8; 26];
-        compact_info[0..20].copy_from_slice(&self.id);
+        compact_info[0..20].copy_from_slice(&self.id.0);
 
         if let IpAddr::V4(v4_addr) = self.ip {
             let ip = v4_addr.octets();
@@ -78,7 +78,7 @@ impl Node {
 #[derive(Clone, Eq, PartialEq, Debug, serde::Serialize)]
 pub struct NodeDistance {
     pub node: Node,
-    pub dist: NodeId,
+    pub dist: HashId,
 }
 
 impl Ord for NodeDistance {

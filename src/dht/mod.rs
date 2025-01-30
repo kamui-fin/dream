@@ -12,7 +12,6 @@ use tokio::{
     net::lookup_host,
     runtime::{Handle, Runtime},
 };
-use utils::decode_node_id;
 
 use crate::dht::{config::Args, kademlia::Kademlia};
 
@@ -131,7 +130,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         ("GET", _) if url.starts_with("/peers/") => {
             let info_hash = url.trim_start_matches("/peers/");
             let peers = kademlia
-                .recursive_get_peers(decode_node_id(info_hash.to_string()))
+                .recursive_get_peers(info_hash.to_string().into())
                 .await;
             let peers = serde_json::to_string(&peers).unwrap();
             request
@@ -142,7 +141,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         }
         ("PUT", _) if url.starts_with("/announce/") => {
             let info_hash = url.trim_start_matches("/announce/");
-            let info_hash = decode_node_id(info_hash.to_string());
+            let info_hash = info_hash.to_string().into();
             let handle = Handle::current();
             handle.spawn(kademlia.announce_peer(info_hash));
             request
@@ -153,7 +152,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
         }
         ("POST", _) if url.starts_with("/closest/") => {
             let id_str = url.trim_start_matches("/closest/");
-            let id = decode_node_id(id_str.to_string());
+            let id = id_str.to_string().into();
             let closest_nodes = kademlia.recursive_find_nodes(id).await;
 
             let closest_nodes = serde_json::to_string(&closest_nodes).unwrap();

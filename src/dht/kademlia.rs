@@ -38,12 +38,10 @@ use crate::dht::{
     config::{Args, ALPHA, K, REFRESH_TIME},
     context::RuntimeContext,
     node::{Node, NodeDistance},
-    utils::{
-        deserialize_compact_node, deserialize_compact_peers, gen_trans_id, vec_to_id, ID_SIZE,
-    },
+    utils::{deserialize_compact_node, deserialize_compact_peers, gen_trans_id, ID_SIZE},
 };
 
-use super::utils::{decode_node_id, xor_id, NodeId};
+use super::utils::HashId;
 
 type Peer = (IpAddr, u16);
 
@@ -89,7 +87,7 @@ pub struct KrpcMessage {
     y: String,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct KrpcRequest {
     t: String,
     y: String,
@@ -126,43 +124,13 @@ impl KrpcSuccessResponse {
         }
     }
 
-    pub fn extract_id(&self) -> NodeId {
+    pub fn extract_id(&self) -> HashId {
         let bytes = self.r.get("id").unwrap();
 
         let mut node_id = [0u8; 20];
         node_id.copy_from_slice(bytes);
 
-        node_id
-    }
-}
-
-pub trait HexDisplay {
-    fn to_hex(&self) -> String;
-}
-
-impl HexDisplay for ByteBuf {
-    fn to_hex(&self) -> String {
-        self.iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect::<Vec<String>>()
-            .join("")
-    }
-}
-impl HexDisplay for [u8; 20] {
-    fn to_hex(&self) -> String {
-        self.iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect::<Vec<String>>()
-            .join("")
-    }
-}
-
-impl HexDisplay for [u8; 16] {
-    fn to_hex(&self) -> String {
-        self.iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect::<Vec<String>>()
-            .join("")
+        node_id.into()
     }
 }
 
@@ -176,7 +144,7 @@ impl fmt::Display for KrpcRequest {
             self.q,
             self.a
                 .iter()
-                .map(|(k, v)| (k, v.to_hex()))
+                .map(|(k, v)| (k, HashId::from(v)))
                 .collect::<HashMap<_, _>>()
         )
     }
@@ -191,7 +159,24 @@ impl fmt::Display for KrpcSuccessResponse {
             self.y,
             self.r
                 .iter()
-                .map(|(k, v)| (k, v.to_hex()))
+                .map(|(k, v)| (k, HashId::from(v)))
+                .collect::<HashMap<_, _>>()
+        )
+    }
+}
+
+// debug for KrpcRequest
+impl fmt::Debug for KrpcRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "KrpcRequest {{ t: {}, y: {}, q: {}, a: {:?} }}",
+            self.t,
+            self.y,
+            self.q,
+            self.a
+                .iter()
+                .map(|(k, v)| (k, HashId::from(v)))
                 .collect::<HashMap<_, _>>()
         )
     }
@@ -221,7 +206,7 @@ pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     manager: TransactionManager,
     pub context: Arc<RuntimeContext>,
-    node_id: NodeId,
+    node_id: HashId,
     pub timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>>,
 }
 
@@ -341,7 +326,7 @@ impl Kademlia {
             .expect("Unable to send query");
 
         let future = self.manager.create_future(transaction_id);
-        match timeout(Duration::from_secs(3), future).await {
+        match timeout(Duration::from_millis(500), future).await {
             Ok(result) => result.ok(),
             Err(_elapsed) => {
                 println!("{:#?}", _elapsed);
@@ -413,7 +398,7 @@ impl Kademlia {
         None
     }
 
-    pub async fn send_find_node(&self, dest: Node, target_node_id: NodeId) -> Vec<Node> {
+    pub async fn send_find_node(&self, dest: Node, target_node_id: HashId) -> Vec<Node> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("target".into(), target_node_id.to_vec().into()),
@@ -430,11 +415,7 @@ impl Kademlia {
         }
     }
 
-    pub async fn send_get_peers(
-        &self,
-        dest: Node,
-        info_hash: [u8; 20],
-    ) -> Option<GetPeersResponse> {
+    pub async fn send_get_peers(&self, dest: Node, info_hash: HashId) -> Option<GetPeersResponse> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("info_hash".into(), info_hash.to_vec().into()),
@@ -465,12 +446,11 @@ impl Kademlia {
     pub async fn send_announce_peer(
         &self,
         dest: Node,
-        info_hash: NodeId,
+        info_hash: HashId,
     ) -> Option<KrpcSuccessResponse> {
         info!(
             "Sending announce peer for hash {:#?} to dest {:#?}",
-            info_hash.to_hex(),
-            dest
+            info_hash, dest
         );
         let get_peers = self.send_get_peers(dest.clone(), info_hash.clone()).await?;
 
@@ -491,7 +471,7 @@ impl Kademlia {
         self.send_request(request, &addr).await
     }
 
-    async fn select_initial_nodes(&self, target_node_id: NodeId) -> Vec<NodeDistance> {
+    async fn select_initial_nodes(&self, target_node_id: HashId) -> Vec<NodeDistance> {
         let mut alpha_set = vec![];
         let routing_table_clone = self.context.routing_table.lock().await;
         let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
@@ -511,7 +491,7 @@ impl Kademlia {
         for node in routing_table_clone.buckets[bucket_idx as usize].iter() {
             alpha_set.push(NodeDistance {
                 node: node.clone(),
-                dist: xor_id(&node.id, &target_node_id),
+                dist: node.id.distance(&target_node_id),
             });
         }
 
@@ -521,9 +501,9 @@ impl Kademlia {
     fn update_closest_nodes(
         &self,
         max_heap: &Arc<Mutex<BinaryHeap<NodeDistance>>>,
-        within_heap: &Arc<Mutex<HashSet<NodeId>>>,
+        within_heap: &Arc<Mutex<HashSet<HashId>>>,
         new_nodes: Vec<Node>,
-        target_node_id: NodeId,
+        target_node_id: HashId,
     ) {
         for node in new_nodes {
             let mut within_heap = within_heap.lock().unwrap();
@@ -532,7 +512,7 @@ impl Kademlia {
             if !within_heap.contains(&node.id) {
                 max_heap.push(NodeDistance {
                     node: node.clone(),
-                    dist: xor_id(&node.id, &target_node_id),
+                    dist: node.id.distance(&target_node_id),
                 });
                 if max_heap.len() > K {
                     max_heap.pop();
@@ -544,7 +524,7 @@ impl Kademlia {
 
     pub async fn recursive_find_nodes(
         self: Arc<Self>,
-        target_node_id: NodeId,
+        target_node_id: HashId,
     ) -> Vec<NodeDistance> {
         // info!("Running recursive get_nodes({target_node_id})");
         let mut set = JoinSet::new();
@@ -559,7 +539,7 @@ impl Kademlia {
 
         let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
             Arc::new(Mutex::new(BinaryHeap::new()));
-        let within_heap: Arc<Mutex<HashSet<NodeId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let within_heap: Arc<Mutex<HashSet<HashId>>> = Arc::new(Mutex::new(HashSet::new()));
 
         for distance_node in alpha_set.iter().cloned() {
             within_heap.lock().unwrap().insert(distance_node.node.id);
@@ -577,9 +557,12 @@ impl Kademlia {
 
                 set.spawn(async move {
                     // info!("Getting K closest from neighbor ({:#?})", distance_node);
+
+                    let start = Instant::now();
                     let k_closest_nodes = kademlia
                         .send_find_node(distance_node.node.clone(), target_node_id)
                         .await;
+                    warn!("sending find_node took {:?}", start.elapsed());
                     info!("K closest nodes: {:?}", k_closest_nodes);
                     kademlia.update_closest_nodes(
                         &max_heap,
@@ -589,7 +572,6 @@ impl Kademlia {
                     );
                 });
             }
-
             // Join all tasks
             let start = Instant::now();
             while set.join_next().await.is_some() {}
@@ -630,7 +612,7 @@ impl Kademlia {
 
     // duplication from find_node, but subtle and important differences
     // rather duplicate than make one function do many different things
-    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: NodeId) -> Vec<(IpAddr, u16)> {
+    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: HashId) -> Vec<(IpAddr, u16)> {
         // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
         let mut set = JoinSet::new();
         let mut already_queried = HashSet::new();
@@ -656,7 +638,7 @@ impl Kademlia {
 
         let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
             Arc::new(Mutex::new(BinaryHeap::new()));
-        let within_heap: Arc<Mutex<HashSet<NodeId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let within_heap: Arc<Mutex<HashSet<HashId>>> = Arc::new(Mutex::new(HashSet::new()));
 
         for distance_node in alpha_set.iter().cloned() {
             within_heap.lock().unwrap().insert(distance_node.node.id);
@@ -740,7 +722,7 @@ impl Kademlia {
         self.recursive_find_nodes(node_id).await;
     }
 
-    pub async fn announce_peer(self: Arc<Self>, info_hash: NodeId) {
+    pub async fn announce_peer(self: Arc<Self>, info_hash: HashId) {
         let closest_nodes = self.clone().recursive_find_nodes(info_hash.clone()).await;
         if closest_nodes.is_empty() {
             // store locally
@@ -799,7 +781,7 @@ impl Kademlia {
             info!("Received query from {:#?}", addr);
             info!("{:?}", query);
 
-            let source_id = vec_to_id(query.a.get("id").unwrap());
+            let source_id = query.a.get("id").unwrap().into();
             let source_node = Node::new(source_id, addr.ip(), addr.port());
 
             let check_for_eviction = {
@@ -810,8 +792,7 @@ impl Kademlia {
             if check_for_eviction {
                 info!(
                     "Checking for eviction due to source node {:?}'s query onto queried node {:?}",
-                    source_id.to_hex(),
-                    self.context.node.id.to_hex()
+                    source_id, self.context.node.id
                 );
                 loop {
                     let mut routing_table = self.context.routing_table.lock().await;
@@ -830,26 +811,25 @@ impl Kademlia {
 
                     info!(
                         "Node {:?} sent a ping to node {:?} to check if it should be evicted",
-                        self.context.node.id.to_hex(),
-                        oldest_node.id.to_hex()
+                        self.context.node.id, oldest_node.id
                     );
                     let mut response = self.send_ping(&addr).await;
 
                     // retry once
                     if response.is_none() {
-                        info!("Node {:?} didn't respond to node {:?}'s ping and the ping is being retried", oldest_node.id.to_hex(), self.context.node.id.to_hex());
+                        info!("Node {:?} didn't respond to node {:?}'s ping and the ping is being retried", oldest_node.id, self.context.node.id);
                         response = self.send_ping(&addr).await;
                     }
 
                     // if we get a response, we need to upsert the oldest node and update its last seen and continue our search
                     if response.is_some() {
-                        info!("Node {:?} responded to node {:?}'s ping and is being updated in the bucket", oldest_node.id.to_hex(), self.context.node.id.to_hex());
+                        info!("Node {:?} responded to node {:?}'s ping and is being updated in the bucket", oldest_node.id, self.context.node.id);
                         oldest_node.update_last_seen();
                         routing_table.upsert_node(oldest_node);
                     }
                     // if we don't get a reponse after second try, we must remove it and insert the current node
                     else {
-                        info!("Node {:?} didn't respond to node {:?}'s ping and is being removed from the bucket to make place for node {:#?}", oldest_node.id.to_hex(), self.context.node.id.to_hex(), source_id.to_hex());
+                        info!("Node {:?} didn't respond to node {:?}'s ping and is being removed from the bucket to make place for node {:#?}", oldest_node.id, self.context.node.id, source_id);
                         curr_bucket.pop_front();
                         routing_table.upsert_node(source_node.clone());
                     }
@@ -857,7 +837,7 @@ impl Kademlia {
             } else {
                 info!(
                     "Eviction not necessary, source node {:?} is succesfully upserted to {:?}'s bucket",
-                    source_id.to_hex(), self.context.node.id.to_hex()
+                    source_id, self.context.node.id
                 );
             }
 
@@ -888,7 +868,7 @@ impl Kademlia {
     }
 
     pub async fn handle_find_node(&self, query: &KrpcRequest) -> HashMap<String, ByteBuf> {
-        let target_node_id = vec_to_id(query.a.get("target").unwrap());
+        let target_node_id = query.a.get("target").unwrap().into();
         info!("Received find_nodes RPC for target {:#?}", target_node_id);
         let k_closest_nodes = self
             .context
@@ -913,7 +893,7 @@ impl Kademlia {
         query: &KrpcRequest,
         source_node: Node,
     ) -> HashMap<String, ByteBuf> {
-        let info_hash = vec_to_id(query.a.get("info_hash").unwrap());
+        let info_hash = query.a.get("info_hash").unwrap().into();
 
         let mut return_values = HashMap::from([("id".into(), self.node_id.to_vec().into())]);
 
@@ -953,7 +933,7 @@ impl Kademlia {
         query: &KrpcRequest,
         source_node: Node,
     ) -> HashMap<String, ByteBuf> {
-        let info_hash = vec_to_id(query.a.get("info_hash").unwrap());
+        let info_hash = query.a.get("info_hash").unwrap().into();
         let token = query.a.get("token").unwrap();
 
         let mut hasher = Sha1::new();

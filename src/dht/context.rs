@@ -11,22 +11,22 @@ use tokio::time::sleep;
 
 use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
 
-use super::utils::{generate_node_id, NodeId};
+use super::utils::{generate_node_id, HashId};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
     pub routing_table: Arc<tokio::sync::Mutex<RoutingTable>>,
-    pub peer_store: Arc<tokio::sync::Mutex<HashMap<NodeId, Vec<Node>>>>,
+    pub peer_store: Arc<tokio::sync::Mutex<HashMap<HashId, Vec<Node>>>>,
     pub node: Node,
     pub secret: Arc<Mutex<[u8; 16]>>,
-    pub announce_log: Arc<Vec<NodeId>>,
+    pub announce_log: Arc<Vec<HashId>>,
 }
 
 impl RuntimeContext {
     pub fn init(args: &Args) -> Self {
         let node_id = generate_node_id();
         let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
-        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<NodeId, Vec<Node>>::new()));
+        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<HashId, Vec<Node>>::new()));
         let node = Node::new(
             node_id,
             std::net::IpAddr::V4(Ipv4Addr::from_str(&args.ip).unwrap()), // TODO: we probably need public IP?
@@ -55,14 +55,14 @@ impl RuntimeContext {
         });
     }
 
-    pub async fn dump_state(&self) -> Value {
-        let current_state = json!({
-            "time": SystemTime::now(),
-            "node": serde_json::to_string(&self.node).unwrap(),
-            "peer_store": serde_json::to_string(&self.peer_store.lock().await.clone()).unwrap(),
-            "routing_table": serde_json::to_string(&self.routing_table.lock().await.clone()).unwrap(),
-        });
+    // pub async fn dump_state(&self) -> Value {
+    //     let current_state = json!({
+    //         "time": SystemTime::now(),
+    //         "node": serde_json::to_string(&self.node).unwrap(),
+    //         "peer_store": serde_json::to_string(&self.peer_store.lock().await.clone()).unwrap(),
+    //         "routing_table": serde_json::to_string(&self.routing_table.lock().await.clone()).unwrap(),
+    //     });
 
-        current_state
-    }
+    //     current_state
+    // }
 }
