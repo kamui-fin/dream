@@ -1,7 +1,7 @@
 fn main() {
     // get hex from .torrent file info hash
 
-    let path = "test.torrent";
+    let path = "archlinux.torrent";
     let meta_file =
         dream::metafile::Metafile::parse_torrent_file(std::path::PathBuf::from(path)).unwrap();
 

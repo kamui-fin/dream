@@ -47,7 +47,7 @@ use crate::dht::{
     node::{Node, NodeDistance},
 };
 
-use super::key::Key;
+use super::{config::MAX_NUM_PEERS_REQUEST, key::Key};
 
 type Peer = (IpAddr, u16);
 
@@ -218,18 +218,6 @@ impl fmt::Debug for KrpcRequest {
     }
 }
 
-#[derive(Debug)]
-pub enum NodeOrPeer {
-    Peers(Vec<SocketAddrV4>),
-    Nodes(Vec<Node>),
-}
-
-#[derive(Debug)]
-pub struct GetPeersResponse {
-    pub token: Option<Vec<u8>>,
-    pub value: NodeOrPeer,
-}
-
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct KrpcErrorResponse {
     t: String,
@@ -310,7 +298,6 @@ impl Kademlia {
         self.clone().republish_peer_task();
         self.context.clone().regen_token_task();
 
-        error!("Waiting for listen to finish");
         handle.await.unwrap();
     }
 
@@ -445,32 +432,13 @@ impl Kademlia {
         }
     }
 
-    pub async fn send_get_peers(&self, dest: Node, info_hash: Key) -> Option<GetPeersResponse> {
+    pub async fn send_get_peers(&self, dest: Node, info_hash: Key) -> Option<KrpcSuccessResponse> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("info_hash".into(), info_hash.to_vec().into()),
         ]);
         let request = KrpcRequest::new("get_peers", arguments);
-        let response = self.send_request(request, dest.addr).await?;
-
-        info!("get_peers response = {:?}", response);
-
-        let token = response.r.token.clone();
-
-        let nodes = response.r.nodes;
-        let peers = response.r.values;
-
-        if !nodes.is_empty() {
-            Some(GetPeersResponse {
-                token,
-                value: NodeOrPeer::Nodes(nodes),
-            })
-        } else {
-            Some(GetPeersResponse {
-                token,
-                value: NodeOrPeer::Peers(peers),
-            })
-        }
+        self.send_request(request, dest.addr).await
     }
 
     pub async fn send_announce_peer(
@@ -491,7 +459,7 @@ impl Kademlia {
             ("info_hash".into(), info_hash.to_vec().into()),
         ]);
 
-        if let Some(token) = get_peers.token {
+        if let Some(token) = get_peers.r.token {
             arguments.insert("token".into(), token.into());
         }
 
@@ -566,7 +534,6 @@ impl Kademlia {
                 let candidates_clone = candidates.clone();
                 let closest_clone = closest_nodes.clone();
                 let semaphore_clone = semaphore.clone();
-
                 let candidate = candidate.0;
 
                 if candidate.node.id == self.node_id {
@@ -588,6 +555,13 @@ impl Kademlia {
                         .await
                     {
                         Ok(nodes) => {
+                            self_clone
+                                .context
+                                .routing_table
+                                .lock()
+                                .await
+                                .upsert_node(candidate.node.clone());
+
                             // Process discovered nodes
                             let mut new_candidates = BinaryHeap::new();
                             for node in nodes {
@@ -615,13 +589,6 @@ impl Kademlia {
                                     closest_guard.pop();
                                 }
                             }
-
-                            self_clone
-                                .context
-                                .routing_table
-                                .lock()
-                                .await
-                                .upsert_node(candidate.node);
                         }
                         Err(_) => {
                             self_clone
@@ -654,10 +621,6 @@ impl Kademlia {
                     false // keep trying other candidates
                 }
             };
-            warn!(
-                "AFTER - Current closest nodes size = {:#?}",
-                closest_nodes.lock().unwrap().len()
-            );
 
             if should_terminate {
                 break;
@@ -673,14 +636,187 @@ impl Kademlia {
         k_closest
     }
 
-    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: Key) -> Vec<(IpAddr, u16)> {
-        vec![]
+    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: Key) -> Vec<SocketAddrV4> {
+        let contacted = Arc::new(Mutex::new(HashSet::new()));
+        let candidates = Arc::new(Mutex::new(BinaryHeap::new()));
+        let closest_nodes = Arc::new(Mutex::new(BinaryHeap::new()));
+        let peers = Arc::new(Mutex::new(HashSet::new()));
+        let semaphore = Arc::new(Semaphore::new(ALPHA));
+
+        // Initialize candidates from routing table
+        {
+            let initial_candidates = self.context.routing_table.lock().await.get_nodes(info_hash);
+
+            let mut cand_guard = candidates.lock().unwrap();
+            for cand in initial_candidates {
+                cand_guard.push(Reverse(NodeDistance {
+                    node: cand.clone(),
+                    dist: info_hash.distance(&cand.id),
+                }));
+            }
+        }
+
+        loop {
+            let mut current_batch = Vec::with_capacity(ALPHA);
+
+            // Acquire permits for parallel queries
+            let permits = {
+                let mut permits = Vec::with_capacity(ALPHA);
+                for _ in 0..ALPHA {
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permits.push(permit),
+                        Err(_) => break,
+                    }
+                }
+                permits
+            };
+
+            if permits.is_empty() {
+                break;
+            }
+            // Get batch of candidates
+            {
+                let mut cand_guard = candidates.lock().unwrap();
+                while current_batch.len() < ALPHA && !cand_guard.is_empty() {
+                    if let Some(candidate) = cand_guard.pop() {
+                        current_batch.push(candidate);
+                    }
+                }
+            }
+
+            if current_batch.is_empty() {
+                break;
+            }
+
+            // Process batch in parallel
+            let mut futures = Vec::new();
+            for candidate in current_batch {
+                let self_clone = self.clone();
+                let info_hash = info_hash;
+                let contacted_clone = contacted.clone();
+                let candidates_clone = candidates.clone();
+                let closest_clone = closest_nodes.clone();
+                let peers_clone = peers.clone();
+                let semaphore_clone = semaphore.clone();
+                let candidate = candidate.0;
+
+                if candidate.node.id == self.node_id {
+                    continue;
+                }
+
+                futures.push(tokio::spawn(async move {
+                    // Check if already contacted
+                    {
+                        let mut contacted_guard = contacted_clone.lock().unwrap();
+                        if contacted_guard.contains(&candidate.node.id) {
+                            return;
+                        }
+                        contacted_guard.insert(candidate.node.id.clone());
+                    }
+
+                    match self_clone
+                        .send_get_peers(candidate.node.clone(), info_hash)
+                        .await
+                    {
+                        Some(KrpcSuccessResponse {
+                            r:
+                                ResponseBody {
+                                    token,
+                                    values,
+                                    nodes,
+                                    ..
+                                },
+                            ..
+                        }) => {
+                            // TODO: do something with token
+
+                            // Update routing table
+                            self_clone
+                                .context
+                                .routing_table
+                                .lock()
+                                .await
+                                .upsert_node(candidate.node.clone());
+
+                            {
+                                let mut peers_guard = peers_clone.lock().unwrap();
+                                peers_guard.extend(values);
+
+                                if peers_guard.len() >= MAX_NUM_PEERS_REQUEST {
+                                    return;
+                                }
+                            }
+                            // Process discovered nodes
+                            let mut new_candidates = BinaryHeap::new();
+                            for node in nodes {
+                                let dist = info_hash.distance(&node.id);
+                                new_candidates.push(NodeDistance { node, dist });
+                            }
+
+                            // Merge candidates
+                            {
+                                let mut cand_guard = candidates_clone.lock().unwrap();
+                                for nd in new_candidates {
+                                    if cand_guard.len() < K
+                                        || nd.dist < cand_guard.peek().unwrap().0.dist
+                                    {
+                                        cand_guard.push(Reverse(nd));
+                                    }
+                                }
+                            }
+
+                            // Update closest nodes
+                            {
+                                let mut closest_guard = closest_clone.lock().unwrap();
+                                closest_guard.push(candidate.clone());
+                                while closest_guard.len() > K {
+                                    closest_guard.pop();
+                                }
+                            }
+                        }
+                        None => {
+                            self_clone
+                                .context
+                                .routing_table
+                                .lock()
+                                .await
+                                .remove_node(candidate.node.id);
+                        }
+                    }
+
+                    drop(semaphore_clone);
+                }));
+            }
+
+            futures::future::join_all(futures).await;
+
+            // Check termination conditions
+            let find_node_should_terminate = {
+                let closest_guard = closest_nodes.lock().unwrap();
+                let cand_guard = candidates.lock().unwrap();
+
+                if let Some(closest_node) = closest_guard.peek() {
+                    let no_closer_candidates =
+                        cand_guard.iter().all(|c| c.0.dist >= closest_node.dist);
+                    closest_guard.len() >= K && no_closer_candidates
+                } else {
+                    false // keep trying other candidates
+                }
+            };
+
+            if peers.lock().unwrap().len() >= MAX_NUM_PEERS_REQUEST || find_node_should_terminate {
+                break;
+            }
+        }
+
+        // Return results
+        let peers = peers.lock().unwrap().clone();
+        peers.into_iter().collect()
     }
 
     // fyi: refresh periodically too besides only when joining
     // if no node lookup for bucket range has been done within 1hr
     pub async fn refresh_bucket(self: Arc<Self>, bucket_idx: usize) {
-        error!("Refreshing bucket #{bucket_idx}");
         let node_id = self
             .context
             .routing_table

@@ -7,6 +7,8 @@ pub const ALPHA: usize = 3;
 // Amount of time to wait before refreshing
 pub const REFRESH_TIME: u64 = 15 * 60;
 
+pub const MAX_NUM_PEERS_REQUEST: usize = 100;
+
 // TOML config loading and clap CLI arg parse
 
 #[derive(Parser, Debug, Default)]
