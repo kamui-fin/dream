@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use easy_upnp::{add_ports, PortMappingProtocol, UpnpConfig};
 use node::Node;
 use tiny_http::{Request, Response, Server};
 use tokio::{
@@ -15,75 +16,45 @@ use tokio::{
 
 use crate::dht::{config::Args, kademlia::Kademlia};
 
+pub mod compact;
 pub mod config;
 pub mod context;
 pub mod kademlia;
+pub mod key;
 pub mod node;
 pub mod routing;
-pub mod utils;
-use igd::aio::search_gateway;
 
-async fn setup_upnp_mapping(
-    local_ip: SocketAddrV4,
-    external_port: u16,
-    internal_port: u16,
-) -> Option<u16> {
-    println!("Local IP: {}", local_ip);
-    match search_gateway(Default::default()).await {
-        Ok(gateway) => {
-            println!("Discovered gateway: {}", gateway);
+const LEASE_DURATION: u32 = 3600; // 1 hour lease
 
-            let duration = 3600; // 1 hour lease
-            let description = "BitTorrent DHT Client";
+pub async fn setup_upnp() -> Result<(), Box<dyn std::error::Error>> {
+    let config = UpnpConfig {
+        address: None, // Use default network interface
+        port: 6881,
+        protocol: PortMappingProtocol::UDP,
+        duration: LEASE_DURATION,
+        comment: "Kademlia DHT".to_string(),
+    };
 
-            match gateway
-                .add_port(
-                    igd::PortMappingProtocol::UDP,
-                    external_port,
-                    local_ip,
-                    duration,
-                    description,
-                )
-                .await
-            {
-                Ok(_) => {
-                    println!(
-                        "Port {} mapped to {}:{}",
-                        external_port, local_ip, internal_port
-                    );
-                    Some(external_port)
-                }
-                Err(err) => {
-                    eprintln!("Failed to map port: {}", err);
-                    None
-                }
-            }
+    // Add port mapping
+    match add_ports(vec![config]).into_iter().next() {
+        Some(Ok(_)) => {
+            log::info!("UPnP port forwarding established on port {}", 6881);
+
+            // Setup cleanup on exit
+            // ctrlc::set_handler(move || {
+            //     cleanup_upnp().expect("Failed to clean up UPnP mapping");
+            //     std::process::exit(0);
+            // })?;
         }
-        Err(err) => {
-            eprintln!("Failed to discover UPnP gateway: {}", err);
-            None
-        }
+        Some(Err(e)) => log::warn!("UPnP setup failed: {}", e),
+        None => log::warn!("No UPnP gateway found"),
     }
+
+    Ok(())
 }
 
 pub async fn start_dht(args: &Args) {
-    let external_port = 6881;
-    let internal_port: u16 = 6881;
-
-    if let Some(mapped_port) = setup_upnp_mapping(
-        SocketAddrV4::new(
-            Ipv4Addr::from_str(&args.ip).expect("Invalid IP address passed in"),
-            internal_port,
-        ),
-        external_port,
-        internal_port,
-    )
-    .await
-    {
-        println!("Successfully mapped external port: {}", mapped_port);
-    } else {
-        eprintln!("UPnP mapping failed. Continuing without port forwarding.");
-    }
+    setup_upnp().await.unwrap();
 
     let kademlia = Arc::new(Kademlia::init(args).await);
 
@@ -94,6 +65,10 @@ pub async fn start_dht(args: &Args) {
             .next()
             .unwrap()
             .ip();
+        let ip = match ip {
+            std::net::IpAddr::V4(ip) => ip,
+            _ => panic!("Only IPv4 addresses are supported"),
+        };
 
         let response = kademlia
             .send_ping_init(&format!("{}:{}", ip, 6881))
@@ -110,7 +85,7 @@ pub async fn start_dht(args: &Args) {
     thread::spawn(move || {
         let server = Server::http(format!(
             "0.0.0.0:{}",
-            1000 + kademlia_clone.context.node.port
+            1000 + kademlia_clone.context.node.addr.port()
         ))
         .unwrap();
         let rt = Runtime::new().unwrap();

@@ -6,3 +6,4 @@ output
 *.torrent
 *.mp4
 *.bin
+node_id.bin

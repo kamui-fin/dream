@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::dht::{config::K, node::Node};
 
-use super::utils::{HashId, ID_SIZE};
+use super::key::{Key, ID_SIZE};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -21,12 +21,12 @@ use super::utils::{HashId, ID_SIZE};
 //    -> but nodes that can't need to refresh periodically  so good nodes are available when DHT is needed
 #[derive(Serialize, Clone)]
 pub struct RoutingTable {
-    node_id: HashId,
+    node_id: Key,
     // array of linked lists with NUM_BITS elements
     pub buckets: Vec<LinkedList<Node>>,
 }
 
-fn leading_zeros(node_id: HashId) -> usize {
+fn leading_zeros(node_id: Key) -> usize {
     let mut count = 0;
     for byte in node_id.0.iter() {
         if *byte == 0 {
@@ -40,7 +40,7 @@ fn leading_zeros(node_id: HashId) -> usize {
 }
 
 impl RoutingTable {
-    pub fn new(node_id: HashId) -> Self {
+    pub fn new(node_id: Key) -> Self {
         Self {
             node_id,
             buckets: vec![LinkedList::new(); ID_SIZE * 8],
@@ -57,20 +57,21 @@ impl RoutingTable {
         all_nodes
     }
 
-    pub fn find_bucket_idx(&self, node_id: HashId) -> usize {
+    pub fn find_bucket_idx(&self, node_id: Key) -> usize {
         let xor_result = node_id.distance(&self.node_id);
         leading_zeros(xor_result)
     }
 
-    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: HashId) -> Option<&Node> {
+    pub fn node_in_bucket(&self, bucket_idx: usize, node_id: Key) -> Option<&Node> {
         self.buckets[bucket_idx]
             .iter()
             .find(|&node| (node.id == node_id))
     }
 
-    pub fn remove_node(&mut self, node_id: HashId, bucket_idx: usize) {
+    pub fn remove_node_in_bucket(&mut self, node_id: Key, bucket_idx: usize) {
         let mut new_list: LinkedList<Node> = LinkedList::new();
 
+        // TODO: fix if removing node_id = our_node_id
         while let Some(curr_front) = self.buckets[bucket_idx].pop_front() {
             if (curr_front).id != node_id {
                 new_list.push_back(curr_front);
@@ -81,6 +82,11 @@ impl RoutingTable {
         self.buckets[bucket_idx] = new_list;
     }
 
+    pub fn remove_node(&mut self, node_id: Key) {
+        let bucket_idx = self.find_bucket_idx(node_id);
+        self.remove_node_in_bucket(node_id, bucket_idx);
+    }
+
     pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id);
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
@@ -88,7 +94,7 @@ impl RoutingTable {
         // info!("Attempting to add node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
 
         if already_exists {
-            self.remove_node(node.id, bucket_idx);
+            self.remove_node_in_bucket(node.id, bucket_idx);
             self.buckets[bucket_idx].push_back(node);
 
             return false; // since it already exists, eviction not necessary
@@ -103,7 +109,7 @@ impl RoutingTable {
     }
 
     // TODO: test
-    pub fn get_refresh_target(&self, bucket_idx: usize) -> HashId {
+    pub fn get_refresh_target(&self, bucket_idx: usize) -> Key {
         let start = BigUint::from(1u8) << (ID_SIZE * 8 - bucket_idx - 1);
         let end = BigUint::from(1u8) << ((ID_SIZE * 8 - bucket_idx) as u32);
 
@@ -120,10 +126,9 @@ impl RoutingTable {
         res_node_id.into()
     }
 
-    pub fn get_nodes(&self, target_node_id: HashId) -> Vec<Node> {
+    pub fn get_nodes(&self, target_node_id: Key) -> Vec<Node> {
         let mut nodes = self.get_all_nodes();
         nodes.sort_by_key(|node| node.id.distance(&target_node_id));
-        nodes.truncate(K);
 
         if let Some(first_match) = nodes.first() {
             if first_match.id == target_node_id {

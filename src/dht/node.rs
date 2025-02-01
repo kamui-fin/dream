@@ -1,27 +1,25 @@
 use std::{
     cmp::Ordering,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr, SocketAddrV4},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use super::utils::HashId;
+use super::key::Key;
 
 // node participating in DHT
 // in our bittorrent implementations, peers are also nodes
 #[derive(Eq, PartialEq, Clone, Debug, serde::Serialize)]
 pub struct Node {
-    pub id: HashId,
-    pub ip: IpAddr,
-    pub port: u16,
+    pub id: Key,
+    pub addr: SocketAddrV4,
     pub last_seen: u64,
 }
 
 impl Node {
-    pub fn new(id: HashId, ip: IpAddr, port: u16) -> Self {
+    pub fn new(id: Key, ip: Ipv4Addr, port: u16) -> Self {
         Self {
             id,
-            ip,
-            port,
+            addr: SocketAddrV4::new(ip.into(), port),
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -29,33 +27,15 @@ impl Node {
         }
     }
 
-    pub fn get_peer_compact_format(&self) -> Vec<u8> {
-        let mut compact_info = [0u8; 6];
-
-        if let IpAddr::V4(v4_addr) = self.ip {
-            let ip = v4_addr.octets();
-            compact_info[0..4].copy_from_slice(&ip);
+    pub fn from_addr(id: Key, addr: SocketAddrV4) -> Self {
+        Self {
+            id,
+            addr,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         }
-
-        let port = self.port.to_be_bytes();
-        compact_info[4..6].copy_from_slice(&port);
-
-        compact_info.to_vec()
-    }
-
-    pub fn get_node_compact_format(&self) -> Vec<u8> {
-        let mut compact_info = [0u8; 26];
-        compact_info[0..20].copy_from_slice(&self.id.0);
-
-        if let IpAddr::V4(v4_addr) = self.ip {
-            let ip = v4_addr.octets();
-            compact_info[20..25].copy_from_slice(&ip);
-        }
-
-        let port = self.port.to_be_bytes();
-        compact_info[25..27].copy_from_slice(&port);
-
-        compact_info.to_vec()
     }
 
     pub fn is_questionable(&self) -> bool {
@@ -78,7 +58,7 @@ impl Node {
 #[derive(Clone, Eq, PartialEq, Debug, serde::Serialize)]
 pub struct NodeDistance {
     pub node: Node,
-    pub dist: HashId,
+    pub dist: Key,
 }
 
 impl Ord for NodeDistance {

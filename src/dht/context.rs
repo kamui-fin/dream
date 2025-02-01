@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, SocketAddrV4},
     str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
@@ -9,29 +9,27 @@ use std::{
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
-use crate::dht::{config::Args, node::Node, routing::RoutingTable, utils::gen_secret};
+use crate::dht::{config::Args, key::gen_secret, node::Node, routing::RoutingTable};
 
-use super::utils::{generate_node_id, HashId};
+use super::key::{generate_node_id, Key};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {
     pub routing_table: Arc<tokio::sync::Mutex<RoutingTable>>,
-    pub peer_store: Arc<tokio::sync::Mutex<HashMap<HashId, Vec<Node>>>>,
+    pub peer_store: Arc<tokio::sync::Mutex<HashMap<Key, Vec<SocketAddrV4>>>>,
     pub node: Node,
     pub secret: Arc<Mutex<[u8; 16]>>,
-    pub announce_log: Arc<Vec<HashId>>,
+    pub announce_log: Arc<Vec<Key>>,
 }
 
 impl RuntimeContext {
-    pub fn init(args: &Args) -> Self {
+    pub fn init(args: &Args, ip: Ipv4Addr) -> Self {
         let node_id = generate_node_id();
         let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
-        let peer_store = Arc::new(tokio::sync::Mutex::new(HashMap::<HashId, Vec<Node>>::new()));
-        let node = Node::new(
-            node_id,
-            std::net::IpAddr::V4(Ipv4Addr::from_str(&args.ip).unwrap()), // TODO: we probably need public IP?
-            args.port,
-        );
+        let peer_store = Arc::new(tokio::sync::Mutex::new(
+            HashMap::<Key, Vec<SocketAddrV4>>::new(),
+        ));
+        let node = Node::new(node_id, ip, args.port); // TODO: public ip instead probably
         let secret = Arc::new(Mutex::new(gen_secret()));
 
         Self {
@@ -54,15 +52,4 @@ impl RuntimeContext {
             }
         });
     }
-
-    // pub async fn dump_state(&self) -> Value {
-    //     let current_state = json!({
-    //         "time": SystemTime::now(),
-    //         "node": serde_json::to_string(&self.node).unwrap(),
-    //         "peer_store": serde_json::to_string(&self.peer_store.lock().await.clone()).unwrap(),
-    //         "routing_table": serde_json::to_string(&self.routing_table.lock().await.clone()).unwrap(),
-    //     });
-
-    //     current_state
-    // }
 }

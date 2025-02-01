@@ -13,10 +13,12 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
+use crate::dht::compact;
+use anyhow::anyhow;
 use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     fmt,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -24,12 +26,15 @@ use std::{
 use futures::future::join_all;
 use hex::encode;
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, DeserializeOwned},
+    Deserialize, Serialize,
+};
 use serde_bytes::ByteBuf;
 use sha1::{Digest, Sha1};
 use tokio::{
     net::UdpSocket,
-    sync::oneshot,
+    sync::{oneshot, Semaphore},
     task::{JoinHandle, JoinSet},
     time::{sleep, timeout, Instant},
 };
@@ -37,11 +42,11 @@ use tokio::{
 use crate::dht::{
     config::{Args, ALPHA, K, REFRESH_TIME},
     context::RuntimeContext,
+    key::{gen_trans_id, ID_SIZE},
     node::{Node, NodeDistance},
-    utils::{deserialize_compact_node, deserialize_compact_peers, gen_trans_id, ID_SIZE},
 };
 
-use super::utils::HashId;
+use super::key::Key;
 
 type Peer = (IpAddr, u16);
 
@@ -63,7 +68,6 @@ impl TransactionManager {
     }
 
     fn resolve_transaction(&self, tx_id: String, value: KrpcSuccessResponse) {
-        println!("Resolving transaction {tx_id}");
         if let Some(sender) = self.transactions.lock().unwrap().remove(&tx_id) {
             let _ = sender.send(value); // Send the value to resolve the future
         }
@@ -107,30 +111,59 @@ impl KrpcRequest {
     }
 }
 
+pub enum KrpcRequestType {
+    Ping,
+    FindNode,
+    GetPeers,
+    AnnouncePeer,
+}
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct KrpcSuccessResponse {
+    #[serde(default)]
+    ip: Option<ByteBuf>,
+
     t: String,
     y: String,
 
-    r: HashMap<String, ByteBuf>,
+    r: ResponseBody,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ResponseBody {
+    pub id: Key,
+
+    // Only present in responses to GetPeers
+    #[serde(
+        with = "compact::values",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub values: Vec<SocketAddrV4>,
+
+    #[serde(
+        with = "compact::nodes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub nodes: Vec<Node>,
+
+    // present in responses to GetPeers
+    #[serde(with = "serde_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Vec<u8>>,
 }
 
 impl KrpcSuccessResponse {
-    pub fn from_request(request: &KrpcRequest, arguments: HashMap<String, ByteBuf>) -> Self {
+    pub fn from_request(request: &KrpcRequest, body: ResponseBody) -> Self {
         Self {
+            ip: None,
             t: request.t.clone(),
             y: "r".into(),
-            r: arguments,
+            r: body,
         }
     }
 
-    pub fn extract_id(&self) -> HashId {
-        let bytes = self.r.get("id").unwrap();
-
-        let mut node_id = [0u8; 20];
-        node_id.copy_from_slice(bytes);
-
-        node_id.into()
+    pub fn extract_id(&self) -> Key {
+        self.r.id
     }
 }
 
@@ -144,7 +177,7 @@ impl fmt::Display for KrpcRequest {
             self.q,
             self.a
                 .iter()
-                .map(|(k, v)| (k, HashId::from(v)))
+                .map(|(k, v)| (k, Key::from(v)))
                 .collect::<HashMap<_, _>>()
         )
     }
@@ -155,12 +188,7 @@ impl fmt::Display for KrpcSuccessResponse {
         write!(
             f,
             "KrpcSuccessResponse {{ t: {}, y: {}, r: {:?} }}",
-            self.t,
-            self.y,
-            self.r
-                .iter()
-                .map(|(k, v)| (k, HashId::from(v)))
-                .collect::<HashMap<_, _>>()
+            self.t, self.y, self.r
         )
     }
 }
@@ -176,7 +204,7 @@ impl fmt::Debug for KrpcRequest {
             self.q,
             self.a
                 .iter()
-                .map(|(k, v)| (k, HashId::from(v)))
+                .map(|(k, v)| (k, Key::from(v)))
                 .collect::<HashMap<_, _>>()
         )
     }
@@ -184,13 +212,13 @@ impl fmt::Debug for KrpcRequest {
 
 #[derive(Debug)]
 pub enum NodeOrPeer {
-    Peers(Vec<Peer>),
+    Peers(Vec<SocketAddrV4>),
     Nodes(Vec<Node>),
 }
 
 #[derive(Debug)]
 pub struct GetPeersResponse {
-    pub token: Option<ByteBuf>,
+    pub token: Option<Vec<u8>>,
     pub value: NodeOrPeer,
 }
 
@@ -206,18 +234,26 @@ pub struct Kademlia {
     pub socket: Arc<UdpSocket>,
     manager: TransactionManager,
     pub context: Arc<RuntimeContext>,
-    node_id: HashId,
+    node_id: Key,
     pub timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>>,
+}
+
+async fn get_public_ip() -> Ipv4Addr {
+    let ip = public_ip::addr().await.unwrap();
+    if let IpAddr::V4(ipv4) = ip {
+        ipv4
+    } else {
+        panic!("Only IPv4 addresses are supported");
+    }
 }
 
 impl Kademlia {
     pub async fn init(args: &Args) -> Self {
-        let context = Arc::new(RuntimeContext::init(args));
-        let socket = Arc::new(
-            UdpSocket::bind(format!("{}:{}", args.ip, context.node.port))
-                .await
-                .unwrap(),
-        );
+        let context = Arc::new(RuntimeContext::init(args, get_public_ip().await));
+        let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port))
+            .await
+            .unwrap();
+        let socket = Arc::new(socket); // Set socket options to reuse address and port
         let node_id = context.node.id;
 
         let timers: Arc<Mutex<HashMap<usize, JoinHandle<()>>>> =
@@ -315,21 +351,19 @@ impl Kademlia {
     pub async fn send_request(
         &self,
         query: KrpcRequest,
-        addr: &str,
+        addr: SocketAddrV4,
     ) -> Option<KrpcSuccessResponse> {
         info!("[CLIENT] Sending query to {addr}: {:?}", query);
         let transaction_id = query.t.clone();
         let query = serde_bencoded::to_vec(&query).unwrap();
-        self.socket
-            .send_to(&query, addr)
-            .await
-            .expect("Unable to send query");
+
+        self.socket.send_to(&query, addr).await.ok()?;
 
         let future = self.manager.create_future(transaction_id);
-        match timeout(Duration::from_millis(500), future).await {
+        match timeout(Duration::from_millis(300), future).await {
             Ok(result) => result.ok(),
             Err(_elapsed) => {
-                println!("{:#?}", _elapsed);
+                info!("Timed out waiting for response from {addr}");
                 None
             }
         }
@@ -340,12 +374,13 @@ impl Kademlia {
             "[SERVER] Sending response {:?} to {:?}",
             response, source_node
         );
-        let addr = SocketAddr::new(source_node.ip, source_node.port);
         let response = serde_bencoded::to_vec(&response).unwrap();
-        self.socket.send_to(&response, addr).await.unwrap();
+
+        self.socket.connect(source_node.addr).await.unwrap();
+        self.socket.send(&response).await.unwrap();
     }
 
-    pub async fn send_ping(&self, addr: &str) -> Option<KrpcSuccessResponse> {
+    pub async fn send_ping(&self, addr: SocketAddrV4) -> Option<KrpcSuccessResponse> {
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_vec().into())]);
         let request = KrpcRequest::new("ping", arguments);
 
@@ -356,86 +391,70 @@ impl Kademlia {
         info!("Sending initial ping to {addr}");
         let arguments = HashMap::from([("id".to_string(), self.node_id.to_vec().into())]);
         let query = KrpcRequest::new("ping", arguments);
+        let query = serde_bencode::to_bytes(&query).unwrap();
 
-        let query = serde_bencoded::to_vec(&query).unwrap();
-
-        let mut attempts = 0;
-        let max_retries = 10;
-
-        while attempts < max_retries {
-            attempts += 1;
-
-            if let Err(e) = self.socket.connect(addr).await {
-                eprintln!("Attempt {attempts}/{max_retries}: Unable to connect: {e}");
-            } else if let Err(e) = self.socket.send(&query).await {
-                eprintln!("Attempt {attempts}/{max_retries}: Failed to send query: {e}");
-            } else {
-                let mut buf = [0; 2048];
-                match timeout(Duration::from_secs(2), self.socket.recv(&mut buf)).await {
-                    Ok(Ok(len)) => {
-                        if let Ok(response) =
-                            serde_bencoded::from_bytes::<KrpcSuccessResponse>(&buf[..len])
-                        {
-                            return Some(response); // If successful, return the response
-                        } else {
-                            eprintln!("Attempt {attempts}/{max_retries}: Failed to parse response");
-                        }
-                    }
-                    Ok(Err(e)) => eprintln!(
-                        "Attempt {attempts}/{max_retries}: Failed to receive response: {e}"
-                    ),
-                    Err(_) => {
-                        eprintln!("Attempt {attempts}/{max_retries}: Timeout waiting for response")
-                    }
-                }
-            }
-
-            if attempts < max_retries {
-                sleep(Duration::from_secs(1)).await;
-            }
+        if let Err(e) = self.socket.send_to(&query, addr).await {
+            eprintln!("Failed to send query: {e}");
+            return None;
         }
 
-        None
+        let mut buf = [0; 2048];
+        match timeout(Duration::from_millis(500), self.socket.recv_from(&mut buf)).await {
+            Ok(Ok((len, addr))) => {
+                let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
+                Some(response)
+            }
+            Ok(Err(e)) => {
+                eprintln!("Failed to receive response: {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("Timeout while waiting for response");
+                None
+            }
+        }
     }
 
-    pub async fn send_find_node(&self, dest: Node, target_node_id: HashId) -> Vec<Node> {
+    pub async fn send_find_node(
+        &self,
+        dest: Node,
+        target_node_id: Key,
+    ) -> anyhow::Result<Vec<Node>> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("target".into(), target_node_id.to_vec().into()),
         ]);
         let request = KrpcRequest::new("find_node", arguments);
-        let addr = format!("{}:{}", dest.ip, dest.port);
 
-        let response = self.send_request(request, &addr).await;
+        let response = self.send_request(request, dest.addr).await;
         if let Some(response) = response {
-            let serialized_nodes = response.r.get("nodes").unwrap();
-            deserialize_compact_node(serialized_nodes)
+            Ok(response.r.nodes)
         } else {
-            vec![]
+            Err(anyhow!("Failed to send find_node request"))
         }
     }
 
-    pub async fn send_get_peers(&self, dest: Node, info_hash: HashId) -> Option<GetPeersResponse> {
+    pub async fn send_get_peers(&self, dest: Node, info_hash: Key) -> Option<GetPeersResponse> {
         let arguments = HashMap::from([
             ("id".to_string(), self.node_id.to_vec().into()),
             ("info_hash".into(), info_hash.to_vec().into()),
         ]);
         let request = KrpcRequest::new("get_peers", arguments);
-        let addr = format!("{}:{}", dest.ip, dest.port);
-        let response = self.send_request(request, &addr).await?;
+        let response = self.send_request(request, dest.addr).await?;
 
         info!("get_peers response = {:?}", response);
 
-        let token = response.r.get("token").cloned();
-        if let Some(nodes) = response.r.get("nodes") {
-            let nodes = deserialize_compact_node(nodes);
+        let token = response.r.token.clone();
+
+        let nodes = response.r.nodes;
+        let peers = response.r.values;
+
+        if !nodes.is_empty() {
             Some(GetPeersResponse {
                 token,
                 value: NodeOrPeer::Nodes(nodes),
             })
         } else {
-            let peers = response.r.get("values").unwrap(); // not deserialized
-            let peers = deserialize_compact_peers(peers);
             Some(GetPeersResponse {
                 token,
                 value: NodeOrPeer::Peers(peers),
@@ -446,7 +465,7 @@ impl Kademlia {
     pub async fn send_announce_peer(
         &self,
         dest: Node,
-        info_hash: HashId,
+        info_hash: Key,
     ) -> Option<KrpcSuccessResponse> {
         info!(
             "Sending announce peer for hash {:#?} to dest {:#?}",
@@ -462,48 +481,38 @@ impl Kademlia {
         ]);
 
         if let Some(token) = get_peers.token {
-            arguments.insert("token".into(), token);
+            arguments.insert("token".into(), token.into());
         }
 
         let request = KrpcRequest::new("announce_peer", arguments);
-        let addr = format!("{}:{}", dest.ip, dest.port);
 
-        self.send_request(request, &addr).await
+        self.send_request(request, dest.addr).await
     }
 
-    async fn select_initial_nodes(&self, target_node_id: HashId) -> Vec<NodeDistance> {
-        let mut alpha_set = vec![];
-        let routing_table_clone = self.context.routing_table.lock().await;
-        let mut bucket_idx = routing_table_clone.find_bucket_idx(target_node_id);
+    async fn select_initial_nodes(&self, target_node_id: Key) -> Vec<NodeDistance> {
+        let mut closest_nodes = self
+            .context
+            .routing_table
+            .lock()
+            .await
+            .get_nodes(target_node_id);
+        closest_nodes.truncate(K);
 
-        if bucket_idx == ID_SIZE * 8 {
-            bucket_idx = 0;
-        }
-
-        let mut traversed_buckets = 0;
-        while routing_table_clone.buckets[bucket_idx].is_empty()
-            && traversed_buckets != routing_table_clone.buckets.len()
-        {
-            bucket_idx = (bucket_idx + 1) % routing_table_clone.buckets.len();
-            traversed_buckets += 1;
-        }
-
-        for node in routing_table_clone.buckets[bucket_idx as usize].iter() {
-            alpha_set.push(NodeDistance {
-                node: node.clone(),
-                dist: node.id.distance(&target_node_id),
-            });
-        }
-
-        alpha_set
+        closest_nodes
+            .iter()
+            .map(|n| NodeDistance {
+                node: n.clone(),
+                dist: target_node_id.distance(&n.id),
+            })
+            .collect()
     }
 
     fn update_closest_nodes(
         &self,
         max_heap: &Arc<Mutex<BinaryHeap<NodeDistance>>>,
-        within_heap: &Arc<Mutex<HashSet<HashId>>>,
+        within_heap: &Arc<Mutex<HashSet<Key>>>,
         new_nodes: Vec<Node>,
-        target_node_id: HashId,
+        target_node_id: Key,
     ) {
         for node in new_nodes {
             let mut within_heap = within_heap.lock().unwrap();
@@ -522,190 +531,163 @@ impl Kademlia {
         }
     }
 
-    pub async fn recursive_find_nodes(
-        self: Arc<Self>,
-        target_node_id: HashId,
-    ) -> Vec<NodeDistance> {
-        // info!("Running recursive get_nodes({target_node_id})");
-        let mut set = JoinSet::new();
-        let mut already_queried = HashSet::new();
-        already_queried.insert(self.node_id); // avoid requesting to self
+    pub async fn recursive_find_nodes(self: Arc<Self>, target_node_id: Key) -> Vec<NodeDistance> {
+        let contacted = Arc::new(Mutex::new(HashSet::new()));
+        let candidates = Arc::new(Mutex::new(BinaryHeap::new()));
+        let closest_nodes = Arc::new(Mutex::new(BinaryHeap::new()));
+        let semaphore = Arc::new(Semaphore::new(ALPHA));
 
-        // Select initial nodes
-        let mut alpha_set = self.select_initial_nodes(target_node_id).await;
-        alpha_set.truncate(ALPHA);
+        // Initialize candidates from routing table
+        {
+            let initial_candidates = self
+                .context
+                .routing_table
+                .lock()
+                .await
+                .get_nodes(target_node_id);
 
-        info!("Alpha set: {:?}", alpha_set);
-
-        let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
-            Arc::new(Mutex::new(BinaryHeap::new()));
-        let within_heap: Arc<Mutex<HashSet<HashId>>> = Arc::new(Mutex::new(HashSet::new()));
-
-        for distance_node in alpha_set.iter().cloned() {
-            within_heap.lock().unwrap().insert(distance_node.node.id);
-            max_heap.lock().unwrap().push(distance_node);
+            let mut cand_guard = candidates.lock().unwrap();
+            for cand in initial_candidates {
+                cand_guard.push(NodeDistance {
+                    node: cand.clone(),
+                    dist: target_node_id.distance(&cand.id),
+                });
+            }
         }
 
         loop {
-            // Send parallel FIND_NODE requests
-            for distance_node in alpha_set.iter().cloned() {
-                let within_heap = Arc::clone(&within_heap);
-                let max_heap = Arc::clone(&max_heap);
-                let kademlia = self.clone();
+            let mut current_batch = Vec::with_capacity(ALPHA);
 
-                already_queried.insert(distance_node.node.id);
+            // Acquire permits for parallel queries
+            let permits = {
+                let mut permits = Vec::with_capacity(ALPHA);
+                for _ in 0..ALPHA {
+                    match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permits.push(permit),
+                        Err(_) => break,
+                    }
+                }
+                permits
+            };
 
-                set.spawn(async move {
-                    // info!("Getting K closest from neighbor ({:#?})", distance_node);
-
-                    let start = Instant::now();
-                    let k_closest_nodes = kademlia
-                        .send_find_node(distance_node.node.clone(), target_node_id)
-                        .await;
-                    warn!("sending find_node took {:?}", start.elapsed());
-                    info!("K closest nodes: {:?}", k_closest_nodes);
-                    kademlia.update_closest_nodes(
-                        &max_heap,
-                        &within_heap,
-                        k_closest_nodes,
-                        target_node_id,
-                    );
-                });
-            }
-            // Join all tasks
-            let start = Instant::now();
-            while set.join_next().await.is_some() {}
-            warn!("Round took {:?}", start.elapsed());
-
-            // Resend to new unqueried nodes
-            let new_closest = max_heap
-                .lock()
-                .unwrap()
-                .clone()
-                .into_sorted_vec()
-                .iter()
-                .filter(|n| !already_queried.contains(&n.node.id))
-                .cloned()
-                .collect::<Vec<NodeDistance>>();
-
-            if new_closest.is_empty() {
+            if permits.is_empty() {
                 break;
             }
 
-            // alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
-            alpha_set = new_closest.to_vec();
-        }
-
-        let max_heap = max_heap.lock().unwrap();
-        let result = max_heap
-            .clone()
-            .into_sorted_vec()
-            .iter()
-            .filter(|n| n.node.id != self.node_id)
-            .cloned()
-            .collect::<Vec<NodeDistance>>();
-
-        info!("[recursive_find_node] result: {:?}", result);
-
-        result
-    }
-
-    // duplication from find_node, but subtle and important differences
-    // rather duplicate than make one function do many different things
-    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: HashId) -> Vec<(IpAddr, u16)> {
-        // TODO: nodes that fail to respond quickly are removed from consideration until and unless they do respond.
-        let mut set = JoinSet::new();
-        let mut already_queried = HashSet::new();
-        already_queried.insert(self.node_id); // avoid requesting to self
-
-        // println!("Currently looking for infohash {}", info_hash);
-        // pick α nodes from closest non-empty k-bucket, even if less than α entries
-        let mut alpha_set = self.select_initial_nodes(info_hash).await;
-        alpha_set.truncate(ALPHA);
-
-        if alpha_set.is_empty() {
-            // find locally, most likely we're the only node
-            let peer_store_guard = self.context.peer_store.lock().await;
-            let peers = peer_store_guard.get(&info_hash);
-            if let Some(peers) = peers {
-                let values = peers
-                    .iter()
-                    .map(|peer| (peer.ip, peer.port))
-                    .collect::<Vec<(IpAddr, u16)>>();
-                return values;
-            }
-        }
-
-        let max_heap: Arc<Mutex<BinaryHeap<NodeDistance>>> =
-            Arc::new(Mutex::new(BinaryHeap::new()));
-        let within_heap: Arc<Mutex<HashSet<HashId>>> = Arc::new(Mutex::new(HashSet::new()));
-
-        for distance_node in alpha_set.iter().cloned() {
-            within_heap.lock().unwrap().insert(distance_node.node.id);
-            max_heap.lock().unwrap().push(distance_node);
-        }
-
-        loop {
-            // send parallel find_node to all of em
-            for distance_node in alpha_set.iter().cloned() {
-                let within_heap = Arc::clone(&within_heap);
-                let max_heap = Arc::clone(&max_heap);
-                let kademlia = self.clone();
-                // updated k closest
-                already_queried.insert(distance_node.node.id);
-                set.spawn(async move {
-                    let get_peers_res = kademlia
-                        .send_get_peers(distance_node.node.clone(), info_hash)
-                        .await;
-                    if let Some(get_peers_res) = get_peers_res {
-                        info!("[CLIENT] get_peers response: {:?}", get_peers_res);
-                        match get_peers_res.value {
-                            NodeOrPeer::Peers(peers) => Some(peers),
-                            NodeOrPeer::Nodes(k_closest_nodes) => {
-                                kademlia.update_closest_nodes(
-                                    &max_heap,
-                                    &within_heap,
-                                    k_closest_nodes,
-                                    info_hash,
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                });
-            }
-            // JOIN all these tasks
-            while let Some(result) = set.join_next().await {
-                if let Ok(result) = result {
-                    if let Some(peers) = result {
-                        info!("[recursive_get_peers] result: {:?}", peers);
-                        return peers;
+            // Get batch of candidates
+            {
+                let mut cand_guard = candidates.lock().unwrap();
+                while current_batch.len() < ALPHA && !cand_guard.is_empty() {
+                    if let Some(candidate) = cand_guard.pop() {
+                        current_batch.push(candidate);
                     }
                 }
             }
 
-            // resend the find_node to nodes it has learned about from previous RPCs
-            // of the k nodes you have heard of closest to the target, it picks α that it has not yet queried and resends the FIND NODE RPC to them.
-            let new_closest = max_heap
-                .lock()
-                .unwrap()
-                .clone()
-                .into_sorted_vec()
-                .iter()
-                .filter(|n| !already_queried.contains(&n.node.id))
-                .cloned()
-                .collect::<Vec<NodeDistance>>();
-
-            // the lookup terminates when the initiator has queried and gotten responses from the k closest nodes it has seen.
-            if new_closest.is_empty() {
+            if current_batch.is_empty() {
                 break;
             }
 
-            alpha_set = new_closest[0..std::cmp::min(ALPHA, new_closest.len())].to_vec();
+            // Process batch in parallel
+            let mut futures = Vec::new();
+            for candidate in current_batch {
+                let self_clone = self.clone();
+                let target = target_node_id;
+                let contacted_clone = contacted.clone();
+                let candidates_clone = candidates.clone();
+                let closest_clone = closest_nodes.clone();
+                let semaphore_clone = semaphore.clone();
+
+                futures.push(tokio::spawn(async move {
+                    // Check if already contacted
+                    {
+                        let mut contacted_guard = contacted_clone.lock().unwrap();
+                        if contacted_guard.contains(&candidate.node.id) {
+                            return;
+                        }
+                        contacted_guard.insert(candidate.node.id.clone());
+                    }
+
+                    match self_clone
+                        .send_find_node(candidate.node.clone(), target)
+                        .await
+                    {
+                        Ok(nodes) => {
+                            info!("Sent...");
+                            // Process discovered nodes
+                            let mut new_candidates = BinaryHeap::new();
+                            for node in nodes {
+                                let dist = target.distance(&node.id);
+                                new_candidates.push(NodeDistance { node, dist });
+                            }
+
+                            // Merge candidates
+                            {
+                                let mut cand_guard = candidates_clone.lock().unwrap();
+                                for nd in new_candidates {
+                                    if cand_guard.len() < K
+                                        || nd.dist < cand_guard.peek().unwrap().dist
+                                    {
+                                        cand_guard.push(nd);
+                                    }
+                                }
+                            }
+
+                            // Update closest nodes
+                            {
+                                let mut closest_guard = closest_clone.lock().unwrap();
+                                closest_guard.push(candidate.clone());
+                                while closest_guard.len() > K {
+                                    closest_guard.pop();
+                                }
+                            }
+
+                            self_clone
+                                .context
+                                .routing_table
+                                .lock()
+                                .await
+                                .upsert_node(candidate.node);
+                        }
+                        Err(_) => {
+                            warn!("Dead node, removing");
+                            self_clone
+                                .context
+                                .routing_table
+                                .lock()
+                                .await
+                                .remove_node(candidate.node.id);
+                        }
+                    }
+
+                    drop(semaphore_clone);
+                }));
+            }
+
+            // Wait for batch completion
+            futures::future::join_all(futures).await;
+
+            // Check termination condition
+            let should_terminate = {
+                let closest_guard = closest_nodes.lock().unwrap();
+                let cand_guard = candidates.lock().unwrap();
+                closest_guard.len() >= K
+                    && cand_guard
+                        .peek()
+                        .map_or(true, |c| c.dist >= closest_guard.peek().unwrap().dist)
+            };
+
+            if should_terminate {
+                break;
+            }
         }
 
+        // Return final closest nodes
+        let closest_guard = closest_nodes.lock().unwrap();
+        closest_guard.iter().take(K).cloned().collect()
+    }
+
+    pub async fn recursive_get_peers(self: Arc<Self>, info_hash: Key) -> Vec<(IpAddr, u16)> {
         vec![]
     }
 
@@ -722,7 +704,7 @@ impl Kademlia {
         self.recursive_find_nodes(node_id).await;
     }
 
-    pub async fn announce_peer(self: Arc<Self>, info_hash: HashId) {
+    pub async fn announce_peer(self: Arc<Self>, info_hash: Key) {
         let closest_nodes = self.clone().recursive_find_nodes(info_hash.clone()).await;
         if closest_nodes.is_empty() {
             // store locally
@@ -732,7 +714,7 @@ impl Kademlia {
                 .await
                 .entry(info_hash.clone())
                 .or_default()
-                .push(self.context.node.clone());
+                .push(self.context.node.addr);
         } else {
             let mut tasks = vec![];
             for node_dist in closest_nodes {
@@ -751,12 +733,17 @@ impl Kademlia {
 
     pub async fn listen(self: Arc<Self>) {
         info!(
-            "Starting Kademlia node {:#?} and listening on {:#?}:{:#?}",
-            self.node_id, self.context.node.ip, self.context.node.port
+            "Starting Kademlia node {:#?} and listening on {:#?}",
+            self.node_id, self.context.node.addr
         );
         loop {
-            let mut buf = [0; 2048];
+            let mut buf = [0; 65507];
             let (len, addr) = self.socket.recv_from(&mut buf).await.unwrap();
+
+            let addr = match addr {
+                SocketAddr::V4(addr) => addr,
+                _ => continue,
+            };
 
             info!("Received packet of len = {len} from {:#?}", addr);
 
@@ -767,13 +754,16 @@ impl Kademlia {
         }
     }
 
-    async fn handle_krpc_call(self: Arc<Self>, buf: &[u8; 2048], len: usize, addr: SocketAddr) {
+    async fn handle_krpc_call(self: Arc<Self>, buf: &[u8; 65507], len: usize, addr: SocketAddrV4) {
         let query: KrpcMessage = serde_bencoded::from_bytes(&buf[..len]).unwrap();
+
+        info!("Received response from {:#?}", addr);
 
         if query.y == "r" {
             // this is a response to an earlier request we made
             // future is ready
-            let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
+            // let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
+            let response: KrpcSuccessResponse = { serde_bencode::from_bytes(&buf[..len]).unwrap() };
             self.manager.resolve_transaction(query.t, response);
         } else {
             let query: KrpcRequest = serde_bencoded::from_bytes(&buf[..len]).unwrap();
@@ -782,7 +772,7 @@ impl Kademlia {
             info!("{:?}", query);
 
             let source_id = query.a.get("id").unwrap().into();
-            let source_node = Node::new(source_id, addr.ip(), addr.port());
+            let source_node = Node::from_addr(source_id, addr);
 
             let check_for_eviction = {
                 let mut routing_table = self.context.routing_table.lock().await;
@@ -807,18 +797,16 @@ impl Kademlia {
                         break;
                     }
 
-                    let addr = format!("{}:{}", oldest_node.ip, oldest_node.port);
-
                     info!(
                         "Node {:?} sent a ping to node {:?} to check if it should be evicted",
                         self.context.node.id, oldest_node.id
                     );
-                    let mut response = self.send_ping(&addr).await;
+                    let mut response = self.send_ping(oldest_node.addr).await;
 
                     // retry once
                     if response.is_none() {
                         info!("Node {:?} didn't respond to node {:?}'s ping and the ping is being retried", oldest_node.id, self.context.node.id);
-                        response = self.send_ping(&addr).await;
+                        response = self.send_ping(oldest_node.addr).await;
                     }
 
                     // if we get a response, we need to upsert the oldest node and update its last seen and continue our search
@@ -849,12 +837,12 @@ impl Kademlia {
                     .find_bucket_idx(source_id) as usize,
             );
 
-            let return_values: HashMap<String, ByteBuf> = match query.q.as_str() {
+            let return_values: ResponseBody = match query.q.as_str() {
                 "ping" => self.handle_ping().await,
                 "find_node" => self.handle_find_node(&query).await,
                 "get_peers" => self.handle_get_peers(&query, source_node.clone()).await,
                 "announce_peer" => self.handle_announce_peer(&query, source_node.clone()).await,
-                _ => HashMap::new(),
+                _ => panic!("Unknown query type"),
             };
 
             // Step 4: Send the response back
@@ -863,83 +851,72 @@ impl Kademlia {
         }
     }
 
-    pub async fn handle_ping(&self) -> HashMap<String, ByteBuf> {
-        HashMap::from([(String::from("id"), self.node_id.to_vec().into())])
+    pub async fn handle_ping(&self) -> ResponseBody {
+        ResponseBody {
+            id: self.node_id.clone(),
+            values: vec![],
+            nodes: vec![],
+            token: None,
+        }
     }
 
-    pub async fn handle_find_node(&self, query: &KrpcRequest) -> HashMap<String, ByteBuf> {
+    pub async fn handle_find_node(&self, query: &KrpcRequest) -> ResponseBody {
         let target_node_id = query.a.get("target").unwrap().into();
         info!("Received find_nodes RPC for target {:#?}", target_node_id);
-        let k_closest_nodes = self
+        let mut k_closest_nodes = self
             .context
             .routing_table
             .lock()
             .await
             .get_nodes(target_node_id);
-        info!("{:#?}", k_closest_nodes);
-        let compact_node_info = k_closest_nodes
-            .iter()
-            .map(|node| node.get_node_compact_format())
-            .collect::<Vec<Vec<u8>>>()
-            .concat();
-        HashMap::from([
-            ("id".to_string(), self.node_id.to_vec().into()),
-            ("nodes".to_string(), compact_node_info.into()),
-        ])
+        k_closest_nodes.truncate(K);
+
+        ResponseBody {
+            id: self.node_id.clone(),
+            values: vec![],
+            nodes: k_closest_nodes,
+            token: None,
+        }
     }
 
-    async fn handle_get_peers(
-        &self,
-        query: &KrpcRequest,
-        source_node: Node,
-    ) -> HashMap<String, ByteBuf> {
+    async fn handle_get_peers(&self, query: &KrpcRequest, source_node: Node) -> ResponseBody {
         let info_hash = query.a.get("info_hash").unwrap().into();
 
-        let mut return_values = HashMap::from([("id".into(), self.node_id.to_vec().into())]);
+        let mut body = ResponseBody {
+            id: self.node_id.clone(),
+            values: vec![],
+            nodes: vec![],
+            token: None,
+        };
 
         let peer_store_guard = self.context.peer_store.lock().await;
         let peers = peer_store_guard.get(&info_hash);
         if let Some(peers) = peers {
-            let values = peers
-                .iter()
-                .map(|peer| peer.get_peer_compact_format())
-                .collect::<Vec<Vec<u8>>>()
-                .concat();
-            return_values.insert("values".into(), values.into());
+            body.values = peers.clone();
         } else {
-            let k_closest_nodes = self.context.routing_table.lock().await.get_nodes(info_hash);
-            let compact_node_info = k_closest_nodes
-                .iter()
-                .map(|node| node.get_node_compact_format())
-                .collect::<Vec<Vec<u8>>>()
-                .concat();
-            return_values.insert("nodes".into(), compact_node_info.into());
+            let mut k_closest_nodes = self.context.routing_table.lock().await.get_nodes(info_hash);
+            k_closest_nodes.truncate(K);
+            body.nodes = k_closest_nodes;
         }
 
         // generate token (hash ip + secret)
         let mut hasher = Sha1::new();
-        if let IpAddr::V4(v4addr) = source_node.ip {
-            hasher.update(v4addr.octets());
-        }
+        hasher.update(source_node.addr.ip().octets());
         hasher.update(*self.context.secret.lock().unwrap());
+
         let token: Vec<u8> = hasher.finalize().to_vec();
 
-        return_values.insert("token".into(), token.into());
-        return_values
+        body.token = Some(token);
+
+        body
     }
 
-    async fn handle_announce_peer(
-        &self,
-        query: &KrpcRequest,
-        source_node: Node,
-    ) -> HashMap<String, ByteBuf> {
+    async fn handle_announce_peer(&self, query: &KrpcRequest, source_node: Node) -> ResponseBody {
         let info_hash = query.a.get("info_hash").unwrap().into();
         let token = query.a.get("token").unwrap();
 
         let mut hasher = Sha1::new();
-        if let IpAddr::V4(querying_ip) = source_node.ip {
-            hasher.update(querying_ip.octets());
-        }
+        hasher.update(source_node.addr.ip().octets());
         hasher.update(*self.context.secret.lock().unwrap());
 
         let target_token = hasher.finalize().to_vec();
@@ -956,14 +933,19 @@ impl Kademlia {
             .await
             .entry(info_hash)
             .or_default()
-            .push(source_node);
+            .push(source_node.addr);
 
         info!(
             "[CONFIRM] {:#?}",
             self.context.peer_store.lock().await.get(&info_hash)
         );
 
-        HashMap::from([("id".into(), self.node_id.to_vec().into())])
+        ResponseBody {
+            id: self.node_id.clone(),
+            values: vec![],
+            nodes: vec![],
+            token: None,
+        }
     }
 
     pub fn republish_peer_task(self: Arc<Self>) {

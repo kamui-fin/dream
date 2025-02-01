@@ -15,9 +15,6 @@ pub struct Args {
     #[arg(short, long, default_value_t = 6881)]
     pub port: u16,
 
-    #[arg(long)]
-    pub ip: String, // which interface to bind to?
-
     #[arg(long, default_value = "router.bittorrent.com:6881")]
     pub bootstrap: Option<String>,
 }
