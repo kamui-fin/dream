@@ -1,6 +1,7 @@
 use std::collections::LinkedList;
 
 use num_bigint::{BigUint, RandBigInt};
+use rand::Rng;
 use serde::Serialize;
 
 use crate::dht::{config::K, node::Node};
@@ -106,6 +107,20 @@ impl RoutingTable {
 
         // eviction check is necessary since bucket is full and node doesn't already exist
         true
+    }
+
+    fn generate_random_id_in_range(start: &[u8; 20], end: &[u8; 20]) -> [u8; 20] {
+        let mut rng = rand::thread_rng();
+        let mut id = [0u8; 20];
+
+        // Generate ID within bucket's XOR distance range
+        for i in 0..20 {
+            let min = start[i];
+            let max = end[i];
+            id[i] = rng.gen_range(min..=max);
+        }
+
+        id
     }
 
     // TODO: test

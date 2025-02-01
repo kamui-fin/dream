@@ -161,8 +161,8 @@ pub fn gen_secret() -> [u8; 16] {
     secret
 }
 
-pub fn gen_trans_id() -> String {
+pub fn gen_trans_id() -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let trans_id: u16 = rng.gen();
-    format!("{:02x}", trans_id)
+    format!("{:02x}", trans_id).as_bytes().to_vec()
 }
