@@ -930,6 +930,8 @@ impl Kademlia {
                         "Node {:?} sent a ping to node {:?} to check if it should be evicted",
                         self.context.node.id, oldest_node.id
                     );
+
+                    // FIXME: this causes an infinite loop if the oldest node doesn't respond!
                     let mut response = self.send_ping(oldest_node.addr).await;
 
                     // retry once

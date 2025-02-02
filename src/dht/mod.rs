@@ -114,7 +114,7 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
                 ))
                 .unwrap();
         }
-        ("PUT", _) if url.starts_with("/announce/") => {
+        ("POST", _) if url.starts_with("/announce/") => {
             let info_hash = url.trim_start_matches("/announce/");
             let info_hash = info_hash.to_string().into();
             let handle = Handle::current();
@@ -139,15 +139,21 @@ async fn handle_http_request(kademlia: Arc<Kademlia>, request: Request) {
                 .unwrap();
         }
         ("GET", "/ping") => {
-            let _ = url.trim_start_matches("/ping");
+            let ip_port = url.trim_start_matches("/ping");
 
-            let ping_response = kademlia.handle_ping().await;
-            let ping_response = serde_json::to_string(&ping_response).unwrap();
-            request
-                .respond(Response::from_string(ping_response).with_header(
-                    tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
-                ))
-                .unwrap();
+            if let Ok(addr) = SocketAddrV4::from_str(ip_port) {
+                let ping_response = kademlia.send_ping(addr).await;
+                let ping_response = serde_json::to_string(&ping_response).unwrap();
+                request
+                    .respond(Response::from_string(ping_response).with_header(
+                        tiny_http::Header::from_str("Content-Type: application/json").unwrap(),
+                    ))
+                    .unwrap();
+            } else {
+                request
+                    .respond(Response::from_string("Invalid address").with_status_code(400))
+                    .unwrap();
+            }
         }
         _ => {
             request

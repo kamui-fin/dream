@@ -1,9 +1,15 @@
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    str::FromStr,
+};
+
 use anyhow::Result;
 use http_req::request;
 use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
+    dht::key::Key,
     engine::PORT,
     metafile::Metafile,
     peer::{
@@ -11,6 +17,7 @@ use crate::{
         DREAM_ID,
     },
 };
+
 #[derive(Debug)]
 pub enum Event {
     Started,
@@ -85,23 +92,44 @@ pub struct TrackerResponse {
     pub peers: Vec<ConnectionInfo>,
 }
 
-pub fn get_peers_from_tracker(tracker_url: &str, body: TrackerRequest) -> Result<TrackerResponse> {
+pub fn get_peers_from_tracker(
+    tracker_url: &str,
+    body: TrackerRequest,
+) -> Result<Vec<ConnectionInfo>> {
     let get_url = body.to_url(tracker_url);
 
     let mut body = Vec::new();
     let _ = request::get(get_url, &mut body)?;
     let res: TrackerResponse = serde_bencoded::from_bytes(&body)?;
-    Ok(res)
+    Ok(res.peers)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
+    let info_hash = hex::encode(&info_hash);
 
-    #[test]
-    fn test_dht_tracker() {
-        let torrent = Metafile::parse_torrent_file("archlinux.torrent".into()).unwrap();
-        let info_hash = torrent.get_info_hash();
-        println!("{}", hex::encode(&info_hash));
-    }
+    // first, announce
+    let url = format!("http://localhost:6881/announce/{}", info_hash);
+    let mut writer = Vec::new();
+    let body = &[];
+    request::post(url, body, &mut writer)?;
+
+    let url = format!("http://localhost:6881/peers/{}", info_hash);
+    let mut body = Vec::new();
+    let _ = request::get(url, &mut body)?;
+    let res: Vec<String> = serde_json::from_slice(&body)?;
+
+    Ok(res
+        .iter()
+        .map(|p| {
+            let addr = SocketAddrV4::from_str(&p).unwrap();
+            ConnectionInfo::from_addr(std::net::SocketAddr::V4(addr))
+        })
+        .collect())
+}
+
+pub fn dht_ping_node(ip: Ipv4Addr, port: u16) -> Result<()> {
+    let url = format!("http://localhost:6881/ping/{}:{}", ip, port);
+    let mut writer = Vec::new();
+    request::get(url, &mut writer)?;
+    Ok(())
 }

@@ -30,8 +30,8 @@ const KEEPALIVE_SENDER_TIMEOUT: u64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionInfo {
-    ip: Ipv4Addr,
-    port: u16,
+    pub ip: Ipv4Addr,
+    pub port: u16,
 }
 
 fn ip_to_ipv4(ip: IpAddr) -> Option<Ipv4Addr> {

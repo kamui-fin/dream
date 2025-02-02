@@ -102,20 +102,20 @@ impl Metafile {
         }
     }
 
-    pub fn get_announce(&self) -> String {
+    pub fn get_announce(&self) -> Option<String> {
         if let Some(announce) = &self.announce {
-            return announce.clone();
+            return Some(announce.clone());
         } else if !self.announce_list.is_empty() {
             for tier in &self.announce_list {
                 for tracker in tier {
                     let url = Url::parse(&tracker).expect("Invalid tracker URL");
                     if url.scheme() == "http" || url.scheme() == "https" {
-                        return tracker.clone();
+                        return Some(tracker.clone());
                     }
                 }
             }
         }
-        panic!("No announce URL found");
+        None
     }
 
     // TODO: repeated computation.. cache this

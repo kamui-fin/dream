@@ -22,7 +22,7 @@ use crate::{
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
     peer::MAX_PIPELINE_SIZE,
     piece::{BitField, PieceStore, BLOCK_SIZE},
-    tracker::TrackerResponse,
+    tracker::{self, TrackerResponse},
     utils::{slice_to_u32_msb, Notifier},
 };
 
@@ -50,7 +50,7 @@ impl PeerManager {
     /// Construct a peer manager given a response from the tracker (50 peers)
     /// For each peer, initialize a peer session and start listening for messages
     pub async fn connect_peers(
-        peers_response: TrackerResponse,
+        peers_response: Vec<ConnectionInfo>,
         piece_store: Arc<Mutex<PieceStore>>,
         info_hash: &[u8; 20],
         num_pieces: u32,
@@ -62,7 +62,6 @@ impl PeerManager {
             HashMap::new();
 
         let peers: Vec<_> = peers_response
-            .peers
             .into_iter()
             .map(|peer| RemotePeer::from_peer(peer, num_pieces))
             .collect();
@@ -144,8 +143,8 @@ impl PeerManager {
     }
 
     /// As we announce to the tracker ever 30 minutes, we get a new list of peers. Sync PeerManager to the new list, connecting to any new peers
-    pub async fn sync_peers(&mut self, peers: TrackerResponse) {
-        for peer in peers.peers {
+    pub async fn sync_peers(&mut self, peers: Vec<ConnectionInfo>) {
+        for peer in peers {
             if self.find_peer(&peer).is_none() {
                 self.create_peer(peer.clone()).await;
 
@@ -702,6 +701,9 @@ impl PeerManager {
                     }
                     MessageType::Port => {
                         // The listen port is the port this peer's DHT node is listening on. This peer should be inserted in the local routing table (if DHT tracker is supported).
+                        let port = u16::from_be_bytes([msg.payload[0], msg.payload[1]]);
+                        // pinging this node should add to routing table
+                        tracker::dht_ping_node(fw_msg.origin.ip, port).unwrap();
                     }
                 }
             }
