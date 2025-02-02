@@ -22,7 +22,7 @@ Dream addresses these challenges by decentralizing video streaming. By leveragin
 -   **Private Networks**: Enables private deployments for home or institutional use.
 -   **Simple CLI Interface**: `dream-cli` provides an intuitive command-line tool for browsing, uploading, and streaming videos.
 
-## Installation
+## Getting Started
 
 Here are a couple prerequisites to get setup before moving on:
 
@@ -71,44 +71,6 @@ dream-torrent
 ```
 
 ### Quick Start
-
-To compile `dream`, all you have to do is clone the source code and run `cargo build`:
-
-```sh
-git clone https://github.com/kamui-fin/dream.git
-cd dream
-cargo build --release
-
-cp target/release/dream-dht /usr/local/bin
-cp target/release/dream-torrent /usr/local/bin
-cp target/release/dream-cli /usr/local/bin
-```
-
-Next up, we need to configure some important settings. Copy over the sample config file:
-
-```sh
-mkdir ~/.config/dream
-cp config.toml ~/.config/dream
-```
-
-Here is a list of the required variables to modify:
-
-1. bootstrap_ip: IP of the bootstrap server if you're joining a dream network. If not passed in, this is set to localhost, indicating that you are the bootstrap node for a new network.
-2. output_dir: The directory where video files get stored.
-3. private_dht: If you simply want to keep the dht within a private network, you can enable this. It all depends on how you wish to use dream.
-
-There are numerous other configurable parameters for dream within `config.toml`.
-
-Next up, you'll need to forward the bittorrent (default 6881) and dht (default 8999) ports on your router. If you are planning on being a bootstrap node, you must also port forward elastic-search (default 9200). This allows peers to connect to you without getting restricted by the NAT.
-
-The last step is to run the two necessary components:
-
-```
-dream-dht &
-dream-torrent
-```
-
-## Usage
 
 The architecture of dream is relatively simple. There are mainly three services that should be ran 24/7:
 
