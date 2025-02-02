@@ -36,8 +36,6 @@ impl BitTorrent {
         meta_file: Metafile,
         output_dir: PathBuf,
     ) -> anyhow::Result<Self> {
-        // info!("Parsed metafile: {:#?}", meta_file);
-
         let peers = Self::fetch_peers(&meta_file).await?;
         info!("Fetched peers: {:#?}", peers);
 
@@ -74,12 +72,12 @@ impl BitTorrent {
         })
     }
 
-    async fn fetch_peers(meta_file: &Metafile) -> anyhow::Result<TrackerResponse> {
-        let peers = tracker::get_peers_from_tracker(
-            &meta_file.get_announce(),
-            tracker::TrackerRequest::new(meta_file),
-        )?;
-        info!("Tracker has found {} peers", peers.peers.len());
+    async fn fetch_peers(meta_file: &Metafile) -> anyhow::Result<Vec<ConnectionInfo>> {
+        let peers = if let Some(tracker_url) = &meta_file.get_announce() {
+            tracker::get_peers_from_tracker(tracker_url, tracker::TrackerRequest::new(meta_file))?
+        } else {
+            tracker::get_peers_from_dht(meta_file.get_info_hash())?
+        };
         Ok(peers)
     }
 
@@ -88,7 +86,7 @@ impl BitTorrent {
     }
 
     async fn connect_to_peers(
-        peers: TrackerResponse,
+        peers: Vec<ConnectionInfo>,
         piece_store: Arc<Mutex<PieceStore>>,
         info_hash: &[u8; 20],
         num_pieces: u32,
@@ -146,10 +144,8 @@ impl BitTorrent {
                 sleep(Duration::from_secs(30 * 60)).await;
 
                 let pt_lock = piece_store.lock().await;
-                let peers = tracker::get_peers_from_tracker(
-                    &pt_lock.meta_file.get_announce(),
-                    tracker::TrackerRequest::new(&pt_lock.meta_file),
-                );
+
+                let peers = Self::fetch_peers(&pt_lock.meta_file).await;
 
                 if let Ok(peers) = peers {
                     peer_manager.lock().await.sync_peers(peers).await;
