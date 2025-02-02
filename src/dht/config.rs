@@ -18,3 +18,15 @@ pub struct Args {
     #[arg(long, default_value = "router.bittorrent.com:6881")]
     pub bootstrap: Option<String>,
 }
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+pub struct ESArgs {
+    #[arg(short, long)]
+    pub port: u16,
+
+    #[arg(long, default_value = "router.bittorrent.com:6881")]
+    pub bootstrap: Option<String>,
+}
+
+
