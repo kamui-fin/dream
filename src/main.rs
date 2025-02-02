@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use dream::{engine::Engine, msg};
+use dream::{engine::Engine, msg, utils::init_logger};
 use http_req::response;
 use log::info;
 use tokio::sync::{
@@ -11,9 +11,9 @@ use tokio::sync::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    pretty_env_logger::init_timed();
+    init_logger();
 
-    let output_dir = PathBuf::from("output");
+    let output_dir = PathBuf::from("output"); // TODO: custom output directory
     let (tx, rx) = mpsc::channel(32);
 
     let result = tokio::spawn(async move {

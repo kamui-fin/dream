@@ -4,7 +4,26 @@ use std::{
 };
 
 use sha1::{Digest, Sha1};
+use simplelog::*;
+use std::fs::File;
 use tokio::sync::Notify;
+
+pub fn init_logger() {
+    CombinedLogger::init(vec![
+        TermLogger::new(
+            LevelFilter::Warn, // TODO: get terminal log level from toml config
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        ),
+        WriteLogger::new(
+            LevelFilter::Info, // TODO: get file output log level from toml config
+            Config::default(),
+            File::create("dream.log").unwrap(), // TODO: get log file path from toml config
+        ),
+    ])
+    .unwrap();
+}
 
 pub fn slice_to_u32_msb(bytes: &[u8]) -> u32 {
     // Ensure the slice has exactly 4 bytes

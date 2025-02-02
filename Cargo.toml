@@ -14,7 +14,6 @@ clap = { version = "4.5.20", features = ["derive"] }
 hex = "0.4.3"
 futures = "0.3.31"
 log = "0.4"
-pretty_env_logger = "0.4"
 serde_json = "1.0"
 tiny_http = "0.11"
 waitmap = "1.1.0"
@@ -39,3 +38,16 @@ serde_bencode = "0.2.4"
 public-ip = "0.2"
 elasticsearch = "8.17.0-alpha.1"
 reqwest = "0.12.12"
+simplelog = "0.12.2"
+
+[[bin]]
+name = "dream-cli"
+path = "src/bin/cli.rs"
+
+[[bin]]
+name = "dream-dht"
+path = "src/bin/dht.rs"
+
+[[bin]]
+name = "dream-torrent"
+path = "src/main.rs"
