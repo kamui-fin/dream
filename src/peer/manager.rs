@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
 
-use futures::{future::BoxFuture, FutureExt};
+use futures::FutureExt;
 use log::{error, info, trace, warn};
 use rand::{rngs::OsRng, Rng};
 use tokio::{
@@ -19,10 +19,11 @@ use super::{
 };
 use crate::{
     bittorrent::TorrentState,
+    config::BLOCK_SIZE,
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
     peer::MAX_PIPELINE_SIZE,
-    piece::{BitField, PieceStore, BLOCK_SIZE},
-    tracker::{self, TrackerResponse},
+    piece::{BitField, PieceStore},
+    tracker::{self},
     utils::{slice_to_u32_msb, Notifier},
 };
 
@@ -455,7 +456,7 @@ impl PeerManager {
             .send((msg, Some(entry.clone())))
             .await;
 
-        if let Err(_) = send_res {
+        if send_res.is_err() {
             error!("Lost connection to peer {:#?}", conn_info);
             Box::pin(self.remove_peer(conn_info)).await;
         }

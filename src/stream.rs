@@ -17,27 +17,19 @@ use futures::{StreamExt, TryStreamExt};
 use hyper::body::{Body, Frame};
 
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full, StreamBody};
+use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::Result;
 use hyper::{header, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::{error, info};
-use std::fs;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use log::info;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use std::{convert::Infallible, net::SocketAddr};
-use tokio::fs::File;
-use tokio::io::AsyncSeekExt;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::codec::{BytesCodec, FramedRead};
-use tokio_util::io::ReaderStream;
 
-use crate::msg::{DataReady, ServerMsg};
+use crate::msg::ServerMsg;
 
 static NOTFOUND: &[u8] = b"Not Found";
 
@@ -125,7 +117,7 @@ async fn video_handler(
     // Extract the `info_hash` from the path
     let path = req.uri().path().trim_start_matches('/');
 
-    if path.is_empty() {}
+    path.is_empty();
 
     let info_hash_data = hex::decode(path).unwrap();
     let mut info_hash = [0; 20];

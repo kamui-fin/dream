@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use log::{error, info};
 use tokio::{
@@ -12,10 +12,8 @@ use crate::{
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
-    piece, utils,
+    utils,
 };
-
-pub const PORT: u16 = 6881;
 
 pub struct Engine {
     torrents: Vec<Arc<Mutex<BitTorrent>>>,
@@ -64,7 +62,7 @@ impl Engine {
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
         info!("Listening on inbound server...");
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT)).await?;
 
         loop {
             tokio::select! {
@@ -125,10 +123,7 @@ impl Engine {
                         error!("Failed to parse torrent file: {:?}", e);
                     }
                     Ok(meta_file) => {
-                        if let Err(e) = self
-                            .add_torrent(meta_file, PathBuf::from(output_dir), response_tx)
-                            .await
-                        {
+                        if let Err(e) = self.add_torrent(meta_file, output_dir, response_tx).await {
                             error!("Failed to add torrent: {:?}", e);
                         }
                     }

@@ -1,6 +1,4 @@
-use log::info;
-
-use crate::piece::KB_PER_BLOCK;
+use crate::config::KB_PER_BLOCK;
 
 pub const STATS_WINDOW_SEC: usize = 5;
 

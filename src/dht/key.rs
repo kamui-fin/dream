@@ -1,19 +1,15 @@
 use std::{
     fs,
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr},
     path::Path,
 };
 
-use log::info;
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde::Serialize;
 use serde_bytes::ByteBuf;
 
-use crate::dht::node::Node;
+use crate::config::ID_SIZE;
 // use hex;
-
-pub const ID_SIZE: usize = 20; // 160 bits
 
 // wrap the NodeId in a newtype to implement the Debug trait
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,7 +94,7 @@ impl From<&[u8]> for Key {
 impl From<&ByteBuf> for Key {
     fn from(buf: &ByteBuf) -> Self {
         let mut id = [0u8; ID_SIZE];
-        id.copy_from_slice(&buf);
+        id.copy_from_slice(buf);
         Key(id)
     }
 }
@@ -117,7 +113,7 @@ impl Key {
     }
 
     pub fn to_string(&self) -> String {
-        hex::encode(&self.0)
+        hex::encode(self.0)
     }
 
     pub fn to_vec(&self) -> Vec<u8> {

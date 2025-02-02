@@ -1,4 +1,5 @@
 pub mod bittorrent;
+pub mod config;
 pub mod dht;
 pub mod engine;
 pub mod metafile;
@@ -8,4 +9,3 @@ pub mod piece;
 pub mod stream;
 pub mod tracker;
 pub mod utils;
-pub mod config;

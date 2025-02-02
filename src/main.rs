@@ -1,13 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use dream::{engine::Engine, msg, utils::init_logger};
-use http_req::response;
-use log::info;
-use tokio::sync::{
-    mpsc::{self},
-    oneshot,
-};
+use dream::{engine::Engine, utils::init_logger};
+use tokio::sync::mpsc::{self};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,7 +17,7 @@ async fn main() -> Result<()> {
     });
 
     tokio::spawn(async move {
-        dream::stream::start_server(Arc::new(tx.clone()), Arc::new(PathBuf::from(output_dir)))
+        dream::stream::start_server(Arc::new(tx.clone()), Arc::new(output_dir))
             .await
             .expect("Server failed to run");
     });

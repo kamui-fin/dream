@@ -1,7 +1,6 @@
 use std::{
     fmt::{self, Formatter},
     io::Cursor,
-    ops::Range,
     path::PathBuf,
 };
 
@@ -10,7 +9,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use log::trace;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{peer::session::ConnectionInfo, piece::BLOCK_SIZE};
+use crate::{config::BLOCK_SIZE, peer::session::ConnectionInfo};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
 

@@ -1,6 +1,6 @@
-use clap::{Arg, Args, Command, Parser, Subcommand};
+use clap::Parser;
 use dream::{
-    config::{ip, piece_size, stream_server_port, Cli, Commands},
+    config::{Cli, Commands, ELASTIC_SEARCH_PORT, PIECE_SIZE, STREAM_SERVER_PORT},
     metafile::Metafile,
     utils::init_logger,
 };
@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     fs,
-    io::{self, Read, Write},
-    path::{Path, PathBuf},
+    io::{Read, Write},
+    path::Path,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -27,7 +27,7 @@ struct VideoRecord {
 // append to log basically
 async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn Error>> {
     // TODO: if we want to have multiple indices and not just movies, we could dynamically configure that
-    let url = format!("http://{}/videos/_doc", ip);
+    let url = format!("http://{}/videos/_doc", ELASTIC_SEARCH_PORT);
     let response = client.post(&url).json(&record).send().await?;
 
     if response.status().is_success() {
@@ -44,7 +44,7 @@ async fn fuzzy_search_video_title(
     query: &str,
 ) -> Result<Vec<VideoRecord>, Box<dyn Error>> {
     // TODO: use anyhow::Result instead
-    let url = format!("http://{}/videos/_search", ip);
+    let url = format!("http://{}/videos/_search", ELASTIC_SEARCH_PORT);
     let body = serde_json::json!({
         "query": {
             "fuzzy": {
@@ -121,7 +121,7 @@ fn start_stream(info_hash: &[u8; 20]) {
 
     let stream_link = format!(
         "http://localhost:{}/{}",
-        stream_server_port,
+        STREAM_SERVER_PORT,
         encode(info_hash)
     );
 
@@ -142,21 +142,16 @@ async fn main() {
         Commands::Upload { path, title } => {
             let file_path = Path::new(path);
 
-            match file_path.extension() {
-                Some(extension) => {
-                    if extension == "torrent" {
-                        let meta_file =
-                            Metafile::parse_torrent_file(file_path.to_path_buf()).unwrap();
-                        upload_torrent(&client, &meta_file, title).await;
-                    } else if extension == "mp4" {
-                        let meta_file =
-                            Metafile::from_video(&Path::new(file_path), piece_size, None);
-                        upload_torrent(&client, &meta_file, title).await;
-                    } else {
-                        warn!("Invalid arguments provided for command!");
-                    }
+            if let Some(extension) = file_path.extension() {
+                if extension == "torrent" {
+                    let meta_file = Metafile::parse_torrent_file(file_path.to_path_buf()).unwrap();
+                    upload_torrent(&client, &meta_file, title).await;
+                } else if extension == "mp4" {
+                    let meta_file = Metafile::from_video(Path::new(file_path), PIECE_SIZE, None);
+                    upload_torrent(&client, &meta_file, title).await;
+                } else {
+                    warn!("Invalid arguments provided for command!");
                 }
-                None => {}
             }
         }
         Commands::Stream { query } => {

@@ -18,10 +18,11 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR, PROTOCOL_STR_LEN};
+use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR_LEN};
 use crate::{
+    config::BLOCK_SIZE,
     msg::{BitTorrentCodec, InternalMessage, InternalMessagePayload, Message, MessageType},
-    piece::{BitField, BLOCK_SIZE},
+    piece::BitField,
     utils::slice_to_u32_msb,
 };
 

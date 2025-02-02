@@ -9,7 +9,6 @@ use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    dht::key::Key,
     engine::PORT,
     metafile::Metafile,
     peer::{
@@ -105,7 +104,7 @@ pub fn get_peers_from_tracker(
 }
 
 pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
-    let info_hash = hex::encode(&info_hash);
+    let info_hash = hex::encode(info_hash);
 
     // first, announce
     let url = format!("http://localhost:6881/announce/{}", info_hash);
@@ -121,7 +120,7 @@ pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
     Ok(res
         .iter()
         .map(|p| {
-            let addr = SocketAddrV4::from_str(&p).unwrap();
+            let addr = SocketAddrV4::from_str(p).unwrap();
             ConnectionInfo::from_addr(std::net::SocketAddr::V4(addr))
         })
         .collect())

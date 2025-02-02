@@ -10,12 +10,13 @@ use tokio::{
 };
 
 use crate::{
+    config::BLOCK_SIZE,
     metafile::Metafile,
-    msg::{DataReady, InternalMessage, ServerMsg},
+    msg::InternalMessage,
     peer::{manager::PeerManager, session::ConnectionInfo},
-    piece::{PieceStore, BLOCK_SIZE},
-    tracker::{self, TrackerResponse},
-    utils::{self, Notifier},
+    piece::PieceStore,
+    tracker::{self},
+    utils::Notifier,
 };
 
 pub enum TorrentState {

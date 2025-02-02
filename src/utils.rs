@@ -47,6 +47,12 @@ pub struct Notifier {
     notified: AtomicBool,
 }
 
+impl Default for Notifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Notifier {
     pub fn new() -> Self {
         Notifier {
