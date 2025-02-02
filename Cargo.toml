@@ -39,6 +39,8 @@ public-ip = "0.2"
 elasticsearch = "8.17.0-alpha.1"
 reqwest = "0.12.12"
 simplelog = "0.12.2"
+config = "0.15.7"
+toml = "0.8.19"
 
 [[bin]]
 name = "dream-cli"

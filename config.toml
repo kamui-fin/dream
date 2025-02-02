@@ -1,0 +1,33 @@
+[general]
+output_dir = "./"
+
+[logging.modules]
+dht = "warn"
+torrent = "error"
+log_file = "./dream.log"
+
+[dht]
+always_use_dht = false
+max_num_peers_request= 100
+bucket_refresh_interval = 900
+is_size = 20
+k_bucket_size = 8
+alpha_parallel_requests = 3
+private = false
+
+[torrent]
+block_size = 16384
+piece_size = 2097152
+max_peer_connections = 50
+
+[stream]
+video_player = "mpv"
+stream_buffer_num_pieces = 4
+rarest_piece_enabled = false
+
+[network]
+dht_port = 8999
+elastic_search_port= 9200
+torrent_port = 6881
+stream_server_port = 3000
+bootstrap_ip = "127.0.0.1"

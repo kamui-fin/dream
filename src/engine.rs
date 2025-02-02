@@ -15,6 +15,8 @@ use crate::{
     utils,
 };
 
+use config::{Config, File, Environment};
+
 pub struct Engine {
     torrents: Vec<Arc<Mutex<BitTorrent>>>,
     info_hashes: Vec<[u8; 20]>,
@@ -62,7 +64,7 @@ impl Engine {
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
         info!("Listening on inbound server...");
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT)).await?;
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", config.network.PORT)).await?;
 
         loop {
             tokio::select! {

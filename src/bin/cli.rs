@@ -15,6 +15,7 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
+use config::Config;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct VideoRecord {
@@ -26,8 +27,8 @@ struct VideoRecord {
 
 // append to log basically
 async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn Error>> {
-    // TODO: if we want to have multiple indices and not just movies, we could dynamically configure that
-    let url = format!("http://{}/videos/_doc", ELASTIC_SEARCH_PORT);
+    // if we want to have multiple indices and not just videos, we could dynamically configure that
+    let url = format!("http://{}:{}/videos/_doc", config.bootstrap.IP, ELASTIC_SEARCH_PORT);
     let response = client.post(&url).json(&record).send().await?;
 
     if response.status().is_success() {
