@@ -5,11 +5,11 @@ use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fs, io::{self, Read, Write}, path::{Path, PathBuf}};
-use dream::{es::config::{ip, piece_size, Cli, Commands}, metafile::Metafile};
+use dream::{config::{ip, piece_size, Cli, Commands}, metafile::Metafile};
 
 // struct for storing the data
 #[derive(Serialize, Deserialize, Debug)]
-struct MovieRecord {
+struct VideoRecord {
     infohash: [u8; 20],
     title: String,
     node_id: String,
@@ -17,9 +17,9 @@ struct MovieRecord {
 }
 
 // append to log basically
-async fn add_record(client: &Client, record: MovieRecord) -> Result<(), Box<dyn Error>> {
+async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn Error>> {
     // TODO: if we want to have multiple indices and not just movies, we could dynamically configure that
-    let url = format!("http://{}/movies/_doc", ip);
+    let url = format!("http://{}/videos/_doc", ip);
     let response = client
         .post(&url)
         .json(&record)
@@ -36,8 +36,8 @@ async fn add_record(client: &Client, record: MovieRecord) -> Result<(), Box<dyn 
 }
 
 // fuzzy serch on movie
-async fn fuzzy_search_movie_title(client: &Client, query: &str) -> Result<Vec<MovieRecord>, Box<dyn Error>> {
-    let url = format!("http://{}/movies/_search", ip);
+async fn fuzzy_search_movie_title(client: &Client, query: &str) -> Result<Vec<VideoRecord>, Box<dyn Error>> {
+    let url = format!("http://{}/videos/_search", ip);
     let body = serde_json::json!({
         "query": {
             "fuzzy": {
@@ -58,7 +58,7 @@ async fn fuzzy_search_movie_title(client: &Client, query: &str) -> Result<Vec<Mo
     if response.status().is_success() {
         let json: serde_json::Value = response.json().await?;
         let hits = json["hits"]["hits"].as_array().unwrap();
-        let records: Vec<MovieRecord> = hits
+        let records: Vec<VideoRecord> = hits
             .iter()
             .map(|hit| serde_json::from_value(hit["_source"].clone()).unwrap())
             .collect();
@@ -90,7 +90,7 @@ async fn upload_torrent(client: &Client, meta_file: &Metafile, title: &str){
         encode(id)
     };
 
-    let new_record = MovieRecord{
+    let new_record = VideoRecord{
         infohash,
         meta_file_bytes,
         title: String::from(title),
@@ -108,8 +108,10 @@ async fn search(client: &Client, query: &str){
 }
 
 fn start_stream(info_hash: &[u8;20]){
+    let stream_link = format!("http://localhost:3000/{}", encode(info_hash));
+
     let _mpv = std::process::Command::new("mpv")
-        .arg("http://localhost:3000/infohash")
+        .arg(stream_link)
         .spawn()
         .expect("Failed to start MPV");
 }

@@ -8,4 +8,4 @@ pub mod piece;
 pub mod stream;
 pub mod tracker;
 pub mod utils;
-pub mod es;
+pub mod config;
