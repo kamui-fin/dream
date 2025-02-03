@@ -1,17 +1,18 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddrV4},
-    str::FromStr,
+    net::{Ipv4Addr, SocketAddrV4},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use serde_json::{json, Value};
 use tokio::time::sleep;
 
-use crate::dht::{config::Args, key::gen_secret, node::Node, routing::RoutingTable};
+use crate::dht::{key::gen_secret, node::Node, routing::RoutingTable};
 
-use super::key::{generate_node_id, Key};
+use super::{
+    config::Args,
+    key::{generate_node_id, Key},
+};
 
 /// Stores and maintains important runtime objects for the DHT
 pub struct RuntimeContext {

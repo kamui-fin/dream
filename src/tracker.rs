@@ -9,8 +9,7 @@ use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    dht::key::Key,
-    engine::PORT,
+    config::CONFIG,
     metafile::Metafile,
     peer::{
         session::{deserialize_peers, ConnectionInfo},
@@ -56,7 +55,7 @@ impl TrackerRequest {
     }
 
     pub fn to_url(&self, tracker_url: &str) -> String {
-        let port_ascii = PORT.to_string();
+        let port_ascii = CONFIG.network.torrent_port.to_string();
         let uploaded_ascii = self.uploaded.to_string();
         let downloaded_ascii = self.downloaded.to_string();
         let left_ascii = self.left.to_string();
@@ -105,7 +104,7 @@ pub fn get_peers_from_tracker(
 }
 
 pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
-    let info_hash = hex::encode(&info_hash);
+    let info_hash = hex::encode(info_hash);
 
     // first, announce
     let url = format!("http://localhost:6881/announce/{}", info_hash);
@@ -121,7 +120,7 @@ pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
     Ok(res
         .iter()
         .map(|p| {
-            let addr = SocketAddrV4::from_str(&p).unwrap();
+            let addr = SocketAddrV4::from_str(p).unwrap();
             ConnectionInfo::from_addr(std::net::SocketAddr::V4(addr))
         })
         .collect())

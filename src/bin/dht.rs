@@ -1,12 +1,12 @@
-extern crate log;
-extern crate pretty_env_logger;
-
 use clap::Parser;
-use dream::dht::{config::Args, start_dht};
+use dream::{
+    dht::{config::Args, start_dht},
+    utils::init_logger,
+};
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    init_logger();
 
     let args = Args::parse();
     start_dht(&args).await;

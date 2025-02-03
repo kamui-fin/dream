@@ -1,11 +1,11 @@
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    net::SocketAddrV4,
     str::FromStr,
     sync::Arc,
     thread,
-    time::Duration,
 };
 
+use config::Args;
 use easy_upnp::{add_ports, PortMappingProtocol, UpnpConfig};
 use node::Node;
 use tiny_http::{Request, Response, Server};
@@ -14,7 +14,7 @@ use tokio::{
     runtime::{Handle, Runtime},
 };
 
-use crate::dht::{config::Args, kademlia::Kademlia};
+use crate::dht::kademlia::Kademlia;
 
 pub mod compact;
 pub mod config;
@@ -36,7 +36,7 @@ pub async fn setup_upnp() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Add port mapping
-    match add_ports(vec![config]).into_iter().next() {
+    match add_ports(vec![config]).next() {
         Some(Ok(_)) => {
             log::info!("UPnP port forwarding established on port {}", 6881);
 

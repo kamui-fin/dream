@@ -10,9 +10,6 @@ use log::info;
 
 use crate::{metafile::Metafile, utils::hash_obj};
 
-pub const BLOCK_SIZE: u32 = 2_u32.pow(14);
-pub const KB_PER_BLOCK: u32 = BLOCK_SIZE / 1000;
-
 #[derive(Debug, Clone)]
 pub struct BitField(pub Vec<u8>);
 
@@ -42,9 +39,7 @@ impl BitField {
     pub fn return_piece_indexes(&self) -> String {
         format!(
             "{:#?}",
-            (0..(self.0.len() * 8))
-                .filter(|i| !self.piece_exists(*i as u32))
-                .next()
+            (0..(self.0.len() * 8)).find(|i| !self.piece_exists(*i as u32))
         )
     }
 }
