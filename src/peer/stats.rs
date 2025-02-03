@@ -1,4 +1,4 @@
-use crate::config::KB_PER_BLOCK;
+use crate::config::CONFIG;
 
 pub const STATS_WINDOW_SEC: usize = 5;
 
@@ -35,18 +35,19 @@ impl Stat {
     }
 
     pub fn update_overalls(&mut self) {
+        let kb_per_block = CONFIG.torrent.block_size / 1024;
         // get the average time it took for one kb (sec per kb)
         let average_time = self.current_speeds_sum / (self.current_blocks_downloaded as f32);
 
         // convert secs per block to kbps
-        let current_window_kbps = (KB_PER_BLOCK) as f32 / average_time;
+        let current_window_kbps = (kb_per_block) as f32 / average_time;
 
         // newest average becomes historical (so we can use in algos)
         self.total_avg_kbps = current_window_kbps;
         // info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
 
         // track historical kb downloaded
-        self.total_kb += self.current_blocks_downloaded * KB_PER_BLOCK;
+        self.total_kb += self.current_blocks_downloaded * kb_per_block;
 
         // reset current window
         self.current_speeds_sum = 0.0;

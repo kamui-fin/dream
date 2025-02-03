@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    engine::PORT,
+    config::CONFIG,
     metafile::Metafile,
     peer::{
         session::{deserialize_peers, ConnectionInfo},
@@ -55,7 +55,7 @@ impl TrackerRequest {
     }
 
     pub fn to_url(&self, tracker_url: &str) -> String {
-        let port_ascii = PORT.to_string();
+        let port_ascii = CONFIG.network.torrent_port.to_string();
         let uploaded_ascii = self.uploaded.to_string();
         let downloaded_ascii = self.downloaded.to_string();
         let left_ascii = self.left.to_string();

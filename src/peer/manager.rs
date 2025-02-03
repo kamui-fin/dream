@@ -19,7 +19,7 @@ use super::{
 };
 use crate::{
     bittorrent::TorrentState,
-    config::BLOCK_SIZE,
+    config::CONFIG,
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
     peer::MAX_PIPELINE_SIZE,
     piece::{BitField, PieceStore},
@@ -439,8 +439,8 @@ impl PeerManager {
     async fn request_block(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
         let PipelineEntry { piece_id, block_id } = entry;
         let piece_id_bytes = piece_id.to_be_bytes();
-        let block_offset_bytes = (block_id * BLOCK_SIZE).to_be_bytes();
-        let block_size = BLOCK_SIZE.to_be_bytes();
+        let block_offset_bytes = (block_id * CONFIG.torrent.block_size).to_be_bytes();
+        let block_size = CONFIG.torrent.block_size.to_be_bytes();
 
         let mut payload = Vec::with_capacity(12);
         payload.extend_from_slice(&piece_id_bytes);
@@ -657,8 +657,9 @@ impl PeerManager {
                         let piece_idx = slice_to_u32_msb(&msg.payload[0..4]);
                         let block_offset = slice_to_u32_msb(&msg.payload[4..8]);
                         let block_data = &msg.payload[8..];
-                        let block_id =
-                            ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+                        let block_id = ((block_offset as usize / CONFIG.torrent.block_size as usize)
+                            as f32)
+                            .floor() as u32;
 
                         info!(
                             "Peer {:#?} has sent us piece {} starting at offset {} with length {}. Determined block id = {}",

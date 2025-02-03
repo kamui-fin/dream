@@ -9,13 +9,12 @@ use tokio::{
 
 use crate::{
     bittorrent::BitTorrent,
+    config::CONFIG,
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
     utils,
 };
-
-use config::{Config, File, Environment};
 
 pub struct Engine {
     torrents: Vec<Arc<Mutex<BitTorrent>>>,
@@ -64,7 +63,8 @@ impl Engine {
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
         info!("Listening on inbound server...");
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", config.network.PORT)).await?;
+        let listener =
+            TcpListener::bind(format!("0.0.0.0:{}", CONFIG.network.stream_server_port)).await?;
 
         loop {
             tokio::select! {

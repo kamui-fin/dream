@@ -1,6 +1,7 @@
 use clap::Parser;
+use config::Config;
 use dream::{
-    config::{Cli, Commands, ELASTIC_SEARCH_PORT, PIECE_SIZE, STREAM_SERVER_PORT},
+    config::{Cli, Commands, CONFIG},
     metafile::Metafile,
     utils::init_logger,
 };
@@ -15,7 +16,6 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
-use config::Config;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct VideoRecord {
@@ -28,7 +28,10 @@ struct VideoRecord {
 // append to log basically
 async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn Error>> {
     // if we want to have multiple indices and not just videos, we could dynamically configure that
-    let url = format!("http://{}:{}/videos/_doc", config.bootstrap.IP, ELASTIC_SEARCH_PORT);
+    let url = format!(
+        "http://{}:{}/videos/_doc",
+        CONFIG.network.bootstrap_ip, CONFIG.network.elastic_search_port
+    );
     let response = client.post(&url).json(&record).send().await?;
 
     if response.status().is_success() {
@@ -45,7 +48,10 @@ async fn fuzzy_search_video_title(
     query: &str,
 ) -> Result<Vec<VideoRecord>, Box<dyn Error>> {
     // TODO: use anyhow::Result instead
-    let url = format!("http://{}/videos/_search", ELASTIC_SEARCH_PORT);
+    let url = format!(
+        "http://{}/videos/_search",
+        CONFIG.network.elastic_search_port
+    );
     let body = serde_json::json!({
         "query": {
             "fuzzy": {
@@ -122,7 +128,7 @@ fn start_stream(info_hash: &[u8; 20]) {
 
     let stream_link = format!(
         "http://localhost:{}/{}",
-        STREAM_SERVER_PORT,
+        CONFIG.network.stream_server_port,
         encode(info_hash)
     );
 
@@ -148,7 +154,8 @@ async fn main() {
                     let meta_file = Metafile::parse_torrent_file(file_path.to_path_buf()).unwrap();
                     upload_torrent(&client, &meta_file, title).await;
                 } else if extension == "mp4" {
-                    let meta_file = Metafile::from_video(Path::new(file_path), PIECE_SIZE, None);
+                    let meta_file =
+                        Metafile::from_video(Path::new(file_path), CONFIG.torrent.piece_size, None);
                     upload_torrent(&client, &meta_file, title).await;
                 } else {
                     warn!("Invalid arguments provided for command!");

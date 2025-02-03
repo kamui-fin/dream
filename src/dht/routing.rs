@@ -4,12 +4,9 @@ use num_bigint::{BigUint, RandBigInt};
 use rand::Rng;
 use serde::Serialize;
 
-use crate::{
-    config::{ID_SIZE, K_BUCKET_SIZE},
-    dht::node::Node,
-};
+use crate::{config::CONFIG, dht::node::Node};
 
-use super::key::Key;
+use super::key::{Key, ID_SIZE};
 
 // if any nodes are **known** to be bad, it gets replaced by new node
 //
@@ -94,7 +91,7 @@ impl RoutingTable {
     pub fn upsert_node(&mut self, node: Node) -> bool {
         let bucket_idx = self.find_bucket_idx(node.id);
         let already_exists = self.node_in_bucket(bucket_idx, node.id).is_some();
-        let is_full = self.buckets[bucket_idx].len() >= K_BUCKET_SIZE;
+        let is_full = self.buckets[bucket_idx].len() >= CONFIG.dht.k_bucket_size;
         // info!("Attempting to add node {} to routing table to bucket {bucket_idx}. Already exists? {already_exists}", node.id);
 
         if already_exists {

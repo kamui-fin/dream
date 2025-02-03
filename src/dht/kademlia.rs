@@ -13,13 +13,7 @@
 // responses - key r, value is dictionary containing named return values
 // errors - key e is a list, first element error code, second element string containing the error message
 
-use crate::{
-    config::{
-        ALPHA_PARALLEL_REQUESTS, BUCKET_REFRESH_INTERVAL, ID_SIZE, K_BUCKET_SIZE,
-        MAX_NUM_PEERS_REQUEST,
-    },
-    dht::compact,
-};
+use crate::{config::CONFIG, dht::compact};
 use anyhow::anyhow;
 use std::{
     cmp::Reverse,
@@ -280,7 +274,7 @@ impl Kademlia {
         binding.insert(
             bucket_idx,
             tokio::spawn(async move {
-                sleep(Duration::from_secs(BUCKET_REFRESH_INTERVAL)).await;
+                sleep(Duration::from_secs(CONFIG.dht.bucket_refresh_interval)).await;
                 println!("TIMER RAN OUT!");
                 self.clone().refresh_bucket(bucket_idx).await;
             }),
@@ -338,7 +332,7 @@ impl Kademlia {
             .await
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..ID_SIZE {
+        for idx in (closest_idx + 1)..CONFIG.dht.id_size {
             // self.clone().reset_timer(idx);
             let self_clone = self.clone();
             self_clone.refresh_bucket(idx).await;
@@ -473,7 +467,7 @@ impl Kademlia {
         let contacted = Arc::new(Mutex::new(HashSet::new()));
         let candidates = Arc::new(Mutex::new(BinaryHeap::new()));
         let closest_nodes = Arc::new(Mutex::new(BinaryHeap::new()));
-        let semaphore = Arc::new(Semaphore::new(ALPHA_PARALLEL_REQUESTS));
+        let semaphore = Arc::new(Semaphore::new(CONFIG.dht.alpha_parallel_requests));
 
         // Initialize candidates from routing table
         {
@@ -494,12 +488,12 @@ impl Kademlia {
         }
 
         loop {
-            let mut current_batch = Vec::with_capacity(ALPHA_PARALLEL_REQUESTS);
+            let mut current_batch = Vec::with_capacity(CONFIG.dht.alpha_parallel_requests);
 
             // Acquire permits for parallel queries
             let permits = {
-                let mut permits = Vec::with_capacity(ALPHA_PARALLEL_REQUESTS);
-                for _ in 0..ALPHA_PARALLEL_REQUESTS {
+                let mut permits = Vec::with_capacity(CONFIG.dht.alpha_parallel_requests);
+                for _ in 0..CONFIG.dht.alpha_parallel_requests {
                     match semaphore.clone().acquire_owned().await {
                         Ok(permit) => permits.push(permit),
                         Err(_) => break,
@@ -515,7 +509,9 @@ impl Kademlia {
             // Get batch of candidates
             {
                 let mut cand_guard = candidates.lock().unwrap();
-                while current_batch.len() < ALPHA_PARALLEL_REQUESTS && !cand_guard.is_empty() {
+                while current_batch.len() < CONFIG.dht.alpha_parallel_requests
+                    && !cand_guard.is_empty()
+                {
                     if let Some(candidate) = cand_guard.pop() {
                         current_batch.push(candidate);
                     }
@@ -574,7 +570,7 @@ impl Kademlia {
                             {
                                 let mut cand_guard = candidates_clone.lock().unwrap();
                                 for nd in new_candidates {
-                                    if cand_guard.len() < K_BUCKET_SIZE
+                                    if cand_guard.len() < CONFIG.dht.k_bucket_size
                                         || nd.dist < cand_guard.peek().unwrap().0.dist
                                     {
                                         cand_guard.push(Reverse(nd));
@@ -586,7 +582,7 @@ impl Kademlia {
                             {
                                 let mut closest_guard = closest_clone.lock().unwrap();
                                 closest_guard.push(candidate.clone());
-                                while closest_guard.len() > K_BUCKET_SIZE {
+                                while closest_guard.len() > CONFIG.dht.k_bucket_size {
                                     closest_guard.pop();
                                 }
                             }
@@ -617,7 +613,7 @@ impl Kademlia {
                 if let Some(closest_node) = closest_guard.peek() {
                     let no_closer_candidates =
                         cand_guard.iter().all(|c| c.0.dist >= closest_node.dist);
-                    closest_guard.len() >= K_BUCKET_SIZE && no_closer_candidates
+                    closest_guard.len() >= CONFIG.dht.k_bucket_size && no_closer_candidates
                 } else {
                     false // keep trying other candidates
                 }
@@ -631,8 +627,11 @@ impl Kademlia {
         // Return final closest nodes
         let closest_guard = closest_nodes.lock().unwrap();
         info!("Computed K closest nodes to target {:#?}", target_node_id);
-        let mut k_closest: Vec<NodeDistance> =
-            closest_guard.iter().take(K_BUCKET_SIZE).cloned().collect();
+        let mut k_closest: Vec<NodeDistance> = closest_guard
+            .iter()
+            .take(CONFIG.dht.k_bucket_size)
+            .cloned()
+            .collect();
         k_closest.sort();
 
         k_closest
@@ -643,7 +642,7 @@ impl Kademlia {
         let candidates = Arc::new(Mutex::new(BinaryHeap::new()));
         let closest_nodes = Arc::new(Mutex::new(BinaryHeap::new()));
         let peers = Arc::new(Mutex::new(HashSet::new()));
-        let semaphore = Arc::new(Semaphore::new(ALPHA_PARALLEL_REQUESTS));
+        let semaphore = Arc::new(Semaphore::new(CONFIG.dht.alpha_parallel_requests));
 
         // Initialize candidates from routing table
         {
@@ -659,12 +658,12 @@ impl Kademlia {
         }
 
         loop {
-            let mut current_batch = Vec::with_capacity(ALPHA_PARALLEL_REQUESTS);
+            let mut current_batch = Vec::with_capacity(CONFIG.dht.alpha_parallel_requests);
 
             // Acquire permits for parallel queries
             let permits = {
-                let mut permits = Vec::with_capacity(ALPHA_PARALLEL_REQUESTS);
-                for _ in 0..ALPHA_PARALLEL_REQUESTS {
+                let mut permits = Vec::with_capacity(CONFIG.dht.alpha_parallel_requests);
+                for _ in 0..CONFIG.dht.alpha_parallel_requests {
                     match semaphore.clone().acquire_owned().await {
                         Ok(permit) => permits.push(permit),
                         Err(_) => break,
@@ -679,7 +678,9 @@ impl Kademlia {
             // Get batch of candidates
             {
                 let mut cand_guard = candidates.lock().unwrap();
-                while current_batch.len() < ALPHA_PARALLEL_REQUESTS && !cand_guard.is_empty() {
+                while current_batch.len() < CONFIG.dht.alpha_parallel_requests
+                    && !cand_guard.is_empty()
+                {
                     if let Some(candidate) = cand_guard.pop() {
                         current_batch.push(candidate);
                     }
@@ -744,7 +745,7 @@ impl Kademlia {
                                 let mut peers_guard = peers_clone.lock().unwrap();
                                 peers_guard.extend(values);
 
-                                if peers_guard.len() >= MAX_NUM_PEERS_REQUEST {
+                                if peers_guard.len() >= CONFIG.dht.max_num_peers_request {
                                     return;
                                 }
                             }
@@ -759,7 +760,7 @@ impl Kademlia {
                             {
                                 let mut cand_guard = candidates_clone.lock().unwrap();
                                 for nd in new_candidates {
-                                    if cand_guard.len() < K_BUCKET_SIZE
+                                    if cand_guard.len() < CONFIG.dht.k_bucket_size
                                         || nd.dist < cand_guard.peek().unwrap().0.dist
                                     {
                                         cand_guard.push(Reverse(nd));
@@ -771,7 +772,7 @@ impl Kademlia {
                             {
                                 let mut closest_guard = closest_clone.lock().unwrap();
                                 closest_guard.push(candidate.clone());
-                                while closest_guard.len() > K_BUCKET_SIZE {
+                                while closest_guard.len() > CONFIG.dht.k_bucket_size {
                                     closest_guard.pop();
                                 }
                             }
@@ -800,13 +801,15 @@ impl Kademlia {
                 if let Some(closest_node) = closest_guard.peek() {
                     let no_closer_candidates =
                         cand_guard.iter().all(|c| c.0.dist >= closest_node.dist);
-                    closest_guard.len() >= K_BUCKET_SIZE && no_closer_candidates
+                    closest_guard.len() >= CONFIG.dht.k_bucket_size && no_closer_candidates
                 } else {
                     false // keep trying other candidates
                 }
             };
 
-            if peers.lock().unwrap().len() >= MAX_NUM_PEERS_REQUEST || find_node_should_terminate {
+            if peers.lock().unwrap().len() >= CONFIG.dht.max_num_peers_request
+                || find_node_should_terminate
+            {
                 break;
             }
         }
@@ -1002,7 +1005,7 @@ impl Kademlia {
             .lock()
             .await
             .get_nodes(target_node_id);
-        k_closest_nodes.truncate(K_BUCKET_SIZE);
+        k_closest_nodes.truncate(CONFIG.dht.k_bucket_size);
 
         ResponseBody {
             id: self.node_id,
@@ -1028,7 +1031,7 @@ impl Kademlia {
             body.values = peers.clone();
         } else {
             let mut k_closest_nodes = self.context.routing_table.lock().await.get_nodes(info_hash);
-            k_closest_nodes.truncate(K_BUCKET_SIZE);
+            k_closest_nodes.truncate(CONFIG.dht.k_bucket_size);
             body.nodes = k_closest_nodes;
         }
 

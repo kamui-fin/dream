@@ -5,11 +5,9 @@ use std::{
 };
 
 use rand::{rngs::OsRng, Rng, RngCore};
-use serde::Serialize;
 use serde_bytes::ByteBuf;
 
-use crate::config::ID_SIZE;
-// use hex;
+pub const ID_SIZE: usize = 20;
 
 // wrap the NodeId in a newtype to implement the Debug trait
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
