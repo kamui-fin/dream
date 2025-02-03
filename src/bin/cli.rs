@@ -1,9 +1,8 @@
+use anyhow::Context;
 use clap::Parser;
 use config::Config;
 use dream::{
-    config::{Cli, Commands, CONFIG},
-    metafile::Metafile,
-    utils::init_logger,
+    config::{Cli, Commands, CONFIG}, dht::key::read_node_id, metafile::Metafile, utils::init_logger
 };
 use hex::encode;
 use log::{info, warn};
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::Path,
 };
 
@@ -46,8 +45,7 @@ async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn 
 async fn fuzzy_search_video_title(
     client: &Client,
     query: &str,
-) -> Result<Vec<VideoRecord>, Box<dyn Error>> {
-    // TODO: use anyhow::Result instead
+) -> anyhow::Result<Vec<VideoRecord>, Box<dyn Error>> {
     let url = format!(
         "http://{}/videos/_search",
         CONFIG.network.elastic_search_port
@@ -87,20 +85,7 @@ async fn upload_torrent(client: &Client, meta_file: &Metafile, title: &str) {
     // TODO: we need to use proper directories to store dream-related files
     let path = "node_id.bin";
 
-    // TODO: this can be refactored for common logic
-    let node_id = if Path::new(path).exists() {
-        let mut file = fs::File::open(path).expect("Unable to open file");
-        let mut id: [u8; 20] = [0u8; 20];
-        file.read_exact(&mut id).expect("Unable to read data");
-        encode(id)
-    } else {
-        let mut rng = rand::thread_rng();
-        let mut id = [0u8; 20];
-        rng.fill(&mut id);
-        let mut file = fs::File::create(path).expect("Unable to create file");
-        file.write_all(&id).expect("Unable to write data");
-        encode(id)
-    };
+    let node_id =  encode(read_node_id(path));
 
     let new_record = VideoRecord {
         infohash,
@@ -112,19 +97,36 @@ async fn upload_torrent(client: &Client, meta_file: &Metafile, title: &str) {
     add_record(client, new_record).await.unwrap();
 }
 
+fn ask_and_play(all_matches: &Vec<VideoRecord>){
+
+    let mut input = String::new();
+
+    println!("Please enter which result to play...");
+
+    io::stdin().read_line(&mut input).expect("Invalid response, please try search again.");
+    println!("Now playing result number {:}", input);
+
+    let match_idx = input.parse::<usize>().expect("Not a valid number");
+    if match_idx >= all_matches.len(){
+        info!("Invalid index, try again later.");
+        return
+    }
+
+    println!("Now playing selected match index...");
+    start_stream(&all_matches[match_idx].infohash).unwrap();
+}
+
 async fn search(client: &Client, query: &str) {
     let all_matches = fuzzy_search_video_title(client, query).await.unwrap();
     info!(
         "Query results for query {:#?} are {:#?}",
         query, all_matches
     );
-    info!("Now playing the closest match...");
-    // TODO: give the user an option to choose from results
-    start_stream(&all_matches[0].infohash);
+    
+    ask_and_play(&all_matches);
 }
 
-fn start_stream(info_hash: &[u8; 20]) {
-    // TODO: error handling
+fn start_stream(info_hash: &[u8; 20]) -> anyhow::Result<()>{
 
     let stream_link = format!(
         "http://localhost:{}/{}",
@@ -133,9 +135,11 @@ fn start_stream(info_hash: &[u8; 20]) {
     );
 
     let _mpv = std::process::Command::new("mpv")
-        .arg(stream_link)
+        .arg(stream_link.clone())
         .spawn()
-        .expect("Failed to start MPV");
+        .with_context(|| format!("Failed to start MPV with stream: {}", stream_link))?;
+
+    Ok(())
 }
 
 #[tokio::main]

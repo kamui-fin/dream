@@ -135,10 +135,7 @@ pub fn generate_node_id() -> Key {
     let path = "node_id.bin";
 
     if Path::new(path).exists() {
-        let mut file = fs::File::open(path).expect("Unable to open file");
-        let mut id = [0u8; 20];
-        file.read_exact(&mut id).expect("Unable to read data");
-        id.into()
+       read_node_id(path).into()
     } else {
         let mut rng = rand::thread_rng();
         let mut id = [0u8; 20];
@@ -147,6 +144,13 @@ pub fn generate_node_id() -> Key {
         file.write_all(&id).expect("Unable to write data");
         id.into()
     }
+}
+
+pub fn read_node_id(path: &str) -> [u8; 20]{
+    let mut file = fs::File::open(path).expect("Unable to open file");
+    let mut id = [0u8; 20];
+    file.read_exact(&mut id).expect("Unable to read data");
+    id
 }
 
 pub fn gen_secret() -> [u8; 16] {
