@@ -40,10 +40,17 @@ impl Engine {
         &mut self,
         meta_file: Metafile,
         output_dir: PathBuf,
-        response_tx: oneshot::Sender<u64>,
+        response_tx: oneshot::Sender<(u64, String)>,
     ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
-        response_tx.send(meta_file.info.length.unwrap()).unwrap();
+
+        let mime_type = mime_guess::from_path(&meta_file.info.name)
+            .first_or_octet_stream()
+            .to_string();
+
+        response_tx
+            .send((meta_file.info.length.unwrap(), mime_type))
+            .unwrap();
 
         if self.info_hashes.contains(&info_hash) {
             return Ok(());

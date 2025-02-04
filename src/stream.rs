@@ -165,7 +165,7 @@ async fn video_handler(
         .await
         .unwrap();
     // wait for response containing file size
-    let file_size = response_rx.await.unwrap();
+    let (file_size, mime_type) = response_rx.await.unwrap();
 
     let mut start = 0;
     let mut end = file_size - 1;
@@ -206,7 +206,7 @@ async fn video_handler(
 
     let response = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
-        .header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_LENGTH, content_length)
         .header(
             header::CONTENT_RANGE,

@@ -8,7 +8,9 @@ use dream::{
     utils::{init_logger, init_logger_debug},
 };
 use hex::encode;
+use hyper::ext;
 use log::{info, warn};
+use mime_guess::mime;
 use rand::Rng;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -170,12 +172,10 @@ async fn main() {
                 if extension == "torrent" {
                     let meta_file = Metafile::parse_torrent_file(file_path.to_path_buf()).unwrap();
                     upload_torrent(&client, None, &meta_file, title).await;
-                } else if extension == "mp4" {
+                } else {
                     let meta_file =
                         Metafile::from_video(Path::new(file_path), CONFIG.torrent.piece_size, None);
                     upload_torrent(&client, Some(file_path), &meta_file, title).await;
-                } else {
-                    warn!("Invalid arguments provided for command!");
                 }
             }
         }

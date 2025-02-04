@@ -35,6 +35,12 @@ hyper-util = { version = "0.1", features = ["full"] }
 tokio-stream = "0.1.17"
 easy-upnp = "0.2.1"
 serde_bencode = "0.2.4"
+<<<<<<< Updated upstream
+=======
+<<<<<<< Updated upstream
+public-ip = "0.2"
+=======
+>>>>>>> Stashed changes
 public-ip = "0.2"
 elasticsearch = "8.17.0-alpha.1"
 reqwest = "0.12.12"
@@ -42,6 +48,10 @@ simplelog = "0.12.2"
 config = "0.15.7"
 toml = "0.8.19"
 directories = "6.0.0"
+<<<<<<< Updated upstream
+=======
+mime_guess = "2.0.5"
+>>>>>>> Stashed changes
 
 [[bin]]
 name = "dream-cli"
@@ -54,3 +64,7 @@ path = "src/bin/dht.rs"
 [[bin]]
 name = "dream-torrent"
 path = "src/main.rs"
+<<<<<<< Updated upstream
+=======
+>>>>>>> Stashed changes
+>>>>>>> Stashed changes

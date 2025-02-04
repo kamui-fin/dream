@@ -247,7 +247,7 @@ pub enum ServerMsg {
     AddExternalTorrent {
         input_data: Vec<u8>,
         output_dir: PathBuf,
-        response_tx: tokio::sync::oneshot::Sender<u64>,
+        response_tx: tokio::sync::oneshot::Sender<(u64, String)>,
     },
     // Responses
     StreamRequestRange {
