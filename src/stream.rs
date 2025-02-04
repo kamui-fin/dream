@@ -21,7 +21,7 @@ use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::Result;
 use hyper::{header, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use log::info;
+use log::{error, info};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ pub async fn start_server(
     let addr: SocketAddr = ([127, 0, 0, 1], CONFIG.network.stream_server_port).into();
 
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{}", addr);
+    info!("Stream server listening on http://{}", addr);
 
     loop {
         let (tcp, _) = listener.accept().await?;
@@ -61,7 +61,7 @@ pub async fn start_server(
                 )
                 .await
             {
-                eprintln!("Error serving connection: {:?}", err);
+                error!("Error serving connection: {:?}", err);
             }
         });
     }
@@ -82,7 +82,7 @@ async fn handle_stream_request(
     info_hash: [u8; 20],
 ) -> std::result::Result<BoxBody<Bytes, std::io::Error>, Box<dyn std::error::Error>> {
     // consume engine_tx of ReadyData until has_more is false
-    let (stream_tx, stream_rx) = mpsc::channel(2000);
+    let (stream_tx, stream_rx) = mpsc::channel(CONFIG.stream.buffer_num_pieces);
 
     engine_tx
         .send(ServerMsg::StreamRequestRange {
@@ -95,7 +95,10 @@ async fn handle_stream_request(
 
     let stream_body = ReceiverStream::new(stream_rx).map(|data_ready| {
         if data_ready.has_more {
-            println!("[STREAM] got sum data lol");
+            info!(
+                "[STREAM] Received piece of len {} bytes",
+                data_ready.data.len()
+            );
             Ok::<_, std::io::Error>(hyper::body::Bytes::from(data_ready.data))
         } else {
             Err(std::io::Error::new(

@@ -57,7 +57,7 @@ pub struct TorrentConfig {
 #[derive(Debug, Deserialize)]
 pub struct StreamConfig {
     pub video_player: String,
-    pub stream_buffer_num_pieces: u32,
+    pub buffer_num_pieces: usize,
     pub rarest_piece_enabled: bool,
 }
 

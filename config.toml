@@ -1,35 +1,52 @@
 [general]
+# Directory where downloaded video files will be stored.
 output_dir = "output"
 
 [logging]
+# Path to the log file where application logs will be written.
 log_file = "dream.log"
 
 [logging.modules]
+# Log level for the DHT module (e.g., "warn" for warnings).
 dht = "warn"
+# Log level for the torrent module (e.g., "error" for errors only).
 torrent = "error"
 
 [dht]
+# Whether to always use DHT for peer discovery (false disables it).
 always_use_dht = false
+# Maximum number of peers that can be requested at a time.
 max_num_peers_request = 100
+# Time interval (in seconds) to refresh DHT buckets.
 bucket_refresh_interval = 900
+# Maximum number of nodes in a single DHT bucket.
 k_bucket_size = 8
+# Number of parallel requests sent to find peers in the DHT.
 alpha_parallel_requests = 3
 
 [torrent]
+# Size (in bytes) of each block in a torrent piece.
 block_size = 16384
+# Size (in bytes) of each piece in a torrent file.
 piece_size = 2097152
 
 [stream]
+# Video player to use for streaming (e.g., mpv).
 video_player = "mpv"
-stream_buffer_num_pieces = 4 # not implemented yet
-rarest_piece_enabled = false # not implemented yet
+# Number of pieces to buffer ahead during streaming.
+buffer_num_pieces = 10
+# Whether to enable downloading the rarest piece first (not implemented yet).
+rarest_piece_enabled = false
 
 [network]
+# IP address of the ElasticSearch server used for indexing and search functionality.
 elastic_search_ip = "127.0.0.1"
+# Address of the bootstrap node for initializing DHT connections.
 dht_bootstrap = "router.bittorrent.com:6881"
 
-dht_port = 8999
-dht_api_port = 9999
-elastic_search_port = 9200
-torrent_port = 6881
-stream_server_port = 3000
+# Port configurations for various services:
+dht_port = 8999               # Port used by DHT for peer-to-peer communication.
+dht_api_port = 9999           # Port used by the DHT API for external communication.
+elastic_search_port = 9200    # Port used by ElasticSearch for indexing and search.
+torrent_port = 6881           # Port used by the BitTorrent protocol for peer connections.
+stream_server_port = 3000     # Port used by the HTTP stream server to serve video data.

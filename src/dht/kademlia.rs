@@ -275,7 +275,7 @@ impl Kademlia {
             bucket_idx,
             tokio::spawn(async move {
                 sleep(Duration::from_secs(CONFIG.dht.bucket_refresh_interval)).await;
-                println!("TIMER RAN OUT!");
+                info!("Refreshing bucket {}", bucket_idx);
                 self.clone().refresh_bucket(bucket_idx).await;
             }),
         );
@@ -383,7 +383,7 @@ impl Kademlia {
         let query = serde_bencode::to_bytes(&query).expect("Failed to serialize query");
 
         if let Err(e) = self.socket.send_to(&query, addr).await {
-            eprintln!("Failed to send query: {e}");
+            error!("Failed to send query: {e}");
             return None;
         }
 
@@ -394,11 +394,11 @@ impl Kademlia {
                 Some(response)
             }
             Ok(Err(e)) => {
-                eprintln!("Failed to receive response: {e}");
+                error!("Failed to receive response: {e}");
                 None
             }
             Err(_) => {
-                eprintln!("Timeout while waiting for response");
+                error!("Timeout while waiting for response");
                 None
             }
         }

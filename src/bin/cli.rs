@@ -114,32 +114,29 @@ async fn upload_torrent(
 fn ask_and_play(all_matches: &Vec<VideoRecord>) {
     let mut input = String::new();
 
-    print!("Please enter which result to play: ");
-
     io::stdin()
         .read_line(&mut input)
         .expect("Invalid response, please try search again.");
 
-    println!("");
     println!("Now playing result number {:}", input);
 
     let match_idx = input.trim().parse::<usize>().expect("Not a valid number");
     if match_idx >= all_matches.len() {
-        info!("Invalid index, try again later.");
+        info!("Invalid index");
         return;
     }
-
-    println!("Now playing selected match index...");
     start_stream(&all_matches[match_idx].infohash).unwrap();
 }
 
 async fn search(client: &Client, query: &str) {
     let all_matches = fuzzy_search_video_title(client, query).await.unwrap();
-    info!(
-        "Query results for query {:#?} are {:#?}",
-        query, all_matches
-    );
 
+    println!("Found {} matches", all_matches.len());
+    for (idx, record) in all_matches.iter().enumerate() {
+        println!("  [{}]: {}", idx, record.title);
+    }
+    print!("What file to stream [0..{}]: ", all_matches.len() - 1);
+    io::stdout().flush().unwrap();
     ask_and_play(&all_matches);
 }
 
@@ -159,7 +156,7 @@ fn start_stream(info_hash: &str) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() {
-    init_logger_debug();
+    // init_logger_debug();
 
     let cli = Cli::parse();
     let client = Client::new();
