@@ -18,10 +18,11 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR, PROTOCOL_STR_LEN};
+use super::{PipelineEntry, DREAM_ID, HANDSHAKE_LEN, PROTOCOL_STR_LEN};
 use crate::{
+    config::CONFIG,
     msg::{BitTorrentCodec, InternalMessage, InternalMessagePayload, Message, MessageType},
-    piece::{BitField, BLOCK_SIZE},
+    piece::BitField,
     utils::slice_to_u32_msb,
 };
 
@@ -97,7 +98,7 @@ impl RequestTracker {
         info!(
             "Registering request for {:?} ({:x})",
             entry,
-            entry.block_id * BLOCK_SIZE
+            entry.block_id * CONFIG.torrent.block_size
         );
 
         let sender_clone = self.timeout_sender.clone();
@@ -245,7 +246,8 @@ impl PeerSession {
     pub fn get_pipeline_entry(bt_msg: Message) -> PipelineEntry {
         let piece_id = slice_to_u32_msb(&bt_msg.payload[0..4]);
         let block_offset = slice_to_u32_msb(&bt_msg.payload[4..8]);
-        let block_id = ((block_offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+        let block_id =
+            ((block_offset as usize / CONFIG.torrent.block_size as usize) as f32).floor() as u32;
 
         PipelineEntry { piece_id, block_id }
     }

@@ -1,0 +1,35 @@
+[general]
+output_dir = "output"
+
+[logging]
+log_file = "dream.log"
+
+[logging.modules]
+dht = "warn"
+torrent = "error"
+
+[dht]
+always_use_dht = false
+max_num_peers_request = 100
+bucket_refresh_interval = 900
+k_bucket_size = 8
+alpha_parallel_requests = 3
+
+[torrent]
+block_size = 16384
+piece_size = 2097152
+
+[stream]
+video_player = "mpv"
+stream_buffer_num_pieces = 4 # not implemented yet
+rarest_piece_enabled = false # not implemented yet
+
+[network]
+elastic_search_ip = "127.0.0.1"
+dht_bootstrap = "router.bittorrent.com:6881"
+
+dht_port = 8999
+dht_api_port = 9999
+elastic_search_port = 9200
+torrent_port = 6881
+stream_server_port = 3000

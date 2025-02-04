@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    net::{IpAddr, Ipv4Addr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddrV4},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +19,7 @@ impl Node {
     pub fn new(id: Key, ip: Ipv4Addr, port: u16) -> Self {
         Self {
             id,
-            addr: SocketAddrV4::new(ip.into(), port),
+            addr: SocketAddrV4::new(ip, port),
             last_seen: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

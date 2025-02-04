@@ -1,7 +1,6 @@
 use std::{
     fmt::{self, Formatter},
     io::Cursor,
-    ops::Range,
     path::PathBuf,
 };
 
@@ -10,7 +9,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use log::trace;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::{peer::session::ConnectionInfo, piece::BLOCK_SIZE};
+use crate::{config::CONFIG, peer::session::ConnectionInfo};
 
 const MAX_FRAME_SIZE: usize = 1 << 16;
 
@@ -30,7 +29,8 @@ pub struct PiecePayload<'a> {
 
 impl RequestPayload {
     pub fn new(index: u32, offset: u32, length: u32) -> Self {
-        let block_id = ((offset as usize / BLOCK_SIZE as usize) as f32).floor() as u32;
+        let block_id =
+            ((offset as usize / CONFIG.torrent.block_size as usize) as f32).floor() as u32;
         Self {
             piece_id: index,
             offset,
@@ -62,7 +62,7 @@ impl fmt::Display for PiecePayload<'_> {
 
 impl<'a> PiecePayload<'a> {
     fn new(index: u32, offset: u32, data: &'a [u8]) -> Self {
-        let block_id = offset / BLOCK_SIZE;
+        let block_id = offset / CONFIG.torrent.block_size;
 
         Self {
             piece_id: index,
@@ -245,7 +245,7 @@ pub struct InternalMessage {
 pub enum ServerMsg {
     // Requests
     AddExternalTorrent {
-        input_path: PathBuf,
+        input_data: Vec<u8>,
         output_dir: PathBuf,
         response_tx: tokio::sync::oneshot::Sender<u64>,
     },

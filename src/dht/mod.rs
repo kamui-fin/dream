@@ -1,10 +1,4 @@
-use std::{
-    net::{Ipv4Addr, SocketAddrV4},
-    str::FromStr,
-    sync::Arc,
-    thread,
-    time::Duration,
-};
+use std::{net::SocketAddrV4, str::FromStr, sync::Arc, thread};
 
 use easy_upnp::{add_ports, PortMappingProtocol, UpnpConfig};
 use node::Node;
@@ -14,10 +8,9 @@ use tokio::{
     runtime::{Handle, Runtime},
 };
 
-use crate::dht::{config::Args, kademlia::Kademlia};
+use crate::{config::CONFIG, dht::kademlia::Kademlia};
 
 pub mod compact;
-pub mod config;
 pub mod context;
 pub mod kademlia;
 pub mod key;
@@ -36,7 +29,7 @@ pub async fn setup_upnp() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Add port mapping
-    match add_ports(vec![config]).into_iter().next() {
+    match add_ports(vec![config]).next() {
         Some(Ok(_)) => {
             log::info!("UPnP port forwarding established on port {}", 6881);
 
@@ -53,41 +46,36 @@ pub async fn setup_upnp() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub async fn start_dht(args: &Args) {
+pub async fn start_dht() {
     setup_upnp().await.unwrap();
 
-    let kademlia = Arc::new(Kademlia::init(args).await);
+    let kademlia = Arc::new(Kademlia::init().await);
 
-    let bootstrap = if let Some(addr) = args.bootstrap.clone() {
-        let ip = lookup_host((addr, 0))
+    let bootstrap = {
+        let ip = lookup_host(&CONFIG.network.dht_bootstrap)
             .await
             .expect("Unable to resolve boostrap node addr")
             .next()
             .unwrap()
             .ip();
+
         let ip = match ip {
             std::net::IpAddr::V4(ip) => ip,
             _ => panic!("Only IPv4 addresses are supported"),
         };
 
         let response = kademlia
-            .send_ping_init(&format!("{}:{}", ip, 6881))
+            .send_ping_init(&CONFIG.network.dht_bootstrap)
             .await
             .expect("Unable to communicate with boostrap node");
         let node_id = response.extract_id();
 
-        Some(Node::new(node_id, ip, 6881))
-    } else {
-        None
+        Node::new(node_id, ip, 6881)
     };
 
     let kademlia_clone = kademlia.clone();
     thread::spawn(move || {
-        let server = Server::http(format!(
-            "0.0.0.0:{}",
-            1000 + kademlia_clone.context.node.addr.port()
-        ))
-        .unwrap();
+        let server = Server::http(format!("0.0.0.0:{}", CONFIG.network.dht_api_port)).unwrap();
         let rt = Runtime::new().unwrap();
         for request in server.incoming_requests() {
             rt.block_on(handle_http_request(kademlia_clone.clone(), request));

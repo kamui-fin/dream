@@ -9,8 +9,7 @@ use serde::Deserialize;
 use url::{form_urlencoded, Url};
 
 use crate::{
-    dht::key::Key,
-    engine::PORT,
+    config::CONFIG,
     metafile::Metafile,
     peer::{
         session::{deserialize_peers, ConnectionInfo},
@@ -56,7 +55,7 @@ impl TrackerRequest {
     }
 
     pub fn to_url(&self, tracker_url: &str) -> String {
-        let port_ascii = PORT.to_string();
+        let port_ascii = CONFIG.network.torrent_port.to_string();
         let uploaded_ascii = self.uploaded.to_string();
         let downloaded_ascii = self.downloaded.to_string();
         let left_ascii = self.left.to_string();
@@ -100,20 +99,26 @@ pub fn get_peers_from_tracker(
 
     let mut body = Vec::new();
     let _ = request::get(get_url, &mut body)?;
-    let res: TrackerResponse = serde_bencoded::from_bytes(&body)?;
+    let res: TrackerResponse = serde_bencode::from_bytes(&body)?;
     Ok(res.peers)
 }
 
 pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
-    let info_hash = hex::encode(&info_hash);
+    let info_hash = hex::encode(info_hash);
 
     // first, announce
-    let url = format!("http://localhost:6881/announce/{}", info_hash);
+    let url = format!(
+        "http://localhost:{}/announce/{}",
+        CONFIG.network.dht_api_port, info_hash
+    );
     let mut writer = Vec::new();
     let body = &[];
     request::post(url, body, &mut writer)?;
 
-    let url = format!("http://localhost:6881/peers/{}", info_hash);
+    let url = format!(
+        "http://localhost:{}/peers/{}",
+        CONFIG.network.dht_api_port, info_hash
+    );
     let mut body = Vec::new();
     let _ = request::get(url, &mut body)?;
     let res: Vec<String> = serde_json::from_slice(&body)?;
@@ -121,14 +126,17 @@ pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
     Ok(res
         .iter()
         .map(|p| {
-            let addr = SocketAddrV4::from_str(&p).unwrap();
+            let addr = SocketAddrV4::from_str(p).unwrap();
             ConnectionInfo::from_addr(std::net::SocketAddr::V4(addr))
         })
         .collect())
 }
 
 pub fn dht_ping_node(ip: Ipv4Addr, port: u16) -> Result<()> {
-    let url = format!("http://localhost:6881/ping/{}:{}", ip, port);
+    let url = format!(
+        "http://localhost:{}/ping/{}:{}",
+        CONFIG.network.dht_api_port, ip, port
+    );
     let mut writer = Vec::new();
     request::get(url, &mut writer)?;
     Ok(())

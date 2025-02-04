@@ -10,12 +10,13 @@ use tokio::{
 };
 
 use crate::{
+    config::CONFIG,
     metafile::Metafile,
-    msg::{DataReady, InternalMessage, ServerMsg},
+    msg::InternalMessage,
     peer::{manager::PeerManager, session::ConnectionInfo},
-    piece::{PieceStore, BLOCK_SIZE},
-    tracker::{self, TrackerResponse},
-    utils::{self, Notifier},
+    piece::PieceStore,
+    tracker::{self},
+    utils::Notifier,
 };
 
 pub enum TorrentState {
@@ -28,7 +29,6 @@ pub struct BitTorrent {
     pub piece_store: Arc<Mutex<PieceStore>>, // references meta_file
     pub peer_manager: Arc<Mutex<PeerManager>>,
     notify_pipelines_empty: Arc<Notifier>,
-    main_piece_queue: VecDeque<usize>,
 }
 
 impl BitTorrent {
@@ -36,10 +36,7 @@ impl BitTorrent {
         meta_file: Metafile,
         output_dir: PathBuf,
     ) -> anyhow::Result<Self> {
-        let peers = Self::fetch_peers(&meta_file).await?;
-        info!("Fetched peers: {:#?}", peers);
-
-        let piece_store = Self::initialize_piece_store(&meta_file, output_dir);
+        let piece_store = Self::initialize_piece_store(&meta_file, output_dir.clone());
         let info_hash = piece_store.meta_file.get_info_hash();
         let num_pieces = piece_store.meta_file.get_num_pieces();
         let piece_store = Arc::new(Mutex::new(piece_store));
@@ -47,6 +44,7 @@ impl BitTorrent {
         let (msg_tx, msg_rx) = mpsc::channel(2000);
         let notify_pipelines_empty = Arc::new(Notifier::new());
 
+        let peers = Self::fetch_peers(&meta_file).await?;
         let peer_manager = Self::connect_to_peers(
             peers,
             piece_store.clone(),
@@ -56,7 +54,6 @@ impl BitTorrent {
             notify_pipelines_empty.clone(),
         )
         .await;
-
         let peer_manager = Arc::new(Mutex::new(peer_manager));
 
         Self::spawn_choke_manager(peer_manager.clone(), piece_store.clone());
@@ -68,11 +65,14 @@ impl BitTorrent {
             piece_store,
             peer_manager,
             notify_pipelines_empty,
-            main_piece_queue: VecDeque::new(),
         })
     }
 
     async fn fetch_peers(meta_file: &Metafile) -> anyhow::Result<Vec<ConnectionInfo>> {
+        if CONFIG.dht.always_use_dht {
+            return tracker::get_peers_from_dht(meta_file.get_info_hash());
+        }
+
         let peers = if let Some(tracker_url) = &meta_file.get_announce() {
             tracker::get_peers_from_tracker(tracker_url, tracker::TrackerRequest::new(meta_file))?
         } else {
@@ -187,7 +187,7 @@ impl BitTorrent {
     pub async fn download_piece(&mut self, piece_idx: usize) -> anyhow::Result<Vec<u8>> {
         let start = Instant::now();
         let piece_size = self.meta_file.get_piece_len(piece_idx);
-        let num_blocks = (((piece_size as u32) / BLOCK_SIZE) as f32).ceil() as u32;
+        let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
 
         let mut candidates = self
             .peer_manager

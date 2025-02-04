@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use log::{error, info};
 use tokio::{
@@ -9,13 +9,12 @@ use tokio::{
 
 use crate::{
     bittorrent::BitTorrent,
+    config::CONFIG,
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
-    piece, utils,
+    utils,
 };
-
-pub const PORT: u16 = 6881;
 
 pub struct Engine {
     torrents: Vec<Arc<Mutex<BitTorrent>>>,
@@ -50,8 +49,8 @@ impl Engine {
             return Ok(());
         }
 
-        let bt = BitTorrent::from_torrent_file(meta_file, output_dir.join(hex::encode(info_hash)))
-            .await?;
+        let output_dir = output_dir.join(hex::encode(info_hash));
+        let bt = BitTorrent::from_torrent_file(meta_file, output_dir).await?;
         let bt = Arc::new(Mutex::new(bt));
 
         self.torrents.push(bt);
@@ -64,7 +63,8 @@ impl Engine {
 
     pub async fn start_server(&mut self) -> anyhow::Result<()> {
         info!("Listening on inbound server...");
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", PORT)).await?;
+        let listener =
+            TcpListener::bind(format!("0.0.0.0:{}", CONFIG.network.torrent_port)).await?;
 
         loop {
             tokio::select! {
@@ -115,20 +115,18 @@ impl Engine {
     async fn handle_command(&mut self, command: ServerMsg) -> anyhow::Result<()> {
         match command {
             ServerMsg::AddExternalTorrent {
-                input_path,
+                input_data,
                 output_dir,
                 response_tx,
             } => {
-                let meta_file = Metafile::parse_torrent_file(input_path);
+                let meta_file = Metafile::parse_bytes(&input_data);
                 match meta_file {
                     Err(e) => {
                         error!("Failed to parse torrent file: {:?}", e);
                     }
                     Ok(meta_file) => {
-                        if let Err(e) = self
-                            .add_torrent(meta_file, PathBuf::from(output_dir), response_tx)
-                            .await
-                        {
+                        info!("Successfully parsed torrent file: {:?}", meta_file);
+                        if let Err(e) = self.add_torrent(meta_file, output_dir, response_tx).await {
                             error!("Failed to add torrent: {:?}", e);
                         }
                     }
@@ -153,9 +151,18 @@ impl Engine {
                 let bt = self.torrents[idx].clone();
                 self.last_stream_handle = Some(tokio::spawn(async move {
                     let mut bt = bt.lock().await;
+                    info!(
+                        "Bitfield: {:?}",
+                        bt.piece_store.lock().await.get_missing_pieces()
+                    );
 
                     let pieces_needed =
-                        utils::byte_to_piece_range(start, end, bt.meta_file.get_piece_len(0));
+                        utils::byte_to_piece_range(start, end + 1, bt.meta_file.get_piece_len(0));
+
+                    info!("Pieces needed: {:?}", pieces_needed);
+
+                    info!("Piece len: {}", bt.meta_file.get_piece_len(0));
+
                     let last_piece = pieces_needed.end;
 
                     let mut curr_start = start;

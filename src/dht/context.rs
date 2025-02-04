@@ -1,15 +1,16 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddrV4},
-    str::FromStr,
+    net::{Ipv4Addr, SocketAddrV4},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
-use serde_json::{json, Value};
 use tokio::time::sleep;
 
-use crate::dht::{config::Args, key::gen_secret, node::Node, routing::RoutingTable};
+use crate::{
+    config::CONFIG,
+    dht::{key::gen_secret, node::Node, routing::RoutingTable},
+};
 
 use super::key::{generate_node_id, Key};
 
@@ -23,13 +24,13 @@ pub struct RuntimeContext {
 }
 
 impl RuntimeContext {
-    pub fn init(args: &Args, ip: Ipv4Addr) -> Self {
+    pub fn init(ip: Ipv4Addr) -> Self {
         let node_id = generate_node_id();
         let routing_table = Arc::new(tokio::sync::Mutex::new(RoutingTable::new(node_id)));
         let peer_store = Arc::new(tokio::sync::Mutex::new(
             HashMap::<Key, Vec<SocketAddrV4>>::new(),
         ));
-        let node = Node::new(node_id, ip, args.port); // TODO: public ip instead probably
+        let node = Node::new(node_id, ip, CONFIG.network.dht_port); // TODO: public ip instead probably
         let secret = Arc::new(Mutex::new(gen_secret()));
 
         Self {
