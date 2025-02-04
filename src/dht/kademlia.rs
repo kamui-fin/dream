@@ -42,7 +42,7 @@ use crate::dht::{
     node::{Node, NodeDistance},
 };
 
-use super::{config::Args, key::Key};
+use super::key::{Key, ID_SIZE};
 
 type Peer = (IpAddr, u16);
 
@@ -239,9 +239,9 @@ async fn get_public_ip() -> Ipv4Addr {
 }
 
 impl Kademlia {
-    pub async fn init(args: &Args) -> Self {
-        let context = Arc::new(RuntimeContext::init(args, get_public_ip().await));
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", args.port))
+    pub async fn init() -> Self {
+        let context = Arc::new(RuntimeContext::init(get_public_ip().await));
+        let socket = UdpSocket::bind(format!("0.0.0.0:{}", CONFIG.network.dht_port))
             .await
             .unwrap();
         let socket = Arc::new(socket); // Set socket options to reuse address and port
@@ -281,7 +281,7 @@ impl Kademlia {
         );
     }
 
-    pub async fn start_server(self: Arc<Self>, bootstrap_node: Option<Node>) {
+    pub async fn start_server(self: Arc<Self>, bootstrap_node: Node) {
         // 1. start dht server
         let self_clone = self.clone();
         let handle = tokio::spawn(async move { self_clone.listen().await });
@@ -296,11 +296,7 @@ impl Kademlia {
         handle.await.unwrap();
     }
 
-    pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Option<Node>) {
-        if bootstrap_node.is_none() {
-            return;
-        }
-        let bootstrap_node = bootstrap_node.unwrap();
+    pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Node) {
         // info!(
         //     "Joining network through bootstrap id = {}",
         //     bootstrap_node.id
@@ -332,7 +328,7 @@ impl Kademlia {
             .await
             .find_bucket_idx(k_closest_nodes[0].node.id);
 
-        for idx in (closest_idx + 1)..CONFIG.dht.id_size {
+        for idx in (closest_idx + 1)..ID_SIZE {
             // self.clone().reset_timer(idx);
             let self_clone = self.clone();
             self_clone.refresh_bucket(idx).await;
@@ -346,7 +342,7 @@ impl Kademlia {
     ) -> Option<KrpcSuccessResponse> {
         info!("[CLIENT] Sending query to {addr}: {:?}", query);
         let transaction_id = query.t.clone();
-        let query = serde_bencoded::to_vec(&query).unwrap();
+        let query = serde_bencode::to_bytes(&query).unwrap();
 
         self.socket.send_to(&query, addr).await.ok()?;
 
@@ -890,8 +886,7 @@ impl Kademlia {
         if query.y == "r" {
             // this is a response to an earlier request we made
             // future is ready
-            // let response: KrpcSuccessResponse = serde_bencoded::from_bytes(&buf[..len]).unwrap();
-            let response: KrpcSuccessResponse = { serde_bencode::from_bytes(&buf[..len]).unwrap() };
+            let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
             self.manager.resolve_transaction(query.t, response);
         } else {
             let query: KrpcRequest = match serde_bencode::from_bytes(&buf[..len]) {

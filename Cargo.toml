@@ -41,6 +41,7 @@ reqwest = "0.12.12"
 simplelog = "0.12.2"
 config = "0.15.7"
 toml = "0.8.19"
+directories = "6.0.0"
 
 [[bin]]
 name = "dream-cli"

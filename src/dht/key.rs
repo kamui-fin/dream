@@ -1,9 +1,10 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
+use directories::ProjectDirs;
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde_bytes::ByteBuf;
 
@@ -73,9 +74,10 @@ impl From<[u8; ID_SIZE]> for Key {
 }
 
 impl From<Vec<u8>> for Key {
-    fn from(vec: Vec<u8>) -> Self {
+    fn from(buf: Vec<u8>) -> Self {
         let mut id = [0u8; ID_SIZE];
-        id.copy_from_slice(&vec);
+        let len = std::cmp::min(buf.len(), ID_SIZE);
+        id[..len].copy_from_slice(&buf[..len]);
         Key(id)
     }
 }
@@ -83,7 +85,8 @@ impl From<Vec<u8>> for Key {
 impl From<&[u8]> for Key {
     fn from(buf: &[u8]) -> Self {
         let mut id = [0u8; ID_SIZE];
-        id.copy_from_slice(buf);
+        let len = std::cmp::min(buf.len(), ID_SIZE);
+        id[..len].copy_from_slice(&buf[..len]);
         Key(id)
     }
 }
@@ -92,7 +95,8 @@ impl From<&[u8]> for Key {
 impl From<&ByteBuf> for Key {
     fn from(buf: &ByteBuf) -> Self {
         let mut id = [0u8; ID_SIZE];
-        id.copy_from_slice(buf);
+        let len = std::cmp::min(buf.len(), ID_SIZE);
+        id[..len].copy_from_slice(&buf[..len]);
         Key(id)
     }
 }
@@ -131,11 +135,23 @@ impl std::fmt::Display for Key {
     }
 }
 
-pub fn generate_node_id() -> Key {
-    let path = "node_id.bin";
+pub fn get_node_id_path() -> PathBuf {
+    let proj_dirs =
+        ProjectDirs::from("com", "kamui", "dream").expect("Unable to find project directory");
+    let data_dir = proj_dirs.data_dir();
+    // create directory
+    if !data_dir.exists() {
+        fs::create_dir_all(&data_dir).expect("Unable to create directory");
+    }
+    let node_id_path = data_dir.join("config.toml");
+    node_id_path
+}
 
-    if Path::new(path).exists() {
-       read_node_id(path).into()
+pub fn generate_node_id() -> Key {
+    let path = get_node_id_path();
+
+    if path.exists() {
+        read_node_id(path).into()
     } else {
         let mut rng = rand::thread_rng();
         let mut id = [0u8; 20];
@@ -146,7 +162,7 @@ pub fn generate_node_id() -> Key {
     }
 }
 
-pub fn read_node_id(path: &str) -> [u8; 20]{
+pub fn read_node_id(path: PathBuf) -> [u8; 20] {
     let mut file = fs::File::open(path).expect("Unable to open file");
     let mut id = [0u8; 20];
     file.read_exact(&mut id).expect("Unable to read data");

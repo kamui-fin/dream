@@ -250,6 +250,17 @@ pub struct PieceStore {
 impl PieceStore {
     pub fn new(meta_file: Metafile, output_dir: PathBuf) -> Self {
         let mut bitfield = BitField::new(meta_file.get_num_pieces());
+
+        // check if we already have the entire file
+        let final_video_file = output_dir.clone().join(&meta_file.info.name);
+        if final_video_file.exists()
+            && final_video_file.metadata().unwrap().len() == meta_file.info.length.unwrap()
+        {
+            for i in 0..meta_file.get_num_pieces() {
+                bitfield.mark_piece(i);
+            }
+        }
+
         if !output_dir.exists() {
             std::fs::create_dir(&output_dir).unwrap();
         } else {
@@ -262,6 +273,13 @@ impl PieceStore {
                     .expect("Failed to read bitfield file");
 
                 bitfield = BitField(buffer);
+            } else {
+                // create a new file
+                let bitfield_path = output_dir.join("meta.bin");
+                let mut file = File::create(bitfield_path).expect("Failed to create bitfield file");
+
+                file.write_all(&bitfield.0)
+                    .expect("Failed to write bitfield");
             }
         }
 

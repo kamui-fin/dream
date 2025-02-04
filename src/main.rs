@@ -1,14 +1,18 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use dream::{engine::Engine, utils::init_logger};
+use dream::{config::CONFIG, engine::Engine, utils::init_logger};
 use tokio::sync::mpsc::{self};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logger();
+    init_logger(&CONFIG.logging.modules.torrent);
 
-    let output_dir = PathBuf::from("output"); // TODO: custom output directory
+    let output_dir = PathBuf::from(&CONFIG.general.output_dir);
+    if !output_dir.exists() {
+        return Err(anyhow::anyhow!("Output directory does not exist"));
+    }
+
     let (tx, rx) = mpsc::channel(32);
 
     let result = tokio::spawn(async move {

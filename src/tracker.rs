@@ -99,7 +99,7 @@ pub fn get_peers_from_tracker(
 
     let mut body = Vec::new();
     let _ = request::get(get_url, &mut body)?;
-    let res: TrackerResponse = serde_bencoded::from_bytes(&body)?;
+    let res: TrackerResponse = serde_bencode::from_bytes(&body)?;
     Ok(res.peers)
 }
 
@@ -107,12 +107,18 @@ pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
     let info_hash = hex::encode(info_hash);
 
     // first, announce
-    let url = format!("http://localhost:6881/announce/{}", info_hash);
+    let url = format!(
+        "http://localhost:{}/announce/{}",
+        CONFIG.network.dht_api_port, info_hash
+    );
     let mut writer = Vec::new();
     let body = &[];
     request::post(url, body, &mut writer)?;
 
-    let url = format!("http://localhost:6881/peers/{}", info_hash);
+    let url = format!(
+        "http://localhost:{}/peers/{}",
+        CONFIG.network.dht_api_port, info_hash
+    );
     let mut body = Vec::new();
     let _ = request::get(url, &mut body)?;
     let res: Vec<String> = serde_json::from_slice(&body)?;
@@ -127,7 +133,10 @@ pub fn get_peers_from_dht(info_hash: [u8; 20]) -> Result<Vec<ConnectionInfo>> {
 }
 
 pub fn dht_ping_node(ip: Ipv4Addr, port: u16) -> Result<()> {
-    let url = format!("http://localhost:6881/ping/{}:{}", ip, port);
+    let url = format!(
+        "http://localhost:{}/ping/{}:{}",
+        CONFIG.network.dht_api_port, ip, port
+    );
     let mut writer = Vec::new();
     request::get(url, &mut writer)?;
     Ok(())

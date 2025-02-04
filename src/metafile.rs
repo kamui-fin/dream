@@ -1,3 +1,4 @@
+use log::info;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::{
@@ -12,14 +13,21 @@ use crate::utils::hash_obj;
 
 pub struct Hashes(pub Vec<[u8; 20]>);
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Metafile {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub announce: Option<String>,
+
     #[serde(default)]
     #[serde(rename = "announce-list")]
     pub announce_list: Vec<Vec<String>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub creation_date: Option<usize>,
+
     pub info: Info,
 }
 
@@ -53,12 +61,17 @@ pub struct Info {
 }
 
 impl Metafile {
+    pub fn parse_bytes(bytes: &[u8]) -> anyhow::Result<Metafile> {
+        let meta_file = serde_bencode::from_bytes::<Metafile>(bytes)?;
+        Ok(meta_file)
+    }
+
     pub fn parse_torrent_file(file_path: PathBuf) -> anyhow::Result<Metafile> {
         let mut file = File::open(file_path)?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
 
-        let meta_file = serde_bencoded::from_bytes::<Metafile>(&buffer[..])?;
+        let meta_file = serde_bencode::from_bytes::<Metafile>(&buffer[..])?;
 
         Ok(meta_file)
     }
@@ -87,6 +100,8 @@ impl Metafile {
             files: None,
             private: None,
         };
+
+        info!("Adding file: {:?}", info);
 
         let creation_date = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -1,13 +1,7 @@
-use clap::Parser;
-use dream::{
-    dht::{config::Args, start_dht},
-    utils::init_logger,
-};
+use dream::{config::CONFIG, dht::start_dht, utils::init_logger};
 
 #[tokio::main]
 async fn main() {
-    init_logger();
-
-    let args = Args::parse();
-    start_dht(&args).await;
+    init_logger(CONFIG.logging.modules.dht.as_str());
+    start_dht().await;
 }

@@ -1,5 +1,6 @@
 use std::{
     ops::Range,
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -8,20 +9,50 @@ use simplelog::*;
 use std::fs::File;
 use tokio::sync::Notify;
 
-pub fn init_logger() {
+use crate::config::CONFIG;
+
+fn get_log_level(level: &str) -> LevelFilter {
+    match level {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => LevelFilter::Info,
+    }
+}
+
+pub fn init_logger(level: &str) {
+    let log_path = PathBuf::from(&CONFIG.logging.log_file);
+    if !log_path.parent().unwrap().exists() {
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    }
+
+    let log_level = get_log_level(level);
+
     CombinedLogger::init(vec![
         TermLogger::new(
-            LevelFilter::Warn, // TODO: get terminal log level from toml config
+            log_level,
             Config::default(),
             TerminalMode::Mixed,
             ColorChoice::Auto,
         ),
         WriteLogger::new(
-            LevelFilter::Info, // TODO: get file output log level from toml config
+            log_level,
             Config::default(),
-            File::create("dream.log").unwrap(), // TODO: get log file path from toml config
+            File::create(log_path).unwrap(),
         ),
     ])
+    .unwrap();
+}
+
+pub fn init_logger_debug() {
+    CombinedLogger::init(vec![TermLogger::new(
+        LevelFilter::Debug,
+        Config::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )])
     .unwrap();
 }
 
@@ -85,6 +116,7 @@ impl Notifier {
 // TODO: structured logger
 
 // given a (start, end) inclusive byte range, what is the Range<u32> of pieces that it covers?
+// TODO: unit test needed
 pub fn byte_to_piece_range(start: u64, end: u64, piece_len: u64) -> Range<u64> {
     let start_piece = start / piece_len;
     let end_piece = end / piece_len;

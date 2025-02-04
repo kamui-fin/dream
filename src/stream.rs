@@ -22,13 +22,14 @@ use hyper::Result;
 use hyper::{header, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::info;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::config::CONFIG;
 use crate::msg::ServerMsg;
 
 static NOTFOUND: &[u8] = b"Not Found";
@@ -37,7 +38,7 @@ pub async fn start_server(
     engine_tx: Arc<mpsc::Sender<ServerMsg>>,
     output_dir: Arc<PathBuf>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr: SocketAddr = ([127, 0, 0, 1], 3000).into();
+    let addr: SocketAddr = ([127, 0, 0, 1], CONFIG.network.stream_server_port).into();
 
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on http://{}", addr);
@@ -109,6 +110,35 @@ async fn handle_stream_request(
     Ok(BodyExt::boxed(stream))
 }
 
+async fn get_meta_file_bytes(info_hash: &str) -> anyhow::Result<Vec<u8>> {
+    let url = format!(
+        "http://{}:{}/videos/_search",
+        CONFIG.network.elastic_search_ip, CONFIG.network.elastic_search_port
+    );
+
+    let query = serde_json::json!({
+        "query": {
+            "term": {
+                "infohash": info_hash
+            }
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let response = client.post(&url).json(&query).send().await.unwrap();
+
+    if response.status().is_success() {
+        let json: serde_json::Value = response.json().await.unwrap();
+        let hit = json["hits"]["hits"][0].as_object().unwrap();
+        let meta_file_bytes = hit["_source"]["meta_file_bytes"].as_str().unwrap();
+        let meta_file_bytes = hex::decode(meta_file_bytes).unwrap();
+
+        Ok(meta_file_bytes)
+    } else {
+        Err(anyhow::anyhow!("Failed to get meta file bytes"))
+    }
+}
+
 async fn video_handler(
     req: Request<impl Body>,
     engine_tx: Arc<mpsc::Sender<ServerMsg>>,
@@ -117,17 +147,18 @@ async fn video_handler(
     // Extract the `info_hash` from the path
     let path = req.uri().path().trim_start_matches('/');
 
-    path.is_empty();
-
     let info_hash_data = hex::decode(path).unwrap();
     let mut info_hash = [0; 20];
     info_hash.copy_from_slice(&info_hash_data);
+
+    // get torrent file data from elastic search using infohash as primary key
+    let meta_file_bytes = get_meta_file_bytes(path).await.unwrap();
 
     // send ADD_TORRENT to engine
     let (response_tx, response_rx) = oneshot::channel();
     engine_tx
         .send(ServerMsg::AddExternalTorrent {
-            input_path: PathBuf::from("test.torrent"), // figure out where to pull torrent file from for now
+            input_data: meta_file_bytes,
             output_dir: output_dir.to_path_buf(),
             response_tx,
         })
