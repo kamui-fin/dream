@@ -180,7 +180,16 @@ impl Engine {
                             // may decrease performance but increases availability of data across peers
                             let piece = bt.peer_manager.lock().await.get_rarest_piece().await;
                             if let Some(piece) = piece {
-                                bt.download_piece(piece as usize).await.unwrap();
+                                // only download if we don't already have it
+                                if !bt
+                                    .piece_store
+                                    .lock()
+                                    .await
+                                    .get_status_bitfield()
+                                    .piece_exists(piece as u32)
+                                {
+                                    bt.download_piece(piece as usize).await.unwrap();
+                                }
                             }
                         }
 

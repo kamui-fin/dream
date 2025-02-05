@@ -474,7 +474,7 @@ impl PeerManager {
 
     /* Choking algorithm */
 
-    pub async fn recompute_choke_list(&mut self, _torrent_state: TorrentState) {
+    pub async fn recompute_choke_list(&mut self, torrent_state: TorrentState) {
         // move optimistic unchoke peer to the end so we don't count it in our list of top peers
         let optimistic_unchoke = self
             .peers
@@ -483,14 +483,18 @@ impl PeerManager {
             .map(|pos| self.peers.remove(pos));
 
         // sort peers by average speed depending on torrent state
-        // self.peers.sort_by_key(|p| match torrent_state {
-        //     TorrentState::Seeder => {
-        //         self.stats_tracker.lock().unwrap()[&p.conn_info].upload_total_avg_kbps
-        //     }
-        //     TorrentState::Leecher => {
-        //         self.stats_tracker.lock().unwrap()[&p.conn_info].download_total_avg_kbps
-        //     }
-        // });
+        self.peers.sort_by_key(|p| match torrent_state {
+            TorrentState::Seeder => {
+                self.stats_tracker.lock().unwrap()[&p.conn_info]
+                    .upload
+                    .total_avg_kbps
+            }
+            TorrentState::Leecher => {
+                self.stats_tracker.lock().unwrap()[&p.conn_info]
+                    .download
+                    .total_avg_kbps
+            }
+        } as u32);
         self.peers.reverse();
 
         // select top peers (up to 4)
