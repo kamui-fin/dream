@@ -171,9 +171,19 @@ impl Engine {
                     info!("Piece len: {}", bt.meta_file.get_piece_len(0));
 
                     let last_piece = pieces_needed.end;
-
                     let mut curr_start = start;
+                    let window_size = CONFIG.stream.buffer_num_pieces;
+
                     for (i, piece) in pieces_needed.enumerate() {
+                        if i % window_size == 0 && CONFIG.stream.rarest_piece_enabled {
+                            // download rarest piece every now and then if enabled in config
+                            // may decrease performance but increases availability of data across peers
+                            let piece = bt.peer_manager.lock().await.get_rarest_piece().await;
+                            if let Some(piece) = piece {
+                                bt.download_piece(piece as usize).await.unwrap();
+                            }
+                        }
+
                         let mut piece_data: Vec<u8> = if bt
                             .piece_store
                             .lock()
@@ -185,7 +195,7 @@ impl Engine {
                             bt.piece_store.lock().await.get_piece_data_fs(piece as u32)
                         } else {
                             // download
-                            bt.download_piece(piece as usize).await.unwrap_or_default()
+                            bt.download_piece(piece as usize).await.unwrap()
                         };
                         let piece_len = piece_data.len() as u64;
                         // start truncation --> truncate start_of_piece to start % piece_len (NONE-INCLUSIVE)

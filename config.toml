@@ -35,7 +35,7 @@ piece_size = 2097152
 video_player = "mpv"
 # Number of pieces to buffer ahead during streaming.
 buffer_num_pieces = 10
-# Whether to enable downloading the rarest piece first (not implemented yet).
+# Whether to enable downloading the rarest piece first
 rarest_piece_enabled = false
 
 [network]

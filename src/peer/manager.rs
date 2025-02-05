@@ -531,6 +531,27 @@ impl PeerManager {
         }
     }
 
+    /* Piece selection */
+
+    pub async fn get_rarest_piece(&self) -> Option<u32> {
+        let mut rarest_piece = None;
+        let mut min_count = u32::MAX;
+
+        for piece_idx in 0..self.piece_store.lock().await.num_pieces {
+            let count: u32 = self
+                .peers
+                .iter()
+                .filter(|p| p.piece_lookup.piece_exists(piece_idx))
+                .count() as u32;
+            if count < min_count {
+                min_count = count as u32;
+                rarest_piece = Some(piece_idx);
+            }
+        }
+
+        rarest_piece
+    }
+
     /* Main bittorrent protocol handler */
 
     pub async fn handle_msg(&mut self, fw_msg: &InternalMessage) {
