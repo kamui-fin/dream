@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+use std::{cmp::min, collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info};
 use tokio::{
@@ -199,7 +199,7 @@ impl BitTorrent {
 
         self.show_interest_in_peers(&mut candidates).await;
 
-        let mut candidates_unchoked = self.get_unchoked_candidates(&candidates).await;
+        let mut candidates_unchoked = self.select_peers(piece_idx, num_blocks, &candidates).await;
         while candidates_unchoked.is_empty() {
             info!("Waiting for peer to unchoke us");
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -209,7 +209,7 @@ impl BitTorrent {
                 .await
                 .with_piece(piece_idx as u32)
                 .await;
-            candidates_unchoked = self.get_unchoked_candidates(&candidates).await;
+            candidates_unchoked = self.select_peers(piece_idx, num_blocks, &candidates).await;
         }
 
         self.distribute_blocks(&candidates_unchoked, piece_idx, num_blocks)
@@ -239,39 +239,78 @@ impl BitTorrent {
         }
     }
 
-    async fn get_unchoked_candidates(&self, candidates: &[ConnectionInfo]) -> Vec<ConnectionInfo> {
-        let mut candidates_unchoked = Vec::new();
+    async fn select_peers(
+        &self,
+        piece_idx: usize,
+        num_blocks: u32,
+        candidates: &[ConnectionInfo],
+    ) -> Vec<ConnectionInfo> {
+        let mut output = vec![];
+        let mut pm_guard = self.peer_manager.lock().await;
+        // remove optimistic unchoke
+        let optimistic_unchoke = {
+            let optimistic_unchoke = pm_guard
+                .peers
+                .iter()
+                .position(|item| item.optimistic_unchoke);
+            if let Some(pos) = optimistic_unchoke {
+                Some(pm_guard.peers.remove(pos))
+            } else {
+                None
+            }
+        };
+
+        // consider it individually
+        // check if it unchoked us and has the piece
+        if let Some(peer) = &optimistic_unchoke {
+            if !peer.peer_choking && peer.piece_lookup.piece_exists(piece_idx as u32) {
+                output.push(peer.conn_info.clone());
+            }
+        }
+
+        // get top K from rest
+        let mut candidates_unchoked = vec![];
         for candidate in candidates {
-            let guard = self.peer_manager.lock().await;
-            let peer = guard.find_peer(candidate);
+            let peer = pm_guard.find_peer(candidate);
             if let Some(peer) = peer {
                 if !peer.peer_choking {
                     candidates_unchoked.push(candidate.clone());
                 }
             }
         }
-        info!(
-            "{} matched candidates that haven't choked us",
-            candidates_unchoked.len()
-        );
-        candidates_unchoked
+
+        let num_blocks = match piece_idx {
+            0 => num_blocks / 1, // each peer gets its own block
+            1 => num_blocks / 2, // each peer gets two blocks
+            2 => num_blocks / 3, // each peer gets three blocks
+            _ => num_blocks / 4, // each peer gets four blocks
+        };
+        let num_peers = min(num_blocks, candidates_unchoked.len() as u32);
+        output.clone_from_slice(&candidates_unchoked[0..(num_peers as usize)]);
+
+        // push it back
+        if let Some(optimistic_peer) = optimistic_unchoke {
+            pm_guard.peers.push(optimistic_peer);
+        }
+
+        output
     }
 
     async fn distribute_blocks(
         &mut self,
-        candidates_unchoked: &[ConnectionInfo],
+        peers: &[ConnectionInfo],
         piece_idx: usize,
         num_blocks: u32,
     ) {
-        let blocks_per_peer = std::cmp::max(num_blocks / candidates_unchoked.len() as u32, 1);
+        let blocks_per_peer = std::cmp::max(num_blocks / peers.len() as u32, 1);
         info!(
             "Distributed {} blocks per peer. Total # of blocks: {}",
             blocks_per_peer, num_blocks
         );
 
-        for (i, peer) in candidates_unchoked.iter().enumerate() {
+        for (i, peer) in peers.iter().enumerate() {
             let start = i as u32 * blocks_per_peer;
-            let end = if i == candidates_unchoked.len() - 1 {
+            let end = if i == peers.len() - 1 {
                 num_blocks
             } else {
                 start + blocks_per_peer

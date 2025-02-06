@@ -11,7 +11,6 @@ pub mod session;
 pub mod stats;
 
 const HANDSHAKE_LEN: usize = 68;
-const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 const PROTOCOL_STR_LEN: usize = 19;
 const MAX_PIPELINE_SIZE: usize = 4;
 
@@ -31,9 +30,7 @@ pub struct RemotePeer {
     pub peer_choking: bool,    // has this peer choked us? = 1
     pub peer_interested: bool, // is this peer interested in us? = 0
     pub optimistic_unchoke: bool,
-
     pub pipeline: Vec<PipelineEntry>,
-    pub buffer: VecDeque<PipelineEntry>,
 }
 
 impl fmt::Debug for RemotePeer {
@@ -45,7 +42,6 @@ impl fmt::Debug for RemotePeer {
             .field("am_choking", &self.am_choking)
             .field("peer_interested", &self.peer_interested)
             .field("am_interested", &self.am_interested)
-            .field("queue", &self.buffer)
             .finish()
     }
 }
@@ -60,7 +56,6 @@ impl RemotePeer {
             peer_choking: true,
             peer_interested: false,
             pipeline: Vec::new(),
-            buffer: VecDeque::new(),
             optimistic_unchoke: false,
         }
     }

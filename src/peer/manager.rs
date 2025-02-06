@@ -1,4 +1,9 @@
-use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::FutureExt;
 use log::{error, info, trace, warn};
@@ -45,6 +50,7 @@ pub struct PeerManager {
     pub request_tracker: RequestTracker,
     pub stats_tracker: Arc<std::sync::Mutex<HashMap<ConnectionInfo, PeerStats>>>,
     pub global_stats: GlobalStats,
+    pub work_queue: VecDeque<PipelineEntry>,
 }
 
 impl PeerManager {
@@ -92,6 +98,7 @@ impl PeerManager {
                 num_pieces_pending: 0,
                 num_pieces_downloaded: 0,
             },
+            work_queue: VecDeque::new(),
         }
     }
 
@@ -743,8 +750,7 @@ impl PeerManager {
                 let work: Vec<PipelineEntry> = {
                     let peer = self.find_peer_mut(conn_info).unwrap();
                     let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
-                    work.extend(peer.buffer.drain(..));
-                    work
+                    ork
                 };
                 info!("Migrating work {:?}", work);
                 self.redistribute_work(conn_info, work).await;
