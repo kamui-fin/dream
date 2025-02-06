@@ -82,7 +82,8 @@ async fn handle_stream_request(
     info_hash: [u8; 20],
 ) -> std::result::Result<BoxBody<Bytes, std::io::Error>, Box<dyn std::error::Error>> {
     // consume engine_tx of ReadyData until has_more is false
-    let (stream_tx, stream_rx) = mpsc::channel(CONFIG.stream.buffer_num_pieces);
+    // let (stream_tx, stream_rx) = mpsc::channel(CONFIG.stream.buffer_num_pieces);
+    let (stream_tx, stream_rx) = mpsc::channel(2000);
 
     engine_tx
         .send(ServerMsg::StreamRequestRange {
@@ -210,7 +211,7 @@ async fn video_handler(
     let response = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(header::CONTENT_TYPE, mime_type)
-        .header(header::CONTENT_LENGTH, content_length)
+        // .header(header::CONTENT_LENGTH, content_length)
         .header(
             header::CONTENT_RANGE,
             format!("bytes {}-{}/{}", start, end, file_size),

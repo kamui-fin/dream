@@ -200,15 +200,8 @@ impl Piece {
                 self.downloaded_bytes,
                 self.buffer.len()
             );
-            let mut missing_pieces = vec![];
-            for i in 0..16 {
-                if !self.block_set.contains(&i) {
-                    missing_pieces.push(i);
-                }
-            }
-            info!("Missing pieces: {:?}", missing_pieces);
 
-            if self.downloaded_bytes as usize == self.buffer.len() {
+            if self.downloaded_bytes as usize >= self.buffer.len() {
                 self.status = RequestStatus::Received;
                 info!("The whole piece has been recieved");
                 // return something to indicate we need to notify bittorrent.rs about finished piece

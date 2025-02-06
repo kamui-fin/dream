@@ -196,6 +196,12 @@ impl BitTorrent {
         let piece_size = self.meta_file.get_piece_len(piece_idx);
         let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
 
+        self.peer_manager
+            .lock()
+            .await
+            .init_work_queue(piece_idx, num_blocks)
+            .await;
+
         let mut candidates = self
             .peer_manager
             .lock()
@@ -206,7 +212,8 @@ impl BitTorrent {
 
         self.show_interest_in_peers(&mut candidates).await;
 
-        let mut candidates_unchoked = self.select_peers(piece_idx, num_blocks, &candidates).await;
+        let (mut candidates_unchoked, mut num_blocks_per_peer) =
+            self.select_peers(piece_idx, num_blocks, &candidates).await;
         while candidates_unchoked.is_empty() {
             info!("Waiting for peer to unchoke us");
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -216,10 +223,11 @@ impl BitTorrent {
                 .await
                 .with_piece(piece_idx as u32)
                 .await;
-            candidates_unchoked = self.select_peers(piece_idx, num_blocks, &candidates).await;
+            (candidates_unchoked, num_blocks_per_peer) =
+                self.select_peers(piece_idx, num_blocks, &candidates).await;
         }
 
-        self.distribute_blocks(&candidates_unchoked, piece_idx, num_blocks)
+        self.distribute_blocks(&candidates_unchoked, num_blocks_per_peer)
             .await;
 
         info!("Waiting for all peers to finish work");
@@ -251,7 +259,7 @@ impl BitTorrent {
         piece_idx: usize,
         num_blocks: u32,
         candidates: &[ConnectionInfo],
-    ) -> Vec<ConnectionInfo> {
+    ) -> (Vec<ConnectionInfo>, u32) {
         let mut output = vec![];
         let mut pm_guard = self.peer_manager.lock().await;
         // remove optimistic unchoke
@@ -286,50 +294,36 @@ impl BitTorrent {
             }
         }
 
-        let num_blocks = match piece_idx {
-            0 => num_blocks / 1, // each peer gets its own block
-            1 => num_blocks / 2, // each peer gets two blocks
-            2 => num_blocks / 3, // each peer gets three blocks
-            _ => num_blocks / 4, // each peer gets four blocks
+        let num_blocks_per_peer = match piece_idx {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            _ => 4,
         };
-        let num_peers = min(num_blocks, candidates_unchoked.len() as u32);
-        output.clone_from_slice(&candidates_unchoked[0..(num_peers as usize)]);
+
+        let num_peers = num_blocks / num_blocks_per_peer;
+        let num_peers = min(num_peers, candidates_unchoked.len() as u32);
+        output.extend_from_slice(&candidates_unchoked[0..(num_peers as usize)]);
 
         // push it back
         if let Some(optimistic_peer) = optimistic_unchoke {
             pm_guard.peers.push(optimistic_peer);
         }
 
-        output
-    }
-
-    async fn distribute_blocks(
-        &mut self,
-        peers: &[ConnectionInfo],
-        piece_idx: usize,
-        num_blocks: u32,
-    ) {
-        let blocks_per_peer = std::cmp::max(num_blocks / peers.len() as u32, 1);
         info!(
-            "Distributed {} blocks per peer. Total # of blocks: {}",
-            blocks_per_peer, num_blocks
+            "Selected {} peers for piece with {num_blocks} blocks, each peer gets {num_blocks_per_peer} blocks",
+            output.len()
         );
 
-        for (i, peer) in peers.iter().enumerate() {
-            let start = i as u32 * blocks_per_peer;
-            let end = if i == peers.len() - 1 {
-                num_blocks
-            } else {
-                start + blocks_per_peer
-            };
+        (output, num_blocks_per_peer)
+    }
 
-            if end > num_blocks {
-                break;
-            }
+    async fn distribute_blocks(&mut self, peers: &[ConnectionInfo], num_blocks_per_peer: u32) {
+        for peer in peers {
             self.peer_manager
                 .lock()
                 .await
-                .queue_blocks(peer, piece_idx as u32, start..end)
+                .assign_start_work(peer, num_blocks_per_peer)
                 .await;
         }
     }

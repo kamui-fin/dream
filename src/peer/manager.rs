@@ -275,8 +275,8 @@ impl PeerManager {
         let peer = self.find_peer(conn_info);
         if let Some(peer) = peer {
             error!(
-                "Removing peer {:#?} with pipeline: {:#?} and buffer: {:#?}",
-                conn_info, peer.pipeline, peer.buffer
+                "Removing peer {:#?} with pipeline: {:#?}",
+                conn_info, peer.pipeline
             );
         } else {
             warn!("[DETETE_PEER] Peer {:#?} not found", conn_info);
@@ -292,42 +292,28 @@ impl PeerManager {
             .unwrap();
 
         let removed_peer = self.peers.swap_remove(index);
-        let mut work = removed_peer.pipeline;
-        work.extend(removed_peer.buffer);
+        let work = removed_peer.pipeline;
 
-        self.redistribute_work(conn_info, work).await;
+        self.reclaim_work(work).await;
     }
 
     /* Managing peer pipelines and distributing work evenly */
 
-    pub async fn queue_blocks(
-        &mut self,
-        conn_info: &ConnectionInfo,
-        piece_id: u32,
-        blocks: Range<u32>,
-    ) {
-        info!("Queuing blocks {:#?} for {piece_id}", blocks);
-        for block_id in blocks {
-            let entry = PipelineEntry { piece_id, block_id };
-            let peer = self.find_peer_mut(conn_info);
-            if let Some(peer) = peer {
-                if peer.pipeline.len() < MAX_PIPELINE_SIZE {
-                    peer.pipeline.push(entry.clone());
-                    self.request_block(entry, conn_info).await;
-                } else {
-                    peer.buffer.push_back(entry);
-                }
-            } else {
-                error!("[QUEUE_BLOCKS] Peer {:#?} not found", conn_info);
-            }
+    pub async fn init_work_queue(&mut self, piece_idx: usize, num_blocks: u32) {
+        for block_id in 0..num_blocks {
+            self.work_queue.push_back(PipelineEntry {
+                piece_id: piece_idx as u32,
+                block_id,
+            });
         }
+    }
 
-        let peer = self.find_peer(conn_info);
-        if let Some(peer) = peer {
-            info!(
-                "New pipeline: {:?} | New buffer: {:?}",
-                peer.pipeline, peer.buffer
-            );
+    pub async fn assign_start_work(&mut self, peer: &ConnectionInfo, num_blocks: u32) {
+        for _ in 0..num_blocks {
+            let entry = self.work_queue.pop_front();
+            if let Some(entry) = entry {
+                self.pipeline_enqueue(entry, peer).await;
+            }
         }
     }
 
@@ -341,62 +327,8 @@ impl PeerManager {
         }
     }
 
-    pub async fn redistribute_work(
-        &mut self,
-        conn_info: &ConnectionInfo,
-        mut work: Vec<PipelineEntry>,
-    ) {
-        if work.is_empty() {
-            return;
-        }
-
-        let mut peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
-
-        while peers_with_piece.is_empty() {
-            time::sleep(Duration::from_secs(5)).await;
-            peers_with_piece = self.get_peers_with_piece(conn_info, work[0].piece_id);
-        }
-
-        let blocks_per_peer = std::cmp::max(1, (work.len() / peers_with_piece.len()) as u32);
-        let batch_request =
-            self.distribute_work_to_peers(peers_with_piece, &mut work, blocks_per_peer);
-
-        self.request_blocks(batch_request).await;
-    }
-
-    fn distribute_work_to_peers(
-        &mut self,
-        peers_with_piece: Vec<ConnectionInfo>,
-        work: &mut Vec<PipelineEntry>,
-        blocks_per_peer: u32,
-    ) -> Vec<(PipelineEntry, ConnectionInfo)> {
-        let mut batch_request = vec![];
-
-        info!(
-            "Redistributing work of {} to {} peers ({} each)",
-            work.len(),
-            peers_with_piece.len(),
-            blocks_per_peer
-        );
-
-        for conn_info in peers_with_piece {
-            let peer = self.find_peer_mut(&conn_info).unwrap();
-            let end_index = if work.len() < blocks_per_peer as usize {
-                work.len()
-            } else {
-                blocks_per_peer as usize
-            };
-            for entry in work.drain(0..end_index) {
-                if peer.pipeline.len() < MAX_PIPELINE_SIZE {
-                    peer.pipeline.push(entry.clone());
-                    batch_request.push((entry, peer.conn_info.clone()));
-                } else {
-                    peer.buffer.push_back(entry);
-                }
-            }
-        }
-
-        batch_request
+    pub async fn reclaim_work(&mut self, work: Vec<PipelineEntry>) {
+        self.work_queue.extend(work);
     }
 
     /* Sending specific BitTorrent messages to peers */
@@ -668,8 +600,6 @@ impl PeerManager {
                             pay_load.extend_from_slice(&byte_offset.to_be_bytes());
                             pay_load.extend_from_slice(&target_block);
 
-                            info!("Payload in response to request ready to send");
-
                             self.send_channels[&conn_info.clone()]
                                 .send((MessageType::Piece.build_msg(pay_load), None))
                                 .await
@@ -704,12 +634,9 @@ impl PeerManager {
 
                         peer.pipeline.retain(|p| p.block_id != block_id);
 
-                        info!(
-                            "AFTER: Peer {:?} has pipeline: {:?} and buffer: {:?}",
-                            peer, peer.pipeline, peer.buffer
-                        );
+                        // info!("AFTER: Peer {:?} has pipeline: {:?}", peer, peer.pipeline);
 
-                        let entry = peer.buffer.pop_front();
+                        let entry = self.work_queue.pop_front();
 
                         self.request_tracker.resolve_request(PipelineEntry {
                             piece_id: piece_idx,
@@ -749,11 +676,11 @@ impl PeerManager {
                 // pop all items from peer's pipeline and buffer
                 let work: Vec<PipelineEntry> = {
                     let peer = self.find_peer_mut(conn_info).unwrap();
-                    let mut work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
-                    ork
+                    let work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
+                    work
                 };
                 info!("Migrating work {:?}", work);
-                self.redistribute_work(conn_info, work).await;
+                self.reclaim_work(work).await;
             }
 
             InternalMessagePayload::UpdateDownloadSpeed { speed } => {

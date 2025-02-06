@@ -132,7 +132,7 @@ impl Engine {
                         error!("Failed to parse torrent file: {:?}", e);
                     }
                     Ok(meta_file) => {
-                        info!("Successfully parsed torrent file: {:?}", meta_file);
+                        info!("Successfully parsed torrent file");
                         if let Err(e) = self.add_torrent(meta_file, output_dir, response_tx).await {
                             error!("Failed to add torrent: {:?}", e);
                         }
@@ -145,9 +145,9 @@ impl Engine {
                 info_hash,
                 response_tx,
             } => {
-                if let Some(last_stream) = &self.last_stream_handle {
-                    last_stream.abort();
-                }
+                // if let Some(last_stream) = &self.last_stream_handle {
+                //     last_stream.abort();
+                // }
 
                 let idx = self
                     .info_hashes
@@ -158,17 +158,10 @@ impl Engine {
                 let bt = self.torrents[idx].clone();
                 self.last_stream_handle = Some(tokio::spawn(async move {
                     let mut bt = bt.lock().await;
-                    info!(
-                        "Bitfield: {:?}",
-                        bt.piece_store.lock().await.get_missing_pieces()
-                    );
-
                     let pieces_needed =
                         utils::byte_to_piece_range(start, end + 1, bt.meta_file.get_piece_len(0));
 
                     info!("Pieces needed: {:?}", pieces_needed);
-
-                    info!("Piece len: {}", bt.meta_file.get_piece_len(0));
 
                     let last_piece = pieces_needed.end;
                     let mut curr_start = start;
@@ -211,6 +204,7 @@ impl Engine {
                         // end truncation --> truncate end+1 till the end_of_piece (INCLUSIVE) end
                         let normal_piece_len = bt.meta_file.get_piece_len(0);
 
+                        // FIXME: attempt to calculate the remainder with a divisor of zero
                         if curr_start == start && curr_start % piece_len != 0 {
                             piece_data = piece_data[(start % piece_len) as usize..].to_vec();
                         }

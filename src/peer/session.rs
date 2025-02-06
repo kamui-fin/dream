@@ -275,9 +275,7 @@ impl PeerSession {
                         self.forwarder.send(close_msg).await.unwrap();
                         return;
                     }
-                    info!("PeerSession sent {:?} successfully", keepalive_msg);
                     keepalive_sender.as_mut().reset(Instant::now() + Duration::from_secs(KEEPALIVE_SENDER_TIMEOUT));
-                    info!("Timer reset for keepalive sender");
                 }
                 _ = &mut keepalive_receiver => {
                     warn!("No message received in the past {} seconds, closing connection to peer {:#?}", KEEPALIVE_RECEIVER_TIMEOUT, self.peer);
