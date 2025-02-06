@@ -53,14 +53,13 @@ cp config.toml ~/.config/dream
 
 Update the following variables in `~/.config/dream/config.toml`:
 
--   `bootstrap_ip`: IP of the bootstrap server (use `localhost` if starting a new network).
--   `output_dir`: Directory where downloaded video files are stored.
--   `private_dht`: Enable this if you want to restrict the network to private use.
+-   `network/elastic_search_ip`: IP of the bootstrap server (leave as `127.0.0.1` if starting a new network).
+-   `general/output_dir`: Directory where downloaded video files are stored.
+-   `dht/enabled`: If you are willing to port forward (allowing you to use DHT), enable this. 
 
-3. Forward necessary ports on your router:
+3. (optional, but recommended) Forward necessary ports on your router:
 
--   BitTorrent (default: 6881)
--   DHT (default: 8999)
+-   BitTorrent and DHT (default: 6881)
 -   ElasticSearch (default: 9200) if acting as a bootstrap node.
 
 4. Start the required services:
@@ -102,7 +101,13 @@ dream-cli stream "query"
 
 ### Bootstrap Node
 
-A bootstrap node serves as the entry point to a Dream network by providing peers with initial connection information. In addition to this role, bootstrap nodes currently maintain an index of all available videos for search functionality (e.g., fuzzy search). Future updates aim to decentralize this indexing process for greater scalability.
+A bootstrap node serves as the entry point to a Dream network. Bootstrap nodes currently maintain an index of all available videos for search functionality (e.g., fuzzy search). Future updates aim to decentralize this indexing process for greater scalability. 
+
+### Port Forwarding
+
+This step is important if you're trying to upload videos to the network. It allows you to run the DHT, which distributes important information about peers to download your file. 
+
+If you simply wish to use Dream with existing torrents, you can skip this step. 
 
 ## Contributing
 

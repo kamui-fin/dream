@@ -13,7 +13,9 @@ dht = "warn"
 torrent = "error"
 
 [dht]
-# Whether to always use DHT for peer discovery (false disables it).
+# If port forwarding is disabled, DHT cannot be used
+enabled = true
+# Whether to always use DHT for peer discovery (false means it uses DHT as fallback).
 always_use_dht = false
 # Maximum number of peers that can be requested at a time.
 max_num_peers_request = 100
@@ -45,7 +47,7 @@ elastic_search_ip = "127.0.0.1"
 dht_bootstrap = "router.bittorrent.com:6881"
 
 # Port configurations for various services:
-dht_port = 8999               # Port used by DHT for peer-to-peer communication.
+dht_port = 6881               # Port used by DHT for peer-to-peer communication.
 dht_api_port = 9999           # Port used by the DHT API for external communication.
 elastic_search_port = 9200    # Port used by ElasticSearch for indexing and search.
 torrent_port = 6881           # Port used by the BitTorrent protocol for peer connections.

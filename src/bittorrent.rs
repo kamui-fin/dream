@@ -70,14 +70,21 @@ impl BitTorrent {
 
     async fn fetch_peers(meta_file: &Metafile) -> anyhow::Result<Vec<ConnectionInfo>> {
         if CONFIG.dht.always_use_dht {
-            return tracker::get_peers_from_dht(meta_file.get_info_hash());
+            if !CONFIG.dht.enabled {
+                return Err(anyhow::anyhow!("DHT is not enabled"));
+            } else {
+                return tracker::get_peers_from_dht(meta_file.get_info_hash());
+            }
         }
 
         let peers = if let Some(tracker_url) = &meta_file.get_announce() {
             tracker::get_peers_from_tracker(tracker_url, tracker::TrackerRequest::new(meta_file))?
-        } else {
+        } else if CONFIG.dht.enabled {
             tracker::get_peers_from_dht(meta_file.get_info_hash())?
+        } else {
+            return Err(anyhow::anyhow!("No tracker found and DHT not enabled"));
         };
+
         Ok(peers)
     }
 

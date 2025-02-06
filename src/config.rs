@@ -41,6 +41,7 @@ pub struct LogModules {
 
 #[derive(Debug, Deserialize)]
 pub struct DHTConfig {
+    pub enabled: bool,
     pub always_use_dht: bool,
     pub max_num_peers_request: usize,
     pub bucket_refresh_interval: u64,
