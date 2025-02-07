@@ -4,7 +4,7 @@ use log::{error, info};
 use tokio::{
     sync::{
         mpsc::{self, Receiver},
-        Mutex,
+        Mutex, Notify,
     },
     time::{sleep, Instant},
 };
@@ -42,6 +42,7 @@ impl BitTorrent {
         let piece_store = Arc::new(Mutex::new(piece_store));
 
         let (msg_tx, msg_rx) = mpsc::channel(2000);
+
         let notify_pipelines_empty = Arc::new(Notifier::new());
 
         let peers = Self::fetch_peers(&meta_file).await?;
@@ -183,10 +184,9 @@ impl BitTorrent {
         peer_manager: Arc<Mutex<PeerManager>>,
     ) {
         loop {
-            let int_msg = msg_rx.recv().await;
-            if let Some(int_msg) = &int_msg {
-                info!("Received {:#?}", int_msg.payload);
-                peer_manager.lock().await.handle_msg(int_msg).await;
+            if let Some(int_msg) = msg_rx.recv().await {
+                // info!("Received {:#?}", int_msg.payload);
+                peer_manager.lock().await.handle_msg(&int_msg).await;
             }
         }
     }
@@ -196,39 +196,11 @@ impl BitTorrent {
         let piece_size = self.meta_file.get_piece_len(piece_idx);
         let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
 
-        self.peer_manager
-            .lock()
-            .await
-            .init_work_queue(piece_idx, num_blocks)
-            .await;
-
-        let mut candidates = self
-            .peer_manager
-            .lock()
-            .await
-            .with_piece(piece_idx as u32)
-            .await;
-        info!("Found {} peers with piece {piece_idx}", candidates.len());
-
-        self.show_interest_in_peers(&mut candidates).await;
-
-        let (mut candidates_unchoked, mut num_blocks_per_peer) =
-            self.select_peers(piece_idx, num_blocks, &candidates).await;
-        while candidates_unchoked.is_empty() {
-            info!("Waiting for peer to unchoke us");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            candidates = self
-                .peer_manager
-                .lock()
-                .await
-                .with_piece(piece_idx as u32)
-                .await;
-            (candidates_unchoked, num_blocks_per_peer) =
-                self.select_peers(piece_idx, num_blocks, &candidates).await;
+        {
+            let mut pm_guard = self.peer_manager.lock().await;
+            pm_guard.init_work_queue(piece_idx, num_blocks).await;
+            pm_guard.start_work().await;
         }
-
-        self.distribute_blocks(&candidates_unchoked, num_blocks_per_peer)
-            .await;
 
         info!("Waiting for all peers to finish work");
         self.notify_pipelines_empty.wait_for_notification().await;
@@ -242,90 +214,6 @@ impl BitTorrent {
         );
 
         Ok(piece_data)
-    }
-
-    async fn show_interest_in_peers(&mut self, candidates: &mut Vec<ConnectionInfo>) {
-        for candidate in candidates.iter_mut() {
-            self.peer_manager
-                .lock()
-                .await
-                .show_interest_in_peer(candidate)
-                .await;
-        }
-    }
-
-    async fn select_peers(
-        &self,
-        piece_idx: usize,
-        num_blocks: u32,
-        candidates: &[ConnectionInfo],
-    ) -> (Vec<ConnectionInfo>, u32) {
-        let mut output = vec![];
-        let mut pm_guard = self.peer_manager.lock().await;
-        // remove optimistic unchoke
-        let optimistic_unchoke = {
-            let optimistic_unchoke = pm_guard
-                .peers
-                .iter()
-                .position(|item| item.optimistic_unchoke);
-            if let Some(pos) = optimistic_unchoke {
-                Some(pm_guard.peers.remove(pos))
-            } else {
-                None
-            }
-        };
-
-        // consider it individually
-        // check if it unchoked us and has the piece
-        if let Some(peer) = &optimistic_unchoke {
-            if !peer.peer_choking && peer.piece_lookup.piece_exists(piece_idx as u32) {
-                output.push(peer.conn_info.clone());
-            }
-        }
-
-        // get top K from rest
-        let mut candidates_unchoked = vec![];
-        for candidate in candidates {
-            let peer = pm_guard.find_peer(candidate);
-            if let Some(peer) = peer {
-                if !peer.peer_choking {
-                    candidates_unchoked.push(candidate.clone());
-                }
-            }
-        }
-
-        let num_blocks_per_peer = match piece_idx {
-            0 => 1,
-            1 => 2,
-            2 => 3,
-            _ => 4,
-        };
-
-        let num_peers = num_blocks / num_blocks_per_peer;
-        let num_peers = min(num_peers, candidates_unchoked.len() as u32);
-        output.extend_from_slice(&candidates_unchoked[0..(num_peers as usize)]);
-
-        // push it back
-        if let Some(optimistic_peer) = optimistic_unchoke {
-            pm_guard.peers.push(optimistic_peer);
-        }
-
-        info!(
-            "Selected {} peers for piece with {num_blocks} blocks, each peer gets {num_blocks_per_peer} blocks",
-            output.len()
-        );
-
-        (output, num_blocks_per_peer)
-    }
-
-    async fn distribute_blocks(&mut self, peers: &[ConnectionInfo], num_blocks_per_peer: u32) {
-        for peer in peers {
-            self.peer_manager
-                .lock()
-                .await
-                .assign_start_work(peer, num_blocks_per_peer)
-                .await;
-        }
     }
 
     async fn verify_and_persist_piece(&mut self, piece_idx: usize) -> anyhow::Result<Vec<u8>> {

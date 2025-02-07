@@ -1,4 +1,5 @@
 use std::{
+    cmp::min,
     collections::{HashMap, VecDeque},
     ops::Range,
     sync::Arc,
@@ -12,7 +13,7 @@ use tokio::{
     net::TcpStream,
     sync::{
         mpsc::{self, Sender},
-        Mutex,
+        Mutex, Notify,
     },
     time::{self, sleep},
 };
@@ -329,6 +330,108 @@ impl PeerManager {
 
     pub async fn reclaim_work(&mut self, work: Vec<PipelineEntry>) {
         self.work_queue.extend(work);
+    }
+
+    pub async fn start_work(&mut self) {
+        let piece_idx = self.work_queue.get(0).map(|p| p.piece_id);
+        if piece_idx.is_none() {
+            return;
+        }
+
+        let piece_idx = piece_idx.unwrap();
+
+        let mut candidates = self.with_piece(piece_idx).await;
+
+        let num_blocks = self.work_queue.len() as u32;
+
+        info!("Found {} peers with piece {piece_idx}", candidates.len());
+
+        self.show_interest_in_peers(&mut candidates).await;
+
+        let (mut candidates_unchoked, mut num_blocks_per_peer) =
+            self.select_peers(piece_idx, num_blocks, &candidates).await;
+        while candidates_unchoked.is_empty() {
+            info!("Waiting for peer to unchoke us");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            candidates = self.with_piece(piece_idx as u32).await;
+            (candidates_unchoked, num_blocks_per_peer) =
+                self.select_peers(piece_idx, num_blocks, &candidates).await;
+        }
+
+        self.distribute_blocks(&candidates_unchoked, num_blocks_per_peer)
+            .await;
+    }
+
+    async fn show_interest_in_peers(&mut self, candidates: &mut Vec<ConnectionInfo>) {
+        for candidate in candidates.iter_mut() {
+            self.show_interest_in_peer(candidate).await;
+        }
+    }
+
+    async fn select_peers(
+        &mut self,
+        piece_idx: u32,
+        num_blocks: u32,
+        candidates: &[ConnectionInfo],
+    ) -> (Vec<ConnectionInfo>, u32) {
+        let mut output = vec![];
+        // remove optimistic unchoke
+        let optimistic_unchoke = {
+            let optimistic_unchoke = self.peers.iter().position(|item| item.optimistic_unchoke);
+            if let Some(pos) = optimistic_unchoke {
+                Some(self.peers.remove(pos))
+            } else {
+                None
+            }
+        };
+
+        // consider it individually
+        // check if it unchoked us and has the piece
+        if let Some(peer) = &optimistic_unchoke {
+            if !peer.peer_choking && peer.piece_lookup.piece_exists(piece_idx as u32) {
+                output.push(peer.conn_info.clone());
+            }
+        }
+
+        // get top K from rest
+        let mut candidates_unchoked = vec![];
+        for candidate in candidates {
+            let peer = self.find_peer(candidate);
+            if let Some(peer) = peer {
+                if !peer.peer_choking {
+                    candidates_unchoked.push(candidate.clone());
+                }
+            }
+        }
+
+        let num_blocks_per_peer = match piece_idx {
+            0 => 1,
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        };
+
+        let num_peers = num_blocks / num_blocks_per_peer;
+        let num_peers = min(num_peers, candidates_unchoked.len() as u32);
+        output.extend_from_slice(&candidates_unchoked[0..(num_peers as usize)]);
+
+        // push it back
+        if let Some(optimistic_peer) = optimistic_unchoke {
+            self.peers.push(optimistic_peer);
+        }
+
+        info!(
+            "Selected {} peers for piece with {num_blocks} blocks, each peer gets {num_blocks_per_peer} blocks",
+            output.len()
+        );
+
+        (output, num_blocks_per_peer)
+    }
+
+    async fn distribute_blocks(&mut self, peers: &[ConnectionInfo], num_blocks_per_peer: u32) {
+        for peer in peers {
+            self.assign_start_work(peer, num_blocks_per_peer).await;
+        }
     }
 
     /* Sending specific BitTorrent messages to peers */
@@ -679,6 +782,14 @@ impl PeerManager {
                     let work: Vec<PipelineEntry> = peer.pipeline.drain(..).collect();
                     work
                 };
+
+                // check if all other peers have empty pipeline
+                let all_empty = self.peers.iter().all(|p| p.pipeline.is_empty());
+
+                if all_empty {
+                    self.start_work().await;
+                }
+
                 info!("Migrating work {:?}", work);
                 self.reclaim_work(work).await;
             }
