@@ -1,23 +1,18 @@
 use anyhow::Context;
 use clap::Parser;
-use config::Config;
 use dream::{
     config::{Cli, Commands, CONFIG},
     dht::key::{get_node_id_path, read_node_id},
     metafile::Metafile,
-    utils::{init_logger, init_logger_debug},
 };
 use hex::encode;
-use hyper::ext;
-use log::{info, warn};
-use mime_guess::mime;
-use rand::Rng;
+use log::info;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
     fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     path::Path,
 };
 

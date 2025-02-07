@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fmt};
+use std::fmt;
 
 use lazy_static::lazy_static;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
@@ -12,7 +12,6 @@ pub mod stats;
 
 const HANDSHAKE_LEN: usize = 68;
 const PROTOCOL_STR_LEN: usize = 19;
-const MAX_PIPELINE_SIZE: usize = 4;
 
 lazy_static! {
     pub static ref DREAM_ID: String = thread_rng()

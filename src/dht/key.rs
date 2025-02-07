@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use directories::ProjectDirs;
@@ -141,10 +141,10 @@ pub fn get_node_id_path() -> PathBuf {
     let data_dir = proj_dirs.data_dir();
     // create directory
     if !data_dir.exists() {
-        fs::create_dir_all(&data_dir).expect("Unable to create directory");
+        fs::create_dir_all(data_dir).expect("Unable to create directory");
     }
-    let node_id_path = data_dir.join("config.toml");
-    node_id_path
+
+    data_dir.join("config.toml")
 }
 
 pub fn generate_node_id() -> Key {

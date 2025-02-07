@@ -1,21 +1,19 @@
 use std::{
     cmp::min,
     collections::{HashMap, VecDeque},
-    ops::Range,
     sync::Arc,
     time::Duration,
 };
 
-use futures::FutureExt;
 use log::{error, info, trace, warn};
 use rand::{rngs::OsRng, Rng};
 use tokio::{
     net::TcpStream,
     sync::{
         mpsc::{self, Sender},
-        Mutex, Notify,
+        Mutex,
     },
-    time::{self, sleep},
+    time::sleep,
 };
 
 use super::{
@@ -27,7 +25,6 @@ use crate::{
     bittorrent::TorrentState,
     config::CONFIG,
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
-    peer::MAX_PIPELINE_SIZE,
     piece::{BitField, PieceStore},
     tracker::{self},
     utils::{slice_to_u32_msb, Notifier},
@@ -333,7 +330,7 @@ impl PeerManager {
     }
 
     pub async fn start_work(&mut self) {
-        let piece_idx = self.work_queue.get(0).map(|p| p.piece_id);
+        let piece_idx = self.work_queue.front().map(|p| p.piece_id);
         if piece_idx.is_none() {
             return;
         }
@@ -353,7 +350,7 @@ impl PeerManager {
         while candidates_unchoked.is_empty() {
             info!("Waiting for peer to unchoke us");
             tokio::time::sleep(Duration::from_secs(5)).await;
-            candidates = self.with_piece(piece_idx as u32).await;
+            candidates = self.with_piece(piece_idx).await;
             (candidates_unchoked, num_blocks_per_peer) =
                 self.select_peers(piece_idx, num_blocks, &candidates).await;
         }
@@ -388,7 +385,7 @@ impl PeerManager {
         // consider it individually
         // check if it unchoked us and has the piece
         if let Some(peer) = &optimistic_unchoke {
-            if !peer.peer_choking && peer.piece_lookup.piece_exists(piece_idx as u32) {
+            if !peer.peer_choking && peer.piece_lookup.piece_exists(piece_idx) {
                 output.push(peer.conn_info.clone());
             }
         }
@@ -590,7 +587,7 @@ impl PeerManager {
                 .filter(|p| p.piece_lookup.piece_exists(piece_idx))
                 .count() as u32;
             if count < min_count {
-                min_count = count as u32;
+                min_count = count;
                 rarest_piece = Some(piece_idx);
             }
         }
@@ -736,8 +733,6 @@ impl PeerManager {
                         );
 
                         peer.pipeline.retain(|p| p.block_id != block_id);
-
-                        // info!("AFTER: Peer {:?} has pipeline: {:?}", peer, peer.pipeline);
 
                         let entry = self.work_queue.pop_front();
 

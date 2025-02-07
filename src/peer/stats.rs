@@ -44,7 +44,6 @@ impl Stat {
 
         // newest average becomes historical (so we can use in algos)
         self.total_avg_kbps = current_window_kbps;
-        // info!("total_avg_kbps: {:#?}", self.total_avg_kbps);
 
         // track historical kb downloaded
         self.total_kb += self.current_blocks_downloaded * kb_per_block;

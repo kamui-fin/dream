@@ -297,10 +297,10 @@ impl Kademlia {
     }
 
     pub async fn join_dht_network(self: Arc<Self>, bootstrap_node: Node) {
-        // info!(
-        //     "Joining network through bootstrap id = {}",
-        //     bootstrap_node.id
-        // );
+        info!(
+            "Joining network through bootstrap id = {}",
+            bootstrap_node.id
+        );
         // 1. initialize k-bucket with another known node
         self.context
             .routing_table
@@ -389,7 +389,7 @@ impl Kademlia {
 
         let mut buf = [0; 2048];
         match timeout(Duration::from_millis(500), self.socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, addr))) => {
+            Ok(Ok((len, _))) => {
                 let response: KrpcSuccessResponse = serde_bencode::from_bytes(&buf[..len]).unwrap();
                 Some(response)
             }
@@ -897,8 +897,7 @@ impl Kademlia {
                 }
             };
 
-            info!("Received query from {:#?}", addr);
-            info!("{:?}", query);
+            info!("Received query {:?} from {:#?}", query, addr);
 
             let source_id = query.a.get("id").unwrap().into();
             let source_node = Node::from_addr(source_id, addr);

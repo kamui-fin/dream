@@ -1,10 +1,10 @@
-use std::{cmp::min, collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use log::{error, info};
 use tokio::{
     sync::{
         mpsc::{self, Receiver},
-        Mutex, Notify,
+        Mutex,
     },
     time::{sleep, Instant},
 };

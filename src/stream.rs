@@ -32,8 +32,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::config::CONFIG;
 use crate::msg::ServerMsg;
 
-static NOTFOUND: &[u8] = b"Not Found";
-
 pub async fn start_server(
     engine_tx: Arc<mpsc::Sender<ServerMsg>>,
     output_dir: Arc<PathBuf>,
@@ -71,7 +69,11 @@ pub async fn start_server(
 fn not_found() -> Response<BoxBody<Bytes, std::io::Error>> {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
-        .body(Full::new(NOTFOUND.into()).map_err(|e| match e {}).boxed())
+        .body(
+            Full::new("Not Found".into())
+                .map_err(|e| match e {})
+                .boxed(),
+        )
         .unwrap()
 }
 
@@ -83,7 +85,7 @@ async fn handle_stream_request(
 ) -> std::result::Result<BoxBody<Bytes, std::io::Error>, Box<dyn std::error::Error>> {
     // consume engine_tx of ReadyData until has_more is false
     // let (stream_tx, stream_rx) = mpsc::channel(CONFIG.stream.buffer_num_pieces);
-    let (stream_tx, stream_rx) = mpsc::channel(2000);
+    let (stream_tx, stream_rx) = mpsc::channel(CONFIG.stream.buffer_num_pieces);
 
     engine_tx
         .send(ServerMsg::StreamRequestRange {
@@ -190,8 +192,6 @@ async fn video_handler(
         end - start + 1,
         file_size
     );
-
-    let content_length = end - start + 1;
 
     // Using the range, determine the necessary piece(s)
     // --> [client] MPSC SEND: StreamRequestRange(start, end, info_hash)

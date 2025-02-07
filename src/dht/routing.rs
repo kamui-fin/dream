@@ -1,7 +1,6 @@
 use std::collections::LinkedList;
 
 use num_bigint::{BigUint, RandBigInt};
-use rand::Rng;
 use serde::Serialize;
 
 use crate::{config::CONFIG, dht::node::Node};
@@ -109,21 +108,6 @@ impl RoutingTable {
         true
     }
 
-    fn generate_random_id_in_range(start: &[u8; 20], end: &[u8; 20]) -> [u8; 20] {
-        let mut rng = rand::thread_rng();
-        let mut id = [0u8; 20];
-
-        // Generate ID within bucket's XOR distance range
-        for i in 0..20 {
-            let min = start[i];
-            let max = end[i];
-            id[i] = rng.gen_range(min..=max);
-        }
-
-        id
-    }
-
-    // TODO: test
     pub fn get_refresh_target(&self, bucket_idx: usize) -> Key {
         let start = BigUint::from(1u8) << (ID_SIZE * 8 - bucket_idx - 1);
         let end = BigUint::from(1u8) << ((ID_SIZE * 8 - bucket_idx) as u32);

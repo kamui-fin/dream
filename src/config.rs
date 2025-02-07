@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
-use directories::{BaseDirs, ProjectDirs, UserDirs};
+use directories::ProjectDirs;
 use serde::Deserialize;
-use std::{collections::HashMap, fs};
+use std::fs;
 
 lazy_static! {
     pub static ref CONFIG: Config = Config::new();
@@ -91,6 +91,12 @@ pub fn get_config_path() -> String {
     let config_dir = proj_dirs.config_dir();
     let config_path = config_dir.join("config.toml");
     config_path.to_str().unwrap().to_string()
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Config {

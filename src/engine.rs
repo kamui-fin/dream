@@ -179,7 +179,7 @@ impl Engine {
                                     .lock()
                                     .await
                                     .get_status_bitfield()
-                                    .piece_exists(piece as u32)
+                                    .piece_exists(piece)
                                 {
                                     bt.download_piece(piece as usize).await.unwrap();
                                 }
