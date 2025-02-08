@@ -86,7 +86,6 @@ impl Engine {
         }
     }
 
-    // FIXME: replace assert with proper error handling
     async fn handle_new_connection(
         &mut self,
         mut socket: TcpStream,
@@ -99,8 +98,10 @@ impl Engine {
         let mut res = [0u8; 68];
         socket.read_exact(&mut res).await?;
 
-        assert_eq!(res[0], 19);
-        assert_eq!(&res[1..20], b"BitTorrent protocol");
+        if res[0] != 19 || &res[1..20] != b"BitTorrent protocol" {
+            error!("Invalid handshake");
+            return Ok(());
+        }
 
         let info_hash: [u8; 20] = res[28..48].try_into().unwrap();
 

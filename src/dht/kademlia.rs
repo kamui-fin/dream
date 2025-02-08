@@ -980,12 +980,12 @@ impl Kademlia {
                     );
 
                     // FIXME: this causes an infinite loop if the oldest node doesn't respond!
-                    let mut response = self.send_ping(oldest_node.addr).await;
+                    let mut response = self.send_ping_init(&oldest_node.addr.to_string()).await;
 
                     // retry once
                     if response.is_none() {
                         info!("Node {:?} didn't respond to node {:?}'s ping and the ping is being retried", oldest_node.id, self.context.node.id);
-                        response = self.send_ping(oldest_node.addr).await;
+                        response = self.send_ping_init(&oldest_node.addr.to_string()).await;
                     }
 
                     // if we get a response, we need to upsert the oldest node and update its last seen and continue our search

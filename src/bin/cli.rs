@@ -6,7 +6,7 @@ use dream::{
     metafile::Metafile,
 };
 use hex::encode;
-use log::info;
+use log::{error, info};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -78,6 +78,26 @@ async fn fuzzy_search_video_title(
     }
 }
 
+async fn announce_to_dht(infohash: String) {
+    if CONFIG.dht.enabled == false {
+        panic!("DHT is not enabled");
+    }
+    let url = format!(
+        "http://localhost:{}/announce/{}",
+        CONFIG.network.dht_port, infohash
+    );
+    let response = reqwest::get(&url).await.unwrap();
+
+    if response.status().is_success() {
+        info!("Announced to DHT successfully: {:?}", infohash);
+    } else {
+        error!(
+            "Failed to announce to DHT: {:?}",
+            response.text().await.unwrap()
+        );
+    }
+}
+
 async fn upload_torrent(
     client: &Client,
     file_path: Option<&Path>,
@@ -95,6 +115,9 @@ async fn upload_torrent(
             fs::create_dir_all(&output_dir).unwrap();
         }
         fs::rename(file_path, output_dir.join(file_path.file_name().unwrap())).unwrap();
+
+        // also means we need to announce to the DHT
+        announce_to_dht(infohash.clone()).await;
     }
     let new_record = VideoRecord {
         infohash,
