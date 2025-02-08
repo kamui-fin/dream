@@ -238,19 +238,6 @@ impl PeerManager {
             .find(|curr_peer| curr_peer.conn_info == *peer)
     }
 
-    fn get_peers_with_piece(
-        &mut self,
-        conn_info: &ConnectionInfo,
-        piece_id: u32,
-    ) -> Vec<ConnectionInfo> {
-        self.peers
-            .iter_mut()
-            .filter(|p| p.piece_lookup.piece_exists(piece_id))
-            .filter(|p| p.conn_info != *conn_info && !p.peer_choking)
-            .map(|p| p.conn_info.clone())
-            .collect()
-    }
-
     pub async fn with_piece(&self, piece_idx: u32) -> Vec<ConnectionInfo> {
         let mut result = Vec::new();
         for peer in &self.peers {
@@ -329,34 +316,29 @@ impl PeerManager {
         self.work_queue.extend(work);
     }
 
-    pub async fn start_work(&mut self) {
+    pub async fn start_work(&mut self) -> anyhow::Result<()> {
         let piece_idx = self.work_queue.front().map(|p| p.piece_id);
         if piece_idx.is_none() {
-            return;
+            return Err(anyhow::anyhow!("No work to start"));
         }
-
         let piece_idx = piece_idx.unwrap();
 
         let mut candidates = self.with_piece(piece_idx).await;
-
         let num_blocks = self.work_queue.len() as u32;
-
         info!("Found {} peers with piece {piece_idx}", candidates.len());
 
         self.show_interest_in_peers(&mut candidates).await;
-
-        let (mut candidates_unchoked, mut num_blocks_per_peer) =
+        let (candidates_unchoked, num_blocks_per_peer) =
             self.select_peers(piece_idx, num_blocks, &candidates).await;
-        while candidates_unchoked.is_empty() {
-            info!("Waiting for peer to unchoke us");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            candidates = self.with_piece(piece_idx).await;
-            (candidates_unchoked, num_blocks_per_peer) =
-                self.select_peers(piece_idx, num_blocks, &candidates).await;
+
+        if candidates_unchoked.is_empty() {
+            return Err(anyhow::anyhow!("No peers found"));
         }
 
         self.distribute_blocks(&candidates_unchoked, num_blocks_per_peer)
             .await;
+
+        Ok(())
     }
 
     async fn show_interest_in_peers(&mut self, candidates: &mut Vec<ConnectionInfo>) {

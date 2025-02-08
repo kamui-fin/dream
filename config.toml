@@ -8,9 +8,9 @@ log_file = "dream.log"
 
 [logging.modules]
 # Log level for the DHT module (e.g., "warn" for warnings).
-dht = "warn"
+dht = "info"
 # Log level for the torrent module (e.g., "error" for errors only).
-torrent = "error"
+torrent = "info"
 
 [dht]
 # If port forwarding is disabled, DHT cannot be used
@@ -48,7 +48,7 @@ dht_bootstrap = "router.bittorrent.com:6881"
 
 # Port configurations for various services:
 dht_port = 6881               # Port used by DHT for peer-to-peer communication.
-dht_api_port = 9999           # Port used by the DHT API for external communication.
+dht_api_port = 7881           # Port used by the DHT API for external communication.
 elastic_search_port = 9200    # Port used by ElasticSearch for indexing and search.
 torrent_port = 6881           # Port used by the BitTorrent protocol for peer connections.
 stream_server_port = 3000     # Port used by the HTTP stream server to serve video data.

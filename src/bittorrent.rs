@@ -185,7 +185,7 @@ impl BitTorrent {
     ) {
         loop {
             if let Some(int_msg) = msg_rx.recv().await {
-                // info!("Received {:#?}", int_msg.payload);
+                info!("Received {:#?}", int_msg.payload);
                 peer_manager.lock().await.handle_msg(&int_msg).await;
             }
         }
@@ -196,10 +196,15 @@ impl BitTorrent {
         let piece_size = self.meta_file.get_piece_len(piece_idx);
         let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
 
-        {
-            let mut pm_guard = self.peer_manager.lock().await;
-            pm_guard.init_work_queue(piece_idx, num_blocks).await;
-            pm_guard.start_work().await;
+        self.peer_manager
+            .lock()
+            .await
+            .init_work_queue(piece_idx, num_blocks)
+            .await;
+
+        while self.peer_manager.lock().await.start_work().await.is_err() {
+            info!("Waiting for peer to unchoke us");
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
         info!("Waiting for all peers to finish work");
