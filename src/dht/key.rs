@@ -5,6 +5,7 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use log::info;
 use rand::{rngs::OsRng, Rng, RngCore};
 use serde_bytes::ByteBuf;
 
@@ -25,13 +26,12 @@ impl<'de> serde::de::Deserialize<'de> for Key {
     }
 }
 
-// serialize to string
 impl serde::ser::Serialize for Key {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::ser::Serializer,
     {
-        self.to_string().serialize(serializer)
+        ByteBuf::from(self.0.to_vec()).serialize(serializer)
     }
 }
 

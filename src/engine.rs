@@ -94,6 +94,8 @@ impl Engine {
     ) -> anyhow::Result<()> {
         let peer = ConnectionInfo::from_addr(addr);
 
+        info!("New connection from {:?}", peer);
+
         let mut res = [0u8; 68];
         socket.read_exact(&mut res).await?;
 

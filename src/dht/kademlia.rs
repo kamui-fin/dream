@@ -90,6 +90,36 @@ pub struct KrpcMessage {
     y: String,
 }
 
+#[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
+pub struct RequestBody {
+    //  serialize to hex
+    pub id: Key,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info_hash: Option<Key>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<Key>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+
+    #[serde(with = "serde_bytes", default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<Vec<u8>>,
+}
+
+impl RequestBody {
+    pub fn default(id: Key) -> Self {
+        RequestBody {
+            id,
+            info_hash: None,
+            target: None,
+            port: None,
+            token: None,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct KrpcRequest {
     #[serde(with = "serde_bytes")]
@@ -97,11 +127,11 @@ pub struct KrpcRequest {
     y: String,
 
     q: String,
-    a: HashMap<String, ByteBuf>,
+    a: RequestBody,
 }
 
 impl KrpcRequest {
-    pub fn new(request_type: &str, arguments: HashMap<String, ByteBuf>) -> Self {
+    pub fn new(request_type: KrpcRequestType, arguments: RequestBody) -> Self {
         KrpcRequest {
             t: gen_trans_id(),
             y: "q".into(),
@@ -117,6 +147,18 @@ pub enum KrpcRequestType {
     GetPeers,
     AnnouncePeer,
 }
+
+impl From<KrpcRequestType> for String {
+    fn from(request_type: KrpcRequestType) -> String {
+        match request_type {
+            KrpcRequestType::Ping => "ping".into(),
+            KrpcRequestType::FindNode => "find_node".into(),
+            KrpcRequestType::GetPeers => "get_peers".into(),
+            KrpcRequestType::AnnouncePeer => "announce_peer".into(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct KrpcSuccessResponse {
     #[serde(default)]
@@ -177,9 +219,6 @@ impl fmt::Display for KrpcRequest {
             self.y,
             self.q,
             self.a
-                .iter()
-                .map(|(k, v)| (k, Key::from(v)))
-                .collect::<HashMap<_, _>>()
         )
     }
 }
@@ -206,9 +245,6 @@ impl fmt::Debug for KrpcRequest {
             self.y,
             self.q,
             self.a
-                .iter()
-                .map(|(k, v)| (k, Key::from(v)))
-                .collect::<HashMap<_, _>>()
         )
     }
 }
@@ -370,16 +406,20 @@ impl Kademlia {
     }
 
     pub async fn send_ping(&self, addr: SocketAddrV4) -> Option<KrpcSuccessResponse> {
-        let arguments = HashMap::from([("id".to_string(), self.node_id.to_vec().into())]);
-        let request = KrpcRequest::new("ping", arguments);
-
+        let request = KrpcRequest::new(
+            KrpcRequestType::Ping,
+            RequestBody::default(self.node_id.clone()),
+        );
         self.send_request(request, addr).await
     }
 
     pub async fn send_ping_init(&self, addr: &str) -> Option<KrpcSuccessResponse> {
         info!("Sending initial ping to {addr}");
-        let arguments = HashMap::from([("id".to_string(), self.node_id.to_vec().into())]);
-        let query = KrpcRequest::new("ping", arguments);
+        let query = KrpcRequest::new(
+            KrpcRequestType::Ping,
+            RequestBody::default(self.node_id.clone()),
+        );
+        info!("{}", query.a.id.to_string());
         let query = serde_bencode::to_bytes(&query).expect("Failed to serialize query");
 
         if let Err(e) = self.socket.send_to(&query, addr).await {
@@ -409,11 +449,16 @@ impl Kademlia {
         dest: Node,
         target_node_id: Key,
     ) -> anyhow::Result<Vec<Node>> {
-        let arguments = HashMap::from([
-            ("id".to_string(), self.node_id.to_vec().into()),
-            ("target".into(), target_node_id.to_vec().into()),
-        ]);
-        let request = KrpcRequest::new("find_node", arguments);
+        let request = KrpcRequest::new(
+            KrpcRequestType::FindNode,
+            RequestBody {
+                id: self.node_id.clone(),
+                target: Some(target_node_id),
+                info_hash: None,
+                port: None,
+                token: None,
+            },
+        );
 
         let response = self.send_request(request, dest.addr).await;
         if let Some(response) = response {
@@ -424,11 +469,16 @@ impl Kademlia {
     }
 
     pub async fn send_get_peers(&self, dest: Node, info_hash: Key) -> Option<KrpcSuccessResponse> {
-        let arguments = HashMap::from([
-            ("id".to_string(), self.node_id.to_vec().into()),
-            ("info_hash".into(), info_hash.to_vec().into()),
-        ]);
-        let request = KrpcRequest::new("get_peers", arguments);
+        let request = KrpcRequest::new(
+            KrpcRequestType::GetPeers,
+            RequestBody {
+                id: self.node_id.clone(),
+                info_hash: Some(info_hash),
+                target: None,
+                port: None,
+                token: None,
+            },
+        );
         self.send_request(request, dest.addr).await
     }
 
@@ -445,16 +495,15 @@ impl Kademlia {
 
         info!("First, get_peers response = {:#?}", get_peers);
 
-        let mut arguments = HashMap::from([
-            ("id".to_string(), self.node_id.to_vec().into()),
-            ("info_hash".into(), info_hash.to_vec().into()),
-        ]);
+        let arguments = RequestBody {
+            id: self.node_id.clone(),
+            info_hash: Some(info_hash),
+            port: Some(CONFIG.network.torrent_port),
+            token: get_peers.r.token,
+            target: None,
+        };
 
-        if let Some(token) = get_peers.r.token {
-            arguments.insert("token".into(), token.into());
-        }
-
-        let request = KrpcRequest::new("announce_peer", arguments);
+        let request = KrpcRequest::new(KrpcRequestType::AnnouncePeer, arguments);
 
         self.send_request(request, dest.addr).await
     }
@@ -899,7 +948,7 @@ impl Kademlia {
 
             info!("Received query {:?} from {:#?}", query, addr);
 
-            let source_id = query.a.get("id").unwrap().into();
+            let source_id = query.a.id;
             let source_node = Node::from_addr(source_id, addr);
 
             let check_for_eviction = {
@@ -991,7 +1040,7 @@ impl Kademlia {
     }
 
     pub async fn handle_find_node(&self, query: &KrpcRequest) -> ResponseBody {
-        let target_node_id = query.a.get("target").unwrap().into();
+        let target_node_id = query.a.target.unwrap();
         info!("Received find_nodes RPC for target {:#?}", target_node_id);
         let mut k_closest_nodes = self
             .context
@@ -1010,7 +1059,7 @@ impl Kademlia {
     }
 
     async fn handle_get_peers(&self, query: &KrpcRequest, source_node: Node) -> ResponseBody {
-        let info_hash = query.a.get("info_hash").unwrap().into();
+        let info_hash = query.a.info_hash.unwrap().into();
 
         let mut body = ResponseBody {
             id: self.node_id,
@@ -1042,8 +1091,8 @@ impl Kademlia {
     }
 
     async fn handle_announce_peer(&self, query: &KrpcRequest, source_node: Node) -> ResponseBody {
-        let info_hash = query.a.get("info_hash").unwrap().into();
-        let token = query.a.get("token").unwrap();
+        let info_hash = query.a.info_hash.unwrap();
+        let token = query.a.token.clone().unwrap();
 
         let mut hasher = Sha1::new();
         hasher.update(source_node.addr.ip().octets());
