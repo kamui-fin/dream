@@ -169,6 +169,10 @@ impl PeerSession {
         info_hash: &[u8; 20],
         bitfield: BitField,
     ) -> anyhow::Result<Self> {
+        info!(
+            "Sending handshake to peer: {:#?} with bitfield {:?}",
+            peer, bitfield.0
+        );
         Self::send_handshake(&mut conn, info_hash).await?;
         let mut framed = Framed::new(conn, BitTorrentCodec);
         Self::send_bitfield(&mut framed, bitfield).await?;

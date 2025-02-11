@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use log::{error, info};
+use reqwest::Client;
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
@@ -13,6 +14,7 @@ use crate::{
     metafile::Metafile,
     msg::{DataReady, ServerMsg},
     peer::session::ConnectionInfo,
+    stream::VideoRecord,
     utils,
 };
 
@@ -36,13 +38,61 @@ impl Engine {
         }
     }
 
+    pub async fn load_from_elastic_search(&mut self) -> anyhow::Result<()> {
+        // get all records (unique info_hashes) from elastic search
+        // for each record, get the metafile and output_dir
+        // run add_torrent on each one
+
+        let url = format!(
+            "http://{}:{}/videos/_search",
+            CONFIG.network.elastic_search_ip, CONFIG.network.elastic_search_port
+        );
+        let body = serde_json::json!({
+            "query": {
+                "match_all": {}
+            },
+            "size": 10000,
+            "from": 0
+        });
+
+        let client = Client::new();
+        let response = client.post(&url).json(&body).send().await?;
+
+        let records = if response.status().is_success() {
+            let json: serde_json::Value = response.json().await?;
+            let hits = json["hits"]["hits"].as_array().unwrap();
+            let records: Vec<VideoRecord> = hits
+                .iter()
+                .map(|hit| serde_json::from_value(hit["_source"].clone()).unwrap())
+                .collect();
+
+            records
+        } else {
+            println!("Failed to perform search: {:?}", response.text().await?);
+            vec![]
+        };
+
+        info!("Initializing engine with {} records", records.len());
+
+        for record in records {
+            let meta_file_bytes = hex::decode(&record.meta_file_bytes).unwrap();
+            let meta_file = Metafile::parse_bytes(&meta_file_bytes).unwrap();
+
+            let (response_tx, response_rx) = oneshot::channel();
+            self.add_torrent(meta_file, response_tx).await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn add_torrent(
         &mut self,
         meta_file: Metafile,
-        output_dir: PathBuf,
         response_tx: oneshot::Sender<(u64, String)>,
     ) -> anyhow::Result<()> {
         let info_hash = meta_file.get_info_hash();
+
+        info!("Adding torrent with info hash: {:?}", info_hash);
 
         let mime_type = mime_guess::from_path(&meta_file.info.name)
             .first_or_octet_stream()
@@ -53,9 +103,11 @@ impl Engine {
             .unwrap();
 
         if self.info_hashes.contains(&info_hash) {
+            info!("Torrent already added");
             return Ok(());
         }
 
+        let output_dir = PathBuf::from(&CONFIG.general.output_dir);
         let output_dir = output_dir.join(hex::encode(info_hash));
         let bt = BitTorrent::from_torrent_file(meta_file, output_dir).await?;
         let bt = Arc::new(Mutex::new(bt));
@@ -136,7 +188,7 @@ impl Engine {
                     }
                     Ok(meta_file) => {
                         info!("Successfully parsed torrent file");
-                        if let Err(e) = self.add_torrent(meta_file, output_dir, response_tx).await {
+                        if let Err(e) = self.add_torrent(meta_file, response_tx).await {
                             error!("Failed to add torrent: {:?}", e);
                         }
                     }
@@ -148,9 +200,9 @@ impl Engine {
                 info_hash,
                 response_tx,
             } => {
-                // if let Some(last_stream) = &self.last_stream_handle {
-                //     last_stream.abort();
-                // }
+                if let Some(last_stream) = &self.last_stream_handle {
+                    last_stream.abort();
+                }
 
                 let idx = self
                     .info_hashes

@@ -428,11 +428,31 @@ impl PeerManager {
     }
 
     pub async fn unchoke(&mut self, conn_info: &ConnectionInfo) {
+        // update peer state
+        {
+            let peer = self.find_peer_mut(conn_info);
+            if let Some(peer) = peer {
+                peer.am_choking = false;
+            } else {
+                warn!("[UNCHOKE] Peer {:#?} not found", conn_info);
+                return;
+            }
+        }
         self.send_message(conn_info, MessageType::UnChoke.build_empty())
             .await;
     }
 
     pub async fn choke(&mut self, conn_info: &ConnectionInfo) {
+        // update peer state
+        {
+            let peer = self.find_peer_mut(conn_info);
+            if let Some(peer) = peer {
+                peer.am_choking = true;
+            } else {
+                warn!("[CHOKE] Peer {:#?} not found", conn_info);
+                return;
+            }
+        }
         self.send_message(conn_info, MessageType::Choke.build_empty())
             .await;
     }
@@ -581,6 +601,7 @@ impl PeerManager {
 
     pub async fn handle_msg(&mut self, fw_msg: &InternalMessage) {
         let conn_info = &fw_msg.origin;
+        let our_bitfield = self.piece_store.lock().await.get_status_bitfield();
         let peer = self.find_peer_mut(conn_info);
         if peer.is_none() {
             warn!("Peer {:#?} not found", &conn_info);
@@ -654,7 +675,7 @@ impl PeerManager {
                             peer.conn_info, piece_idx
                         );
 
-                        if !peer.am_choking && peer.piece_lookup.piece_exists(piece_idx) {
+                        if !peer.am_choking && our_bitfield.piece_exists(piece_idx) {
                             let byte_offset = slice_to_u32_msb(&msg.payload[4..8]);
                             let length = slice_to_u32_msb(&msg.payload[8..12]);
 

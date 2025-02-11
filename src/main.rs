@@ -17,6 +17,7 @@ async fn main() -> Result<()> {
 
     let result = tokio::spawn(async move {
         let mut engine = Engine::new(rx);
+        engine.load_from_elastic_search().await.unwrap();
         engine.start_server().await
     });
 

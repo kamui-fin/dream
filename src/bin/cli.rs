@@ -4,6 +4,8 @@ use dream::{
     config::{Cli, Commands, CONFIG},
     dht::key::{get_node_id_path, read_node_id},
     metafile::Metafile,
+    stream::VideoRecord,
+    utils::init_logger_debug,
 };
 use hex::encode;
 use log::{error, info};
@@ -15,14 +17,6 @@ use std::{
     io::{self, Write},
     path::Path,
 };
-
-#[derive(Serialize, Deserialize, Debug)]
-struct VideoRecord {
-    infohash: String,
-    title: String,
-    node_id: String,
-    meta_file_bytes: String,
-}
 
 // append to log basically
 async fn add_record(client: &Client, record: VideoRecord) -> Result<(), Box<dyn Error>> {
@@ -87,7 +81,8 @@ async fn announce_to_dht(infohash: String) {
         CONFIG.network.dht_port + 1000,
         infohash
     );
-    let response = reqwest::get(&url).await.unwrap();
+    let client = Client::new();
+    let response = client.post(url).send().await.unwrap();
 
     if response.status().is_success() {
         info!("Announced to DHT successfully: {:?}", infohash);
@@ -175,7 +170,7 @@ fn start_stream(info_hash: &str) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() {
-    // init_logger_debug();
+    init_logger_debug();
 
     let cli = Cli::parse();
     let client = Client::new();

@@ -22,6 +22,7 @@ use hyper::Result;
 use hyper::{header, server::conn::http1, service::service_fn, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use log::{error, info};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,6 +32,14 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::config::CONFIG;
 use crate::msg::ServerMsg;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct VideoRecord {
+    pub infohash: String,
+    pub title: String,
+    pub node_id: String,
+    pub meta_file_bytes: String,
+}
 
 pub async fn start_server(
     engine_tx: Arc<mpsc::Sender<ServerMsg>>,
