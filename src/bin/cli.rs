@@ -84,7 +84,8 @@ async fn announce_to_dht(infohash: String) {
     }
     let url = format!(
         "http://localhost:{}/announce/{}",
-        CONFIG.network.dht_port, infohash
+        CONFIG.network.dht_port + 1000,
+        infohash
     );
     let response = reqwest::get(&url).await.unwrap();
 
