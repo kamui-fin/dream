@@ -526,14 +526,18 @@ impl PeerManager {
         // sort peers by average speed depending on torrent state
         self.peers.sort_by_key(|p| match torrent_state {
             TorrentState::Seeder => {
-                self.stats_tracker.lock().unwrap()[&p.conn_info]
-                    .upload
-                    .total_avg_kbps
+                if let Some(stats) = self.stats_tracker.lock().unwrap().get(&p.conn_info) {
+                    stats.upload.total_avg_kbps
+                } else {
+                    0f32
+                }
             }
             TorrentState::Leecher => {
-                self.stats_tracker.lock().unwrap()[&p.conn_info]
-                    .download
-                    .total_avg_kbps
+                if let Some(stats) = self.stats_tracker.lock().unwrap().get(&p.conn_info) {
+                    stats.download.total_avg_kbps
+                } else {
+                    0f32
+                }
             }
         } as u32);
         self.peers.reverse();
