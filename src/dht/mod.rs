@@ -17,38 +17,7 @@ pub mod key;
 pub mod node;
 pub mod routing;
 
-const LEASE_DURATION: u32 = 3600; // 1 hour lease
-
-pub async fn setup_upnp() -> Result<(), Box<dyn std::error::Error>> {
-    let config = UpnpConfig {
-        address: None, // Use default network interface
-        port: 6881,
-        protocol: PortMappingProtocol::UDP,
-        duration: LEASE_DURATION,
-        comment: "Kademlia DHT".to_string(),
-    };
-
-    // Add port mapping
-    match add_ports(vec![config]).next() {
-        Some(Ok(_)) => {
-            log::info!("UPnP port forwarding established on port {}", 6881);
-
-            // Setup cleanup on exit
-            // ctrlc::set_handler(move || {
-            //     cleanup_upnp().expect("Failed to clean up UPnP mapping");
-            //     std::process::exit(0);
-            // })?;
-        }
-        Some(Err(e)) => log::warn!("UPnP setup failed: {}", e),
-        None => log::warn!("No UPnP gateway found"),
-    }
-
-    Ok(())
-}
-
 pub async fn start_dht() {
-    setup_upnp().await.unwrap();
-
     let kademlia = Arc::new(Kademlia::init().await);
 
     let bootstrap = {
@@ -70,7 +39,7 @@ pub async fn start_dht() {
             .expect("Unable to communicate with boostrap node");
         let node_id = response.extract_id();
 
-        Node::new(node_id, ip, 6881)
+        Node::new(node_id, ip, CONFIG.network.dht_port)
     };
 
     let kademlia_clone = kademlia.clone();
