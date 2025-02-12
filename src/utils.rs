@@ -1,3 +1,4 @@
+
 use std::{
     ops::Range,
     path::PathBuf,
@@ -117,9 +118,9 @@ impl Notifier {
 
 // given a (start, end) inclusive byte range, what is the Range<u32> of pieces that it covers?
 // TODO: unit test needed
-pub fn byte_to_piece_range(start: u64, end: u64, piece_len: u64) -> Range<u64> {
+pub fn byte_to_piece_range(start: u64, end: u64, piece_len: u64) -> (u64, u64) {
     let start_piece = start / piece_len;
     let end_piece = end / piece_len;
 
-    start_piece..end_piece
+    (start_piece, end_piece)
 }

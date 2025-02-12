@@ -194,8 +194,13 @@ impl BitTorrent {
     pub async fn download_piece(&mut self, piece_idx: usize) -> anyhow::Result<Vec<u8>> {
         let start = Instant::now();
         let piece_size = self.meta_file.get_piece_len(piece_idx);
-        let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
+        let mut num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
 
+        let is_last_piece = piece_idx == self.meta_file.get_num_pieces() as usize - 1;
+
+        if is_last_piece{
+            num_blocks += 1;
+        }
         self.peer_manager
             .lock()
             .await

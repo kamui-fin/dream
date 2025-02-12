@@ -213,12 +213,14 @@ impl Engine {
                 let bt = self.torrents[idx].clone();
                 self.last_stream_handle = Some(tokio::spawn(async move {
                     let mut bt = bt.lock().await;
-                    let pieces_needed =
+                    let (start_piece, end_piece) =
                         utils::byte_to_piece_range(start, end + 1, bt.meta_file.get_piece_len(0));
+
+                    let pieces_needed = start_piece..=end_piece;
 
                     info!("Pieces needed: {:?}", pieces_needed);
 
-                    let last_piece = pieces_needed.end;
+                    let last_piece = end_piece;
                     let mut curr_start = start;
                     let window_size = CONFIG.stream.buffer_num_pieces;
 

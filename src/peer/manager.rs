@@ -25,7 +25,7 @@ use crate::{
     bittorrent::TorrentState,
     config::CONFIG,
     msg::{InternalMessage, InternalMessagePayload, Message, MessageType},
-    piece::{BitField, PieceStore},
+    piece::{self, BitField, PieceStore},
     tracker::{self},
     utils::{slice_to_u32_msb, Notifier},
 };
@@ -480,13 +480,23 @@ impl PeerManager {
     async fn request_block(&mut self, entry: PipelineEntry, conn_info: &ConnectionInfo) {
         let PipelineEntry { piece_id, block_id } = entry;
         let piece_id_bytes = piece_id.to_be_bytes();
-        let block_offset_bytes = (block_id * CONFIG.torrent.block_size).to_be_bytes();
-        let block_size = CONFIG.torrent.block_size.to_be_bytes();
+        let block_offset_bytes = (block_id * CONFIG.torrent.block_size);
 
+        let piece_size = self.piece_store.lock().await.meta_file.get_piece_len(piece_id as usize);
+
+        let num_blocks = (((piece_size as u32) / CONFIG.torrent.block_size) as f32).ceil() as u32;
+
+        let current_block_size = if block_id == num_blocks && piece_id == self.piece_store.lock().await.meta_file.get_num_pieces() - 1{
+            min(CONFIG.torrent.block_size as u32, self.piece_store.lock().await.meta_file.get_piece_len(piece_id as usize) as u32 - block_offset_bytes as u32)
+        } else {
+            CONFIG.torrent.block_size as u32
+        };
+        // let block_size = CONFIG.torrent.block_size.to_be_bytes();
+        
         let mut payload = Vec::with_capacity(12);
         payload.extend_from_slice(&piece_id_bytes);
-        payload.extend_from_slice(&block_offset_bytes);
-        payload.extend_from_slice(&block_size);
+        payload.extend_from_slice(&block_offset_bytes.to_be_bytes());
+        payload.extend_from_slice(&current_block_size.to_be_bytes());
 
         info!(
             "Sent a request for block {} of piece {} to peer {:?}",

@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::utils::hash_obj;
 
+#[derive(Debug)]
 pub struct Hashes(pub Vec<[u8; 20]>);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
